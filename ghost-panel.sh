@@ -323,17 +323,31 @@ crear_usuario(){
     read -r -p "Nombre de usuario: " USU
     [[ -z "$USU" ]] && { ERR "Nombre vacio."; PAUSA; return; }
     id "$USU" >/dev/null 2>&1 && { ERR "El usuario ya existe."; PAUSA; return; }
+    
     read -r -p "Dias de validez (ej. 30): " DIAS
     read -r -p "Conexion maxima (ej. 1) [1]: " MAXC; MAXC=${MAXC:-1}
-    read -r -p "Contrasena: " CLAVE
+    
+    # Contraseña oculta + confirmación
+    read -r -s -p "Contrasena: " CLAVE
+    echo
+    read -r -s -p "Repetir contrasena: " CLAVE2
+    echo
+    [[ "$CLAVE" != "$CLAVE2" ]] && { ERR "Las contraseñas no coinciden."; PAUSA; return; }
+    [[ -z "$CLAVE" ]] && { ERR "Contrasena vacia."; PAUSA; return; }
+
     useradd -m -s /bin/bash "$USU" 2>/dev/null || { ERR "No se pudo crear."; PAUSA; return; }
     echo "$USU:$CLAVE" | chpasswd
-    [[ "$DIAS" =~ ^[0-9]+$ ]] && chage -M "$DIAS" -E "$(date -d "+${DIAS} days" +%Y-%m-%d)" "$USU"
-    # limite de sesiones SSH del usuario (usado por el limiter)
+    
+    if [[ "$DIAS" =~ ^[0-9]+$ && "$DIAS" -gt 0 ]]; then
+        chage -E "$(date -d "+${DIAS} days" +%Y-%m-%d)" "$USU"
+    fi
+    
     mkdir -p /etc/vps-limits
     echo "$MAXC" > "/etc/vps-limits/$USU"
     getent group vpsusers >/dev/null 2>&1 && usermod -aG vpsusers "$USU" 2>/dev/null
-    OK "Usuario '$USU' creado. Expira: $(chage -l "$USU" 2>/dev/null | awk -F': ' '/Password expires/{print $2}')"
+    
+    OK "Usuario '$USU' creado."
+    echo -e "Expira: $(chage -l "$USU" 2>/dev/null | awk -F': ' '/Account expires/{print $2}')"
     echo -e "IP: $(hostname -I | awk '{print $1}')  |  Puerto SSH: $(grep -i '^Port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -1 || echo 22)"
     PAUSA
 }
@@ -348,9 +362,16 @@ cambiar_clave(){
 eliminar_usuario(){
     read -r -p "Usuario a eliminar: " USU
     id "$USU" >/dev/null 2>&1 || { ERR "No existe."; PAUSA; return; }
+    read -r -p "¿Seguro que quieres eliminar a $USU? (s/n): " CONF
+    [[ "$CONF" != "s" && "$CONF" != "S" ]] && { INFO "Cancelado."; PAUSA; return; }
     read -r -p "Borrar tambien su /home? (s/n): " SN
     pkill -u "$USU" 2>/dev/null
-    if [[ "$SN" == "s" ]]; then userdel -r "$USU" 2>/dev/null; else userdel "$USU"; fi
+    if [[ "$SN" == "s" || "$SN" == "S" ]]; then 
+        userdel -r "$USU" 2>/dev/null
+    else 
+        userdel "$USU" 2>/dev/null
+    fi
+    rm -f "/etc/vps-limits/$USU" "/etc/vps-trafico/$USU" 2>/dev/null
     OK "Usuario '$USU' eliminado."
     PAUSA
 }
@@ -367,8 +388,19 @@ renovar_usuario(){
     read -r -p "Usuario: " USU
     id "$USU" >/dev/null 2>&1 || { ERR "No existe."; PAUSA; return; }
     read -r -p "Dias a agregar: " DIAS
-    chage -M "$DIAS" -E "$(date -d "+${DIAS} days" +%Y-%m-%d)" "$USU"
-    OK "'$USU' renovado por ${DIAS} dias (expira: $(chage -l "$USU" | awk -F': ' '/Password expires/{print $2}'))."
+    [[ "$DIAS" =~ ^[0-9]+$ && "$DIAS" -gt 0 ]] || { ERR "Dias invalidos."; PAUSA; return; }
+
+    local FECHA_ACTUAL NUEVA
+    FECHA_ACTUAL=$(chage -l "$USU" 2>/dev/null | awk -F': ' '/Account expires/{print $2}')
+    
+    if [[ "$FECHA_ACTUAL" == "never" || -z "$FECHA_ACTUAL" ]]; then
+        NUEVA=$(date -d "+${DIAS} days" +%Y-%m-%d)
+    else
+        NUEVA=$(date -d "$FECHA_ACTUAL +${DIAS} days" +%Y-%m-%d 2>/dev/null) || NUEVA=$(date -d "+${DIAS} days" +%Y-%m-%d)
+    fi
+    
+    chage -E "$NUEVA" "$USU"
+    OK "'$USU' renovado. Nueva fecha de expiracion: $NUEVA"
     PAUSA
 }
 
@@ -438,9 +470,9 @@ update_sistema(){
 backup_basico(){
     DIR="/root/backups"; mkdir -p "$DIR"
     FILE="$DIR/backup-$(date +%F_%H%M).tar.gz"
-    INFO "Creando backup de /etc, /home y lista de paquetes..."
+    INFO "Creando backup de /etc, /home, xray y lista de paquetes..."
     dpkg --get-selections > /root/paquetes.txt 2>/dev/null
-    tar czf "$FILE" /etc /root/paquetes.txt --exclude=/etc/ssl/private 2>/dev/null
+    tar czf "$FILE" /etc /home /root/paquetes.txt /usr/local/etc/xray /etc/openvpn 2>/dev/null --exclude=/etc/ssl/private
     OK "Backup creado: $FILE ($(du -h "$FILE" | cut -f1))"
     PAUSA
 }
@@ -502,7 +534,7 @@ instalar_webmin(){
         ERR "Webmin quedo detenido. Proba con la opcion 2 (Estado / reiniciar) del menu."
     fi
     echo
-    local IP; IP=$(curl -4 -s --max-time 3 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
+    local IP; IP=$(hostname -I | awk '{print $1}')
     OK "Webmin instalado."
     echo -e " Acceso  : ${VERDE}https://${IP}:10000${NC}"
     echo -e " Usuario : ${VERDE}root${NC} (o cualquier usuario con sudo)"
@@ -1153,6 +1185,17 @@ trafico_activar(){
     iptables -C OUTPUT -j VPS-TRAFFIC 2>/dev/null || iptables -A OUTPUT -j VPS-TRAFFIC 2>/dev/null
     [[ $N -gt 0 ]] && OK "Contadores activos para $N usuarios (se suman usuarios nuevos al re-activar)." \
                    || ERR "No se pudieron crear reglas (iptables fallo?)."
+    
+    # Guardar reglas para que sobrevivan al reinicio
+    mkdir -p /etc/iptables
+    iptables-save > /etc/iptables/rules.v4 2>/dev/null
+    if [[ ! -f /etc/network/if-pre-up.d/iptables ]]; then
+        cat > /etc/network/if-pre-up.d/iptables << 'IPEOF'
+#!/bin/sh
+[ -f /etc/iptables/rules.v4 ] && iptables-restore < /etc/iptables/rules.v4
+IPEOF
+        chmod +x /etc/network/if-pre-up.d/iptables
+    fi
     PAUSA
 }
 
