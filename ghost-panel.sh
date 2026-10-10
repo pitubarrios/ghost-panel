@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  GHOST PANEL v3.0.2 by Jorge Barrios
+#  GHOST PANEL v3.1.0 by Jorge Barrios
 #  Administracion profesional de VPS (Ubuntu / Debian)
 #  Uso:  sudo bash ghost-panel.sh  |  ghostpanel
 # ============================================================
@@ -8,19 +8,33 @@
 set -uo pipefail
 IFS=$'\n\t'
 
-# ---------- COLORES ----------
-R='\033[1;31m'; G='\033[1;32m'; Y='\033[1;33m'
-B='\033[1;34m'; C='\033[1;36m'; W='\033[1;37m'
-M='\033[1;35m'
-DIM='\033[2m'; BOLD='\033[1m'; NC='\033[0m'
+# ---------- PALETA ----------
+RS='\033[0m'                    # reset
+BD='\033[1m'                    # bold
+DM='\033[2m'                    # dim
+# Colores
+CR='\033[1;31m'                 # red
+CG='\033[1;32m'                 # green
+CY='\033[1;33m'                 # yellow
+CB='\033[1;34m'                 # blue
+CM='\033[1;35m'                 # magenta
+CC='\033[1;36m'                 # cyan
+CW='\033[1;37m'                 # white
+# 256-color (mas suave)
+C_DIM='\033[38;5;240m'
+C_LBL='\033[38;5;245m'          # gris para labels
+C_VAL='\033[38;5;255m'          # blanco suave para valores
+C_ACC='\033[38;5;81m'           # cyan claro (acentos)
+C_OK='\033[38;5;77m'            # verde suave
+C_WARN='\033[38;5;214m'         # naranja
+C_ERR='\033[38;5;203m'          # rojo suave
+C_FRM='\033[38;5;61m'           # azul oscuro para marco
+C_FRM2='\033[38;5;99m'          # violeta para acentos de marco
 
 # ---------- CONFIG ----------
 CONF_FILE='/etc/ghost-panel.conf'
 if [[ ! -f "$CONF_FILE" ]]; then
     cat > "$CONF_FILE" <<'CONFEOF'
-# ============================================================
-#  GHOST PANEL - Configuracion
-# ============================================================
 LICENSE_URL=https://vps-licencias.jorgebarriosmpya.workers.dev
 REPO_RAW=https://raw.githubusercontent.com/pitubarrios/vps-manager/refs/heads/main/ghost-panel.sh
 PREFIJO_KEY=VPSJB1
@@ -36,7 +50,6 @@ LICENSE_URL="${LICENSE_URL:-}"
 REPO_RAW="${REPO_RAW:-}"
 PREFIJO_KEY="${PREFIJO_KEY:-VPSJB1}"
 PANEL_COMPACT="${PANEL_COMPACT:-0}"
-PANEL_THEME="${PANEL_THEME:-ghost}"
 
 KEY_FILE='/etc/vps-manager.key'
 PERM_FILE='/etc/vps-license.permanent'
@@ -55,13 +68,6 @@ debian admin ec2-user cloud-user vpsmgr ghostpanel dnstt
 PROTEOF
     chmod 644 "$PROTECTED_FILE"
 fi
-
-case "$PANEL_THEME" in
-    matrix)   ACC="$G"; SEC="$G"; ;;
-    dracula)  ACC="$C"; SEC="$M"; ;;
-    minimal)  ACC="$W"; SEC="$W"; ;;
-    *)        ACC="$C"; SEC="$B"; ;;
-esac
 
 # ---------- TRAP ----------
 TMP_FILES=()
@@ -84,12 +90,12 @@ vps_log(){
     printf '%s [%s] %s\n' "$(date '+%F %T')" "$NIV" "$*" >> "$LOG_PANEL" 2>/dev/null || true
 }
 
-OK(){   printf '%b[OK]%b    %s\n' "$G" "$NC" "$1"; }
-ERR(){  printf '%b[ERROR]%b %s\n' "$R" "$NC" "$1" >&2; }
-INFO(){ printf '%b[INFO]%b  %s\n' "$C" "$NC" "$1"; }
-WARN(){ printf '%b[AVISO]%b %s\n' "$Y" "$NC" "$1"; }
+OK(){   printf '%b▸ OK%b   %s\n' "$C_OK" "$RS" "$1"; }
+ERR(){  printf '%b▸ ERR%b  %s\n' "$C_ERR" "$RS" "$1" >&2; }
+INFO(){ printf '%b▸ INFO%b %s\n' "$C_ACC" "$RS" "$1"; }
+WARN(){ printf '%b▸ WARN%b %s\n' "$C_WARN" "$RS" "$1"; }
 
-PAUSA(){ printf '\n%b%s%b\n' "$Y" "Presiona ENTER para continuar..." "$NC"; read -r _; }
+PAUSA(){ printf '\n%b  Presiona ENTER para continuar...%b\n' "$C_LBL" "$RS"; read -r _; }
 
 pkill_user(){
     local u="${1:-}"
@@ -108,7 +114,7 @@ machine_hash(){
 }
 
 require_root(){
-    [[ $EUID -ne 0 ]] && { printf '%bEjecuta como root o con sudo.%b\n' "$R" "$NC"; exit 1; }
+    [[ $EUID -ne 0 ]] && { printf '%bNecesita root.%b\n' "$C_ERR" "$RS"; exit 1; }
 }
 
 get_ipv4(){
@@ -127,8 +133,7 @@ check_deps(){
         missing+=("iptables/nft")
     fi
     if [[ ${#missing[@]} -gt 0 ]]; then
-        printf '%bFaltan dependencias:%b %s\n' "$R" "$NC" "${missing[*]}"
-        printf 'Instala con:  apt update && apt install -y %s\n' "${missing[*]}"
+        printf '%bFaltan dependencias:%b %s\n' "$C_ERR" "$RS" "${missing[*]}"
         return 1
     fi
     return 0
@@ -143,75 +148,101 @@ fw_backend(){
 }
 
 # ============================================================
-#  UI FRAMEWORK v3.0.2
+#  UI FRAMEWORK v3.1
 # ============================================================
 BC=()
-UIW=62                          # ancho total del marco
-UITXT=58                        # ancho visible dentro del marco
-UICOL=29                        # ancho por columna (modo 2-col)
+W=62
 
 push_crumb(){ BC+=("$1"); }
 pop_crumb(){  [[ ${#BC[@]} -gt 0 ]] && unset 'BC[-1]'; }
-crumbs(){     local s=""; local i; for i in "${BC[@]:-}"; do s+=" $i ›"; done; printf '%s' "${s# }"; }
+crumbs(){
+    local s="" i
+    for i in "${BC[@]:-}"; do s+=" $i ›"; done
+    printf '%s' "${s# }"
+}
 
 clear_if_tty(){ [[ -t 1 ]] && clear; }
 
-hline_str(){ local n=${1:-60}; local s=""; local i; for ((i=0;i<n;i++)); do s+="─"; done; printf '%s' "$s"; }
-
-ui_top(){ printf '%b╭%s╮%b\n' "$SEC" "$(hline_str 60)" "$NC"; }
-ui_mid(){ printf '%b├%s┤%b\n' "$SEC" "$(hline_str 60)" "$NC"; }
-ui_bot(){ printf '%b╰%s╯%b\n' "$SEC" "$(hline_str 60)" "$NC"; }
-
-# Imprime una fila del marco con padding automático.
-# Cuenta caracteres visibles saltando secuencias ANSI.
-ui_row(){
-    local raw="$1" out="" vis=0 esc
-    raw="${raw//\\033/$'\x1b'}"
-    while [[ -n "$raw" ]]; do
-        if [[ "$raw" == $'\x1b['* ]]; then
-            esc="${raw%%m*}m"
-            out+="$esc"
-            raw="${raw#"$esc"}"
-            continue
+# Cuenta el ancho visual de una cadena (ignora \033[Xm, cuenta emojis como 2)
+vis_width(){
+    local s="$1" w=0 i c
+    # Sacamos los ANSI escapes primero
+    s=$(printf '%s' "$s" | sed 's/\x1b\[[0-9;]*m//g')
+    local len=${#s}
+    for ((i=0; i<len; i++)); do
+        c="${s:i:1}"
+        # Codepoint del caracter
+        local cp; cp=$(printf '%d' "'$c" 2>/dev/null || echo 0)
+        if (( cp >= 0x1F000 && cp <= 0x1FFFF )); then
+            w=$((w+2))   # Emoji ancho 2
+        elif (( cp >= 0x2600 && cp <= 0x27BF )); then
+            w=$((w+1))   # Simbolos ancho 1
+        else
+            w=$((w+1))
         fi
-        [[ $vis -ge $UITXT ]] && break
-        out+="${raw:0:1}"
-        vis=$((vis+1))
-        raw="${raw:1}"
     done
-    printf '%b│%b %s%*s %b│%b\n' "$SEC" "$NC" "$out" "$((UITXT - vis))" "" "$SEC" "$NC"
+    printf '%d' "$w"
 }
 
-# Fila de dos columnas
+# Padding por ancho visual
+pad_vis(){
+    local s="$1" target="$2"
+    local vw; vw=$(vis_width "$s")
+    local p=$((target - vw))
+    ((p<0)) && p=0
+    printf '%s%*s' "$s" "$p" ""
+}
+
+ui_line(){ local n=${1:-60} c=${2:-$C_FRM}; local s=""; local i; for ((i=0;i<n;i++)); do s+="─"; done; printf '%b%s%b' "$c" "$s" "$RS"; }
+ui_top(){ printf '%b╭%s╮%b\n' "$C_FRM" "$(ui_line 60 $C_FRM)" "$RS"; }
+ui_mid(){ printf '%b├%s┤%b\n' "$C_FRM" "$(ui_line 60 $C_FRM)" "$RS"; }
+ui_bot(){ printf '%b╰%s╯%b\n' "$C_FRM" "$(ui_line 60 $C_FRM)" "$RS"; }
+
+# Fila del marco — contiene 58 chars visibles
+ui_row(){
+    local raw="$1"
+    printf '%b│%b %s %b│%b\n' "$C_FRM" "$RS" "$(pad_vis "$raw" 58)" "$C_FRM" "$RS"
+}
+
+# Item de menú (2 columnas)
 opt(){
     if [[ $# -ge 4 ]]; then
         local c1 c2
-        c1=$(printf '%b[%s]%b %-24s' "$ACC" "$1" "$NC" "$2")
-        c2=$(printf '%b[%s]%b %s'    "$ACC" "$3" "$NC" "$4")
-        ui_row "${c1}${c2}"
+        c1=$(printf '%b[%b%s%b]%b %s' "$C_LBL" "$C_ACC" "$1" "$C_LBL" "$RS" "$2")
+        c2=$(printf '%b[%b%s%b]%b %s' "$C_LBL" "$C_ACC" "$3" "$C_LBL" "$RS" "$4")
+        # Padding columnas: col1 = 27 vis, col2 resto
+        ui_row "$(pad_vis "$c1" 27)$c2"
     else
-        ui_row "$(printf '%b[%s]%b %s' "$ACC" "$1" "$NC" "$2")"
+        ui_row "$(printf '%b[%b%s%b]%b %s' "$C_LBL" "$C_ACC" "$1" "$C_LBL" "$RS" "$2")"
     fi
 }
 
-# Abre submenú con marco + título en la misma línea superior
-subtop(){
-    local title="$1"
-    local n=${#title}
-    local fill=$(( 57 - n ))
-    [[ $fill -lt 1 ]] && fill=1
-    printf '\n'
-    printf '%b╭─ %s %s╮%b\n' "$SEC" "$title" "$(hline_str $fill)" "$NC"
+# Fila centrada dentro del marco
+ui_center(){
+    local txt="$1"
+    local vw; vw=$(vis_width "$txt")
+    local p=$(( (58 - vw) / 2 ))
+    ((p<0)) && p=0
+    printf '%b│%b %*s%s%*s %b│%b\n' "$C_FRM" "$RS" "$p" "" "$txt" "$((58 - p - vw))" "" "$C_FRM" "$RS"
 }
 
-botline(){ printf '%b╰%s╯%b\n\n' "$SEC" "$(hline_str 60)" "$NC"; }
+subtop(){
+    local title="$1"
+    local fill=$(( 56 - ${#title} - 2 ))
+    ((fill<1)) && fill=1
+    printf '\n%b╭─%b %b%s%b %b%s╮%b\n' \
+        "$C_FRM" "$RS" "$C_FRM2$BD" "$title" "$RS" \
+        "$C_FRM" "$(ui_line $fill $C_FRM)" "$RS"
+}
 
-prompt(){ printf '   %b▸%b %s > ' "$ACC" "$NC" "${1:-Opcion}"; }
+botline(){ printf '%b╰%s╯%b\n\n' "$C_FRM" "$(ui_line 60 $C_FRM)" "$RS"; }
 
-# ---------- HEADER PRINCIPAL ----------
+prompt(){ printf '  %b▸%b %b%s%b %b>%b ' "$C_FRM2" "$RS" "$C_LBL" "${1:-Opcion}" "$RS" "$C_FRM2" "$RS"; }
+
+# ---------- HEADER ----------
 header(){
     clear_if_tty
-    local ram_t ram_u cpu disk online lic="" ipv4 osver
+    local ram_t ram_u cpu disk online lic="" ipv4 osver kern uptime
     ram_t=$(free -m | awk '/Mem:/{print $2}')
     ram_u=$(free -m | awk '/Mem:/{printf "%d%%", $3*100/$2}')
     cpu=$(top -bn1 2>/dev/null | awk '/%Cpu/{printf "%.1f%%", 100-$8}' || echo "n/a")
@@ -219,6 +250,8 @@ header(){
     online=$(who 2>/dev/null | wc -l)
     ipv4=$(get_ipv4)
     osver=$(lsb_release -rs 2>/dev/null || echo '?')
+    kern=$(uname -r | cut -d- -f1)
+    uptime=$(uptime -p 2>/dev/null | sed 's/^up //' || echo "-")
 
     if [[ "${LICENSE_EXP:-0}" == "0" ]]; then
         lic="permanente"
@@ -229,19 +262,60 @@ header(){
         lic="-"
     fi
 
+    # Color por carga
+    local ram_c="$C_OK"
+    [[ "${ram_u%\%}" -gt 70 ]] && ram_c="$C_WARN"
+    [[ "${ram_u%\%}" -gt 90 ]] && ram_c="$C_ERR"
+    local disk_c="$C_OK"
+    [[ "${disk%\%}" -gt 70 ]] && disk_c="$C_WARN"
+    [[ "${disk%\%}" -gt 90 ]] && disk_c="$C_ERR"
+
     printf '\n'
     ui_top
-    ui_row "$(printf '%bGHOST PANEL%b  %bv3.0.2%b' "$G" "$NC" "$DIM" "$NC")"
+    # Título
+    local title
+    title=$(printf '%b◆%b %bGHOST PANEL%b  %b·%b  %bv3.1.0%b' "$C_FRM2" "$RS" "$BD$CW" "$RS" "$C_LBL" "$RS" "$C_DIM" "$RS")
+    ui_row "$title"
     ui_mid
-    ui_row "$(printf 'IP      %-21s Fecha    %s' "$ipv4" "$(date '+%d/%m/%Y %H:%M')")"
-    ui_row "$(printf 'Host    %-21s Ubuntu   %s' "$(hostname)" "$osver")"
-    ui_row "$(printf 'CPU     %-21s RAM      %s of %sM' "$cpu" "$ram_u" "$ram_t")"
-    ui_row "$(printf 'Disk    %-21s Online   %b%s%b' "$disk" "$G" "$online" "$NC")"
-    ui_row "$(printf 'User    %-21s Lic      %b%s%b' "$(whoami)" "$G" "$lic" "$NC")"
+    # Sistema
+    ui_row "$(printf '%bSISTEMA%b' "$C_LBL" "$RS")"
+    ui_row "$(printf '  %bOS%b   %s %s %b·%b kernel %s' "$C_LBL" "$RS" "$(lsb_release -is 2>/dev/null || echo Linux)" "$osver" "$C_LBL" "$RS" "$kern")"
+    ui_row "$(printf '  %bUptime%b   %s' "$C_LBL" "$RS" "$uptime")"
+    ui_mid
+    # Recursos (con barra visual)
+    ui_row "$(printf '%bRECURSOS%b' "$C_LBL" "$RS")"
+    local ram_bar; ram_bar=$(barra "${ram_u%\%}" 20 "$ram_c")
+    local cpu_bar; cpu_bar=$(barra "${cpu%\%}" 20 "$C_OK")
+    local disk_bar; disk_bar=$(barra "${disk%\%}" 20 "$disk_c")
+    ui_row "$(printf '  %bRAM%b    %s  %s  %b%s%b/%sM' "$C_LBL" "$RS" "$ram_bar" "$ram_u" "$C_DIM" "$(( ram_t - $(free -m | awk '/Mem:/{print $7}') ))" "$ram_t" "$RS")"
+    ui_row "$(printf '  %bCPU%b    %s  %s' "$C_LBL" "$RS" "$cpu_bar" "$cpu")"
+    ui_row "$(printf '  %bDisco%b  %s  %s' "$C_LBL" "$RS" "$disk_bar" "$disk")"
+    ui_mid
+    # Red / sesion
+    ui_row "$(printf '%bSESION%b' "$C_LBL" "$RS")"
+    ui_row "$(printf '  %bIP%b       %s' "$C_LBL" "$RS" "$(printf '%b%s%b' "$C_ACC" "$ipv4" "$RS")")"
+    ui_row "$(printf '  %bHost%b     %s   %bOnline%b  %b%s%b' "$C_LBL" "$RS" "$(hostname)" "$C_LBL" "$RS" "$C_OK" "$online" "$RS")"
+    ui_row "$(printf '  %bUsuario%b  %s   %bLic%b  %b%s%b' "$C_LBL" "$RS" "$(whoami)" "$C_LBL" "$RS" "$C_OK" "$lic" "$RS")"
     ui_bot
+
     if [[ ${#BC[@]} -gt 0 ]]; then
-        printf '  %b%s%b\n' "$DIM" "$(crumbs)" "$NC"
+        printf '  %b%s%b\n' "$C_DIM" "$(crumbs)" "$RS"
     fi
+    printf '\n'
+}
+
+# Barra visual tipo [████░░░░░░]  20 celdas
+barra(){
+    local pct="$1" ancho="${2:-20}" color="${3:-$C_OK}"
+    ((pct<0)) && pct=0
+    ((pct>100)) && pct=100
+    local llenos=$(( pct * ancho / 100 ))
+    local vacios=$(( ancho - llenos ))
+    local s=""
+    local i
+    for ((i=0;i<llenos;i++)); do s+="█"; done
+    for ((i=0;i<vacios;i++)); do s+="░"; done
+    printf '%b%s%b' "$color" "$s" "$RS"
 }
 
 # ============================================================
@@ -276,17 +350,22 @@ apply_license_times(){
 
 gate_licencia(){
     local intentos=0 k rc perm_hash=""
-    printf '%b╭─ LICENCIA %s╮%b\n' "$SEC" "$(hline_str 48)" "$NC"
-    ui_row "ID del servidor: $(machine_hash)"
+    clear_if_tty
+    printf '\n'
+    ui_top
+    ui_center "$(printf '%b◆%b %bLICENCIA%b' "$C_FRM2" "$RS" "$BD$CW" "$RS")"
+    ui_mid
+    ui_row "$(printf '  %bServidor ID%b  %s' "$C_LBL" "$RS" "$(printf '%b%s%b' "$C_ACC" "$(machine_hash)" "$RS")")"
     if [[ -z "$LICENSE_URL" ]]; then
-        ui_row "$(printf '%bFalta configurar LICENSE_URL en %s%b' "$R" "$CONF_FILE" "$NC")"
+        ui_row "$(printf '  %bConfigurar LICENSE_URL en:%b' "$C_ERR" "$RS")"
+        ui_row "  $CONF_FILE"
         ui_bot
         exit 1
     fi
     ui_bot
+    INFO "Validando licencia online..."
 
     [[ -f "$PERM_FILE" ]] && perm_hash=$(cat "$PERM_FILE" 2>/dev/null)
-    INFO "Validando licencia online..."
 
     if [[ -f "$KEY_FILE" ]]; then
         k=$(cat "$KEY_FILE" 2>/dev/null)
@@ -317,7 +396,7 @@ gate_licencia(){
     fi
 
     while [[ $intentos -lt 3 ]]; do
-        printf '   %bINGRESE SU KEY%b > ' "$W" "$NC"
+        printf '  %bINGRESE SU KEY%b %b>%b ' "$C_WARN" "$RS" "$C_FRM2" "$RS"
         read -r k
         consultar_licencia "$k"; rc=$?
         if [[ $rc -eq 0 ]]; then
@@ -491,14 +570,14 @@ xray_sync_all(){
 crear_usuario(){
     echo; INFO "Crear usuario SSH"
     local usu dias maxc clave
-    read -r -p "   Nombre: " usu
+    read -r -p "  Nombre: " usu
     [[ -z "$usu" ]] && { ERR "Vacio."; PAUSA; return; }
     [[ "$usu" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || { ERR "Nombre invalido."; PAUSA; return; }
     id "$usu" >/dev/null 2>&1 && { ERR "Ya existe."; PAUSA; return; }
     usuario_protegido "$usu" && { ERR "Nombre reservado."; PAUSA; return; }
-    read -r -p "   Dias de validez (30): " dias; dias=${dias:-30}
-    read -r -p "   Max conexiones (1): " maxc; maxc=${maxc:-1}
-    read -r -p "   Contrasena: " clave
+    read -r -p "  Dias de validez (30): " dias; dias=${dias:-30}
+    read -r -p "  Max conexiones (1): " maxc; maxc=${maxc:-1}
+    read -r -p "  Contrasena: " clave
     [[ -z "$clave" ]] && { ERR "Contrasena vacia."; PAUSA; return; }
     useradd -m -s /bin/bash "$usu" 2>/dev/null || { ERR "No se pudo crear."; PAUSA; return; }
     printf '%s:%s\n' "$usu" "$clave" | chpasswd
@@ -509,7 +588,7 @@ crear_usuario(){
     usermod -aG vpsusers "$usu" 2>/dev/null || true
     xray_usuario add "$usu" 2>/dev/null || true
     OK "Usuario '$usu' creado."
-    printf '   IP: %s  Puerto SSH: %s\n' \
+    printf '  IP: %s   Puerto SSH: %s\n' \
         "$(get_ipv4)" \
         "$(grep -i '^Port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -1 || echo 22)"
     vps_log INFO "creado usuario: $usu (dias=$dias max=$maxc)"
@@ -518,36 +597,34 @@ crear_usuario(){
 
 listar_usuarios(){
     echo
-    printf '   %b%-16s %-22s %-8s %s%b\n' "$BOLD" "USUARIO" "EXPIRA" "ESTADO" "HOME" "$NC"
-    hline
+    printf '  %b%-16s %-22s %-8s %s%b\n' "$BD" "USUARIO" "EXPIRA" "ESTADO" "HOME" "$RS"
+    printf '  %b%s%b\n' "$C_DIM" "$(ui_line 58 $C_DIM)" "$RS"
     local u exp est home
     while IFS= read -r u; do
         exp=$(chage -l "$u" 2>/dev/null | awk -F': ' '/Password expires/{print $2}')
         est=$(passwd -S "$u" 2>/dev/null | awk '{print $2}')
         home=$(user_home "$u")
         if [[ "$est" == "P" ]]; then
-            printf '   %-16s %-22s %b%-8s%b %s\n' "$u" "$exp" "$G" "OK" "$NC" "$home"
+            printf '  %-16s %-22s %b%-8s%b %s\n' "$u" "$exp" "$C_OK" "● OK" "$RS" "$home"
         else
-            printf '   %-16s %-22s %b%-8s%b %s\n' "$u" "$exp" "$R" "LOCK" "$NC" "$home"
+            printf '  %-16s %-22s %b%-8s%b %s\n' "$u" "$exp" "$C_ERR" "○ LOCK" "$RS" "$home"
         fi
     done < <(awk -F: '$3>=1000 && $1!="nobody"{print $1}' /etc/passwd)
     PAUSA
 }
 
-hline(){ printf '%b%s%b\n' "$DIM" "$(hline_str 62)" "$NC"; }
-
 cambiar_clave(){
-    local u; read -r -p "   Usuario: " u
+    local u; read -r -p "  Usuario: " u
     id "$u" >/dev/null 2>&1 || { ERR "No existe."; PAUSA; return; }
     passwd "$u" && OK "Clave actualizada." || ERR "Fallo."
     PAUSA
 }
 
 eliminar_usuario(){
-    local u sn; read -r -p "   Usuario a eliminar: " u
+    local u sn; read -r -p "  Usuario a eliminar: " u
     id "$u" >/dev/null 2>&1 || { ERR "No existe."; PAUSA; return; }
     usuario_protegido "$u" && { ERR "Usuario protegido."; PAUSA; return; }
-    read -r -p "   Borrar /home tambien? (s/N): " sn
+    read -r -p "  Borrar /home tambien? (s/N): " sn
     pkill_user "$u"
     xray_usuario del "$u" 2>/dev/null || true
     if [[ "${sn,,}" == "s" ]]; then userdel -r "$u" 2>/dev/null; else userdel "$u" 2>/dev/null; fi
@@ -558,7 +635,7 @@ eliminar_usuario(){
 }
 
 bloquear_usuario(){
-    local u; read -r -p "   Usuario: " u
+    local u; read -r -p "  Usuario: " u
     id "$u" >/dev/null 2>&1 || { ERR "No existe."; PAUSA; return; }
     if passwd -S "$u" 2>/dev/null | grep -q ' L '; then
         usermod -U "$u"; OK "'$u' DESBLOQUEADO."
@@ -569,9 +646,9 @@ bloquear_usuario(){
 }
 
 renovar_usuario(){
-    local u d; read -r -p "   Usuario: " u
+    local u d; read -r -p "  Usuario: " u
     id "$u" >/dev/null 2>&1 || { ERR "No existe."; PAUSA; return; }
-    read -r -p "   Dias a agregar: " d
+    read -r -p "  Dias a agregar: " d
     [[ "$d" =~ ^[0-9]+$ ]] || { ERR "Invalido."; PAUSA; return; }
     chage -M "$d" -E "$(date -d "+${d} days" +%Y-%m-%d)" "$u"
     OK "'$u' renovado ${d} dias."
@@ -583,14 +660,14 @@ cambiar_limite(){
     echo; INFO "Usuarios con limite:"
     if compgen -G "$LIMITS_DIR/*" >/dev/null; then
         for f in "$LIMITS_DIR"/*; do
-            printf '   %-16s max: %s\n' "$(basename "$f")" "$(cat "$f")"
+            printf '  %-16s max: %s\n' "$(basename "$f")" "$(cat "$f")"
         done
     else
-        echo "   (ninguno)"
+        echo "  (ninguno)"
     fi
-    read -r -p "   Usuario: " u
+    read -r -p "  Usuario: " u
     [[ -f "$LIMITS_DIR/$u" ]] || { ERR "Sin limite asignado."; PAUSA; return; }
-    read -r -p "   Nuevo max: " m
+    read -r -p "  Nuevo max: " m
     [[ "$m" =~ ^[0-9]+$ ]] || { ERR "Invalido."; PAUSA; return; }
     printf '%s\n' "$m" > "$LIMITS_DIR/$u"
     OK "Limite de '$u' = $m."
@@ -600,25 +677,25 @@ cambiar_limite(){
 conexiones_online(){
     echo
     INFO "Conexiones activas"
-    who 2>/dev/null || echo "   (sin sesiones)"
-    printf '\n   Procesos sshd: %s\n' "$(pgrep -c sshd 2>/dev/null || echo 0)"
+    who 2>/dev/null || echo "  (sin sesiones)"
+    printf '\n  Procesos sshd: %s\n' "$(pgrep -c sshd 2>/dev/null || echo 0)"
     PAUSA
 }
 
 matar_conexion(){
     local u
     who 2>/dev/null
-    read -r -p "   Usuario a desconectar: " u
+    read -r -p "  Usuario a desconectar: " u
     if pkill_user "$u"; then OK "Sesiones cerradas."; else ERR "Sin sesiones."; fi
     PAUSA
 }
 
 crear_test_ssh(){
     local base usu maxc clave
-    read -r -p "   Nombre base (prefijo test-): " base
+    read -r -p "  Nombre base (prefijo test-): " base
     usu="test-$(printf '%s' "$base" | tr -cd 'a-zA-Z0-9' | tr 'A-Z' 'a-z' | cut -c1-18)"
     id "$usu" >/dev/null 2>&1 && { ERR "Ya existe."; PAUSA; return; }
-    read -r -p "   Max conexiones (1): " maxc; maxc=${maxc:-1}
+    read -r -p "  Max conexiones (1): " maxc; maxc=${maxc:-1}
     clave=$(tr -dc 'a-zA-Z0-9' </dev/urandom 2>/dev/null | head -c 10)
     [[ -z "$clave" ]] && clave="test123456"
     useradd -m -s /bin/bash "$usu" 2>/dev/null || { ERR "No se pudo crear."; PAUSA; return; }
@@ -663,11 +740,10 @@ menu_usuarios(){
         opt 4 "Bloquear / Desbloquear"   10 "Conexiones online"
         opt 5 "Renovar usuario"          11 "Desconectar usuario"
         opt 6 "Cambiar limite sesiones"
-        printf '\n'
+        ui_row ""
         opt 0 "Volver"
         botline
-        prompt
-        read -r op
+        prompt; read -r op
         case "$op" in
             1) crear_usuario ;;  2) listar_usuarios ;; 3) cambiar_clave ;;
             4) bloquear_usuario ;; 5) renovar_usuario ;; 6) cambiar_limite ;;
@@ -739,7 +815,7 @@ limiter_quitar(){
 }
 
 cambiar_puerto_ssh(){
-    local p; read -r -p "   Puerto SSH nuevo: " p
+    local p; read -r -p "  Puerto SSH nuevo: " p
     [[ "$p" =~ ^[0-9]+$ && "$p" -ge 1 && "$p" -le 65535 ]] || { ERR "Invalido."; PAUSA; return; }
     sed -i "s/^#\?Port .*/Port $p/" /etc/ssh/sshd_config
     grep -q "^Port $p" /etc/ssh/sshd_config || echo "Port $p" >> /etc/ssh/sshd_config
@@ -756,20 +832,20 @@ ver_puertos(){
     if command -v ufw >/dev/null 2>&1; then
         ufw status verbose 2>/dev/null | head -20
     else
-        echo "   UFW no instalado."
+        echo "  UFW no instalado."
     fi
     PAUSA
 }
 
 abrir_puerto(){
     local p proto sn
-    read -r -p "   Puerto: " p
+    read -r -p "  Puerto: " p
     [[ "$p" =~ ^[0-9]+$ && "$p" -ge 1 && "$p" -le 65535 ]] || { ERR "Invalido."; PAUSA; return; }
-    read -r -p "   Protocolo (tcp/udp) [tcp]: " proto; proto=${proto:-tcp}
+    read -r -p "  Protocolo (tcp/udp) [tcp]: " proto; proto=${proto:-tcp}
     [[ "$proto" != "tcp" && "$proto" != "udp" ]] && { ERR "Invalido."; PAUSA; return; }
     command -v ufw >/dev/null 2>&1 || { apt update -y >/dev/null 2>&1; apt install -y ufw >/dev/null 2>&1; }
     if ! ufw status 2>/dev/null | grep -q "Status: active"; then
-        read -r -p "   UFW inactivo. Activar? (s/N): " sn
+        read -r -p "  UFW inactivo. Activar? (s/N): " sn
         [[ "${sn,,}" == "s" ]] && { ufw --force enable; INFO "UFW activado."; }
     fi
     ufw allow "$p/$proto" >/dev/null 2>&1 && OK "Puerto $p/$proto abierto."
@@ -785,7 +861,7 @@ menu_seguridad(){
         opt 2 "Activar limiter"          6  "Abrir puerto"
         opt 3 "Quitar limiter"           7  "Banner SSH / HTTP Custom"
         opt 4 "Cambiar puerto SSH"
-        printf '\n'
+        ui_row ""
         opt 0 "Volver"
         botline
         prompt; read -r op
@@ -851,14 +927,14 @@ banner_plantilla(){
 }
 
 banner_propio(){
-    echo "   Pega el HTML en UNA linea y ENTER:"
+    echo "  Pega el HTML en UNA linea y ENTER:"
     local html; IFS= read -r html
     printf '%s' "$html" | BANNER_HC=1 banner_publicar
     PAUSA
 }
 
 banner_texto(){
-    echo "   Lineas del banner (linea vacia = fin):"
+    echo "  Lineas del banner (linea vacia = fin):"
     local tmp; tmp=$(mktmp /tmp/banner-vps.XXXXXX) || return
     local l
     while IFS= read -r l; do [[ -z "$l" ]] && break; printf '%s\n' "$l" >> "$tmp"; done
@@ -883,7 +959,7 @@ menu_banner(){
         subtop "BANNER SSH / HTTP CUSTOM"
         opt 1 "Plantilla GHOST PANEL"    3 "Eliminar banner"
         opt 2 "Pegar HTML propio"        4 "CheckUser + banner"
-        printf '\n'
+        ui_row ""
         opt 0 "Volver"
         botline
         prompt; read -r op
@@ -987,9 +1063,9 @@ PYEOF
 checkuser_instalar(){
     echo; INFO "Instalar CheckUser API"
     local port token
-    read -r -p "   Puerto [8080]: " port; port=${port:-8080}
+    read -r -p "  Puerto [8080]: " port; port=${port:-8080}
     [[ "$port" =~ ^[0-9]+$ ]] || { ERR "Invalido."; PAUSA; return; }
-    read -r -p "   Token (vacio = aleatorio): " token
+    read -r -p "  Token (vacio = aleatorio): " token
     [[ -z "$token" ]] && token=$(tr -dc 'a-zA-Z0-9' </dev/urandom 2>/dev/null | head -c 20)
     printf 'PORT=%s\nTOKEN=%s\n' "$port" "$token" > /etc/vps-checkuser.conf
     chmod 600 /etc/vps-checkuser.conf
@@ -1012,8 +1088,8 @@ SVCEOF
     ufw allow "$port/tcp" >/dev/null 2>&1 || true
     local ip; ip=$(get_ipv4)
     OK "CheckUser instalado."
-    printf '   Local:  http://localhost:%s/checkuser.php?user=X&token=%s\n' "$port" "$token"
-    printf '   Remoto: http://%s:%s/checkuser.php?user=X&token=%s\n' "$ip" "$port" "$token"
+    printf '  Local:  http://localhost:%s/checkuser.php?user=X&token=%s\n' "$port" "$token"
+    printf '  Remoto: http://%s:%s/checkuser.php?user=X&token=%s\n' "$ip" "$port" "$token"
     PAUSA
 }
 
@@ -1021,7 +1097,7 @@ checkuser_probar(){
     local p t u
     p=$(awk -F= '/^PORT=/{print $2}' /etc/vps-checkuser.conf 2>/dev/null)
     t=$(awk -F= '/^TOKEN=/{print $2}' /etc/vps-checkuser.conf 2>/dev/null)
-    read -r -p "   Usuario a consultar: " u
+    read -r -p "  Usuario a consultar: " u
     echo
     curl -s "http://localhost:${p:-8080}/checkuser.php?user=$u&token=$t" && echo || ERR "Sin respuesta."
     PAUSA
@@ -1043,7 +1119,7 @@ menu_checkuser(){
         opt 1 "Instalar / reinstalar"  4 "Ver token y puerto"
         opt 2 "Estado del servicio"    5 "Remover"
         opt 3 "Probar consulta"
-        printf '\n'
+        ui_row ""
         opt 0 "Volver"
         botline
         prompt; read -r op
@@ -1063,10 +1139,10 @@ menu_checkuser(){
 # ============================================================
 monitoreo(){
     echo; INFO "Monitoreo"
-    echo "   Uptime: $(uptime)"
-    free -h | sed 's/^/   /'
-    echo; df -h / /home 2>/dev/null | sed 's/^/   /'
-    echo; ss -tunap 2>/dev/null | awk 'NR>1{print "   "$1, $5, $7}' | head -20
+    echo "  Uptime: $(uptime)"
+    free -h | sed 's/^/  /'
+    echo; df -h / /home 2>/dev/null | sed 's/^/  /'
+    echo; ss -tunap 2>/dev/null | awk 'NR>1{print "  "$1, $5, $7}' | head -20
     PAUSA
 }
 
@@ -1087,7 +1163,7 @@ SYS
 
 agregar_swap(){
     swapon --show 2>/dev/null | grep -q '/swapfile' && { ERR "Ya existe swapfile."; PAUSA; return; }
-    local g; read -r -p "   Tamaño GB (1): " g; g=${g:-1}
+    local g; read -r -p "  Tamaño GB (1): " g; g=${g:-1}
     [[ "$g" =~ ^[0-9]+$ && "$g" -ge 1 ]] || { ERR "Invalido."; PAUSA; return; }
     INFO "Creando swap ${g}GB..."
     fallocate -l "${g}G" /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=$((g*1024)) status=none
@@ -1103,7 +1179,7 @@ agregar_swap(){
 
 agregar_zram(){
     local g
-    read -r -p "   Tamaño zram GB (1): " g; g=${g:-1}
+    read -r -p "  Tamaño zram GB (1): " g; g=${g:-1}
     [[ "$g" =~ ^[0-9]+$ ]] || { ERR "Invalido."; PAUSA; return; }
     modprobe zram 2>/dev/null || { ERR "Sin acceso al kernel (OpenVZ/LXC)."; PAUSA; return; }
     zramctl /dev/zram0 --algorithm zstd --size "${g}G" >/dev/null 2>&1 \
@@ -1142,7 +1218,7 @@ mantenimiento(){
 }
 
 cambiar_hostname(){
-    local h; read -r -p "   Nuevo hostname: " h
+    local h; read -r -p "  Nuevo hostname: " h
     [[ "$h" =~ ^[a-zA-Z0-9.-]+$ ]] || { ERR "Invalido."; PAUSA; return; }
     hostnamectl set-hostname "$h" 2>/dev/null || { ERR "Fallo."; PAUSA; return; }
     sed -i "s/127.0.1.1.*/127.0.1.1\t$h/" /etc/hosts 2>/dev/null
@@ -1158,7 +1234,7 @@ update_sistema(){
 }
 
 reiniciar_vps(){
-    local sn; read -r -p "   Reiniciar ahora? (s/N): " sn
+    local sn; read -r -p "  Reiniciar ahora? (s/N): " sn
     if [[ "${sn,,}" == "s" ]]; then WARN "Reiniciando en 3s..."; sleep 3; reboot; fi
     PAUSA
 }
@@ -1169,11 +1245,11 @@ diagnostico(){
     ramp=$(free | awk '/Mem/{printf "%d", $3*100/$2}')
     diskp=$(df -h / | awk 'NR==2{gsub(/%/,"",$5); print $5}')
     load=$(cut -d' ' -f1 /proc/loadavg)
-    printf '   RAM: %s%%  Disco: %s%%  Carga: %s\n' "$ramp" "$diskp" "$load"
+    printf '  RAM: %s%%   Disco: %s%%   Carga: %s\n' "$ramp" "$diskp" "$load"
     [[ "$ramp" -gt 85 ]]   && { WARN "RAM al ${ramp}%"; adv=1; }
     [[ "$diskp" -gt 85 ]]  && { WARN "Disco al ${diskp}%"; adv=1; }
     systemctl is-failed --quiet sshd 2>/dev/null && { WARN "sshd con fallos"; adv=1; }
-    pgrep -f miniserv >/dev/null 2>&1 || printf '   %b-%b Webmin no corre\n' "$Y" "$NC"
+    pgrep -f miniserv >/dev/null 2>&1 || printf '  %b○%b Webmin no corre\n' "$C_WARN" "$RS"
     [[ $adv -eq 0 ]] && OK "Sin alertas graves."
     PAUSA
 }
@@ -1188,7 +1264,7 @@ menu_sistema(){
         opt 3 "Optimizar (BBR)"        7 "Update sistema"
         opt 4 "Agregar swap"           8 "Reiniciar VPS"
         opt 9 "Agregar zram"
-        printf '\n'
+        ui_row ""
         opt 0 "Volver"
         botline
         prompt; read -r op
@@ -1206,12 +1282,12 @@ menu_sistema(){
 # ============================================================
 instalar_xray(){
     if command -v xray >/dev/null 2>&1; then
-        local sn; read -r -p "   Xray ya instalado. Reconfigurar? (s/N): " sn
+        local sn; read -r -p "  Xray ya instalado. Reconfigurar? (s/N): " sn
         [[ "${sn,,}" != "s" ]] && { PAUSA; return; }
     fi
     local xp sni
-    read -r -p "   Puerto Xray (8443): " xp; xp=${xp:-8443}
-    read -r -p "   SNI (www.microsoft.com): " sni; sni=${sni:-www.microsoft.com}
+    read -r -p "  Puerto Xray (8443): " xp; xp=${xp:-8443}
+    read -r -p "  SNI (www.microsoft.com): " sni; sni=${sni:-www.microsoft.com}
     INFO "Instalando Xray..."
     bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1 \
         || { ERR "Fallo."; PAUSA; return; }
@@ -1248,8 +1324,8 @@ XEOF
     systemctl restart xray 2>/dev/null
     local ip; ip=$(get_ipv4)
     OK "Xray activo en :$xp"
-    printf '   %bvless://%s@%s:%s?security=reality&encryption=none&pbk=%s&fp=chrome&sni=%s&flow=xtls-rprx-vision&sid=#Ghost%b\n' \
-        "$G" "$uuidv" "$ip" "$xp" "$pub" "$sni" "$NC"
+    printf '  %bvless://%s@%s:%s?security=reality&encryption=none&pbk=%s&fp=chrome&sni=%s&flow=xtls-rprx-vision&sid=#Ghost%b\n' \
+        "$C_ACC" "$uuidv" "$ip" "$xp" "$pub" "$sni" "$RS"
     PAUSA
 }
 
@@ -1259,8 +1335,8 @@ instalar_xray_ws(){
         bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1
     }
     local wp wpath uuidv
-    read -r -p "   Puerto WS (8080): " wp; wp=${wp:-8080}
-    read -r -p "   Path (/ghost): " wpath; wpath=${wpath:-/ghost}
+    read -r -p "  Puerto WS (8080): " wp; wp=${wp:-8080}
+    read -r -p "  Path (/ghost): " wpath; wpath=${wpath:-/ghost}
     [[ "$wpath" == /* ]] || wpath="/$wpath"
     uuidv=$(xray uuid)
     mkdir -p /usr/local/etc/xray
@@ -1283,8 +1359,8 @@ PY
     sleep 1
     local ip; ip=$(get_ipv4)
     OK "Xray WS activo en :$wp (path $wpath)"
-    printf '   %bvless://%s@%s:%s?type=ws&path=%s&security=none#Ghost-WS%b\n' \
-        "$G" "$uuidv" "$ip" "$wp" "${wpath//\//%2F}" "$NC"
+    printf '  %bvless://%s@%s:%s?type=ws&path=%s&security=none#Ghost-WS%b\n' \
+        "$C_ACC" "$uuidv" "$ip" "$wp" "${wpath//\//%2F}" "$RS"
     PAUSA
 }
 
@@ -1293,8 +1369,8 @@ instalar_trojan(){
         bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1
     }
     local tp sni pwd
-    read -r -p "   Puerto Trojan (9443): " tp; tp=${tp:-9443}
-    read -r -p "   SNI (www.microsoft.com): " sni; sni=${sni:-www.microsoft.com}
+    read -r -p "  Puerto Trojan (9443): " tp; tp=${tp:-9443}
+    read -r -p "  SNI (www.microsoft.com): " sni; sni=${sni:-www.microsoft.com}
     pwd=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 20)
     mkdir -p /etc/vpsjb-trojan
     openssl req -x509 -nodes -newkey rsa:2048 -days 3650 -subj "/CN=$sni" \
@@ -1319,8 +1395,8 @@ PY
     systemctl restart xray 2>/dev/null
     local ip; ip=$(get_ipv4)
     OK "Trojan activo en :$tp"
-    printf '   %btrojan://%s@%s:%s?security=tls&sni=%s&allowInsecure=1#Ghost-Trojan%b\n' \
-        "$G" "$pwd" "$ip" "$tp" "$sni" "$NC"
+    printf '  %btrojan://%s@%s:%s?security=tls&sni=%s&allowInsecure=1#Ghost-Trojan%b\n' \
+        "$C_ACC" "$pwd" "$ip" "$tp" "$sni" "$RS"
     PAUSA
 }
 
@@ -1335,8 +1411,8 @@ instalar_openvpn(){
 
 instalar_ssl_stunnel(){
     local sp sshp
-    read -r -p "   Puerto SSL (443): " sp; sp=${sp:-443}
-    read -r -p "   Puerto SSH destino (22): " sshp; sshp=${sshp:-22}
+    read -r -p "  Puerto SSL (443): " sp; sp=${sp:-443}
+    read -r -p "  Puerto SSH destino (22): " sshp; sshp=${sshp:-22}
     apt update -y >/dev/null 2>&1
     apt install -y stunnel4 >/dev/null 2>&1 || { ERR "Fallo."; PAUSA; return; }
     openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=ghost" \
@@ -1362,7 +1438,7 @@ SEOF
 
 instalar_hysteria(){
     local hp pwd
-    read -r -p "   Puerto UDP (8443): " hp; hp=${hp:-8443}
+    read -r -p "  Puerto UDP (8443): " hp; hp=${hp:-8443}
     bash <(curl -fsSL https://get.hy2.sh/) >/dev/null 2>&1 || { ERR "Fallo."; PAUSA; return; }
     mkdir -p /etc/hysteria
     openssl req -x509 -nodes -newkey rsa:2048 -days 3650 -subj "/CN=ghost" \
@@ -1382,14 +1458,14 @@ HEOF
     sleep 1
     local ip; ip=$(get_ipv4)
     systemctl is-active --quiet hysteria-server 2>/dev/null \
-        && { OK "Hysteria2 en :$hp"; printf '   %bhysteria2://%s@%s:%s/?insecure=1#Ghost%b\n' "$G" "$pwd" "$ip" "$hp" "$NC"; } \
+        && { OK "Hysteria2 en :$hp"; printf '  %bhysteria2://%s@%s:%s/?insecure=1#Ghost%b\n' "$C_ACC" "$pwd" "$ip" "$hp" "$RS"; } \
         || ERR "No arranco."
     PAUSA
 }
 
 instalar_badvpn(){
     local bp
-    read -r -p "   Puerto UDP GW (7300): " bp; bp=${bp:-7300}
+    read -r -p "  Puerto UDP GW (7300): " bp; bp=${bp:-7300}
     apt update -y >/dev/null 2>&1
     apt install -y badvpn >/dev/null 2>&1 || { ERR "Fallo."; PAUSA; return; }
     cat > /etc/systemd/system/badvpn.service <<BEOF
@@ -1411,7 +1487,7 @@ BEOF
 
 instalar_wsepro(){
     local ep
-    read -r -p "   Puerto WS (80): " ep; ep=${ep:-80}
+    read -r -p "  Puerto WS (80): " ep; ep=${ep:-80}
     cat > /usr/local/bin/ghost-ws.py <<'WSEOF'
 #!/usr/bin/env python3
 import socket, base64, hashlib, struct, threading, sys
@@ -1525,7 +1601,7 @@ SVCEOF
 
 instalar_shadowsocks(){
     local sp pw
-    read -r -p "   Puerto SS (8388): " sp; sp=${sp:-8388}
+    read -r -p "  Puerto SS (8388): " sp; sp=${sp:-8388}
     apt update -y >/dev/null 2>&1
     apt install -y shadowsocks-libev >/dev/null 2>&1 || { ERR "Fallo."; PAUSA; return; }
     pw=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 16)
@@ -1559,7 +1635,7 @@ SSSVC
         local ip b64; ip=$(get_ipv4)
         b64=$(printf 'aes-256-gcm:%s' "$pw" | base64 -w0)
         OK "Shadowsocks activo :$sp"
-        printf '   %bss://%s@%s:%s#Ghost-SS%b\n' "$G" "$b64" "$ip" "$sp" "$NC"
+        printf '  %bss://%s@%s:%s#Ghost-SS%b\n' "$C_ACC" "$b64" "$ip" "$sp" "$RS"
     else
         ERR "No arranco."
     fi
@@ -1568,7 +1644,7 @@ SSSVC
 
 instalar_wireguard(){
     local wp spriv spub cpriv cpub iface ip
-    read -r -p "   Puerto UDP (51820): " wp; wp=${wp:-51820}
+    read -r -p "  Puerto UDP (51820): " wp; wp=${wp:-51820}
     apt update -y >/dev/null 2>&1
     apt install -y wireguard >/dev/null 2>&1 || { ERR "Fallo."; PAUSA; return; }
     spriv=$(wg genkey); spub=$(printf '%s' "$spriv" | wg pubkey)
@@ -1607,7 +1683,7 @@ AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 CLIENTEOF
         OK "WireGuard activo :$wp"
-        printf '   Config cliente: /root/wg-client.conf\n'
+        printf '  Config cliente: /root/wg-client.conf\n'
     else
         ERR "Fallo."
     fi
@@ -1619,18 +1695,18 @@ estado_protocolos(){
     if command -v xray >/dev/null 2>&1; then
         local puerto; puerto=$(grep -o '"port": [0-9]*' /usr/local/etc/xray/config.json 2>/dev/null | head -1 | grep -o '[0-9]*')
         (pgrep -x xray >/dev/null 2>&1 || systemctl is-active --quiet xray 2>/dev/null) \
-            && printf '   Xray: %bACTIVO%b (:%s)\n' "$G" "$NC" "${puerto:-?}" \
-            || printf '   Xray: %bdetenido%b\n' "$Y" "$NC"
+            && printf '  Xray: %b● ACTIVO%b (:%s)\n' "$C_OK" "$RS" "${puerto:-?}" \
+            || printf '  Xray: %b○ detenido%b\n' "$C_WARN" "$RS"
     else
-        printf '   Xray: %bno instalado%b\n' "$R" "$NC"
+        printf '  Xray: %b○ no instalado%b\n' "$C_ERR" "$RS"
     fi
-    pgrep -f badvpn-udpgw >/dev/null 2>&1 && printf '   BadVPN: %bACTIVO%b\n' "$G" "$NC" || printf '   BadVPN: %bno%b\n' "$R" "$NC"
-    systemctl is-active --quiet ghost-ws 2>/dev/null && printf '   WS-epro: %bACTIVO%b\n' "$G" "$NC" || printf '   WS-epro: %bno%b\n' "$R" "$NC"
-    systemctl is-active --quiet ghost-ss 2>/dev/null && printf '   Shadowsocks: %bACTIVO%b\n' "$G" "$NC" || printf '   Shadowsocks: %bno%b\n' "$R" "$NC"
-    systemctl is-active --quiet wg-quick@wg0 2>/dev/null && printf '   WireGuard: %bACTIVO%b\n' "$G" "$NC" || printf '   WireGuard: %bno%b\n' "$R" "$NC"
-    systemctl is-active --quiet hysteria-server 2>/dev/null && printf '   Hysteria2: %bACTIVO%b\n' "$G" "$NC" || printf '   Hysteria2: %bno%b\n' "$R" "$NC"
-    systemctl is-active --quiet stunnel4 2>/dev/null && printf '   Stunnel: %bACTIVO%b\n' "$G" "$NC" || printf '   Stunnel: %bno%b\n' "$R" "$NC"
-    pgrep -x cloudflared >/dev/null 2>&1 && printf '   Tunel CDN: %bACTIVO%b\n' "$G" "$NC" || printf '   Tunel CDN: %binactivo%b\n' "$R" "$NC"
+    pgrep -f badvpn-udpgw >/dev/null 2>&1 && printf '  BadVPN: %b● ACTIVO%b\n' "$C_OK" "$RS" || printf '  BadVPN: %b○ no%b\n' "$C_ERR" "$RS"
+    systemctl is-active --quiet ghost-ws 2>/dev/null && printf '  WS-epro: %b● ACTIVO%b\n' "$C_OK" "$RS" || printf '  WS-epro: %b○ no%b\n' "$C_ERR" "$RS"
+    systemctl is-active --quiet ghost-ss 2>/dev/null && printf '  Shadowsocks: %b● ACTIVO%b\n' "$C_OK" "$RS" || printf '  Shadowsocks: %b○ no%b\n' "$C_ERR" "$RS"
+    systemctl is-active --quiet wg-quick@wg0 2>/dev/null && printf '  WireGuard: %b● ACTIVO%b\n' "$C_OK" "$RS" || printf '  WireGuard: %b○ no%b\n' "$C_ERR" "$RS"
+    systemctl is-active --quiet hysteria-server 2>/dev/null && printf '  Hysteria2: %b● ACTIVO%b\n' "$C_OK" "$RS" || printf '  Hysteria2: %b○ no%b\n' "$C_ERR" "$RS"
+    systemctl is-active --quiet stunnel4 2>/dev/null && printf '  Stunnel: %b● ACTIVO%b\n' "$C_OK" "$RS" || printf '  Stunnel: %b○ no%b\n' "$C_ERR" "$RS"
+    pgrep -x cloudflared >/dev/null 2>&1 && printf '  Tunel CDN: %b● ACTIVO%b\n' "$C_OK" "$RS" || printf '  Tunel CDN: %b○ inactivo%b\n' "$C_ERR" "$RS"
     PAUSA
 }
 
@@ -1644,7 +1720,7 @@ menu_quitar(){
         opt 3 "Stunnel"         7 "Trojan"
         opt 4 "BadVPN"          8 "WireGuard"
         opt 9 "Tunel CDN"
-        printf '\n'
+        ui_row ""
         opt 0 "Volver"
         botline
         prompt; read -r op
@@ -1684,7 +1760,7 @@ tunel_trycloudflare(){
         url=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cf-tunnel.log | head -1)
         [[ -n "$url" ]] && break
     done
-    [[ -n "$url" ]] && { OK "Tunel activo:"; printf '   %b%s%b\n' "$G" "$url" "$NC"; } || ERR "No se obtuvo URL."
+    [[ -n "$url" ]] && { OK "Tunel activo:"; printf '  %b%s%b\n' "$C_ACC" "$url" "$RS"; } || ERR "No se obtuvo URL."
     PAUSA
 }
 
@@ -1700,7 +1776,7 @@ menu_protocolos(){
         opt 9 "Trojan"               10 "WireGuard"
         opt 11 "Estado protocolos"   12 "Quitar protocolos"
         opt 13 "Tunel CDN (prueba)"
-        printf '\n'
+        ui_row ""
         opt 0 "Volver"
         botline
         prompt; read -r op
@@ -1737,22 +1813,22 @@ trafico_activar(){
 
 trafico_ver(){
     echo; INFO "Consumo por usuario"
-    printf '   %-16s %12s %s\n' "USUARIO" "USADO" "LIMITE(GB)"
-    hline
+    printf '  %-16s %12s %s\n' "USUARIO" "USADO" "LIMITE(GB)"
+    printf '  %b%s%b\n' "$C_DIM" "$(ui_line 58 $C_DIM)" "$RS"
     iptables -L VPS-TRAFFIC -v -x -n 2>/dev/null | awk '/owner UID match/ {print $2, $NF}' | while read -r bytes uidn; do
         local u mb lim
         u=$(id -un "$uidn" 2>/dev/null || echo "uid$uidn")
         mb=$(( bytes / 1048576 ))
         lim=$(cat "$TRAF_DIR/$u" 2>/dev/null || echo "-")
-        printf '   %-16s %10d MB  %s\n' "$u" "$mb" "$lim"
+        printf '  %-16s %10d MB  %s\n' "$u" "$mb" "$lim"
     done
     PAUSA
 }
 
 trafico_limite(){
-    local u g; read -r -p "   Usuario: " u
+    local u g; read -r -p "  Usuario: " u
     id "$u" >/dev/null 2>&1 || { ERR "No existe."; PAUSA; return; }
-    read -r -p "   Limite GB (0=sin limite): " g
+    read -r -p "  Limite GB (0=sin limite): " g
     [[ "$g" =~ ^[0-9]+$ ]] || { ERR "Invalido."; PAUSA; return; }
     printf '%s\n' "$g" > "$TRAF_DIR/$u"
     OK "Limite = ${g}GB."
@@ -1790,7 +1866,7 @@ menu_trafico(){
         opt 1 "Activar contadores"  4 "Cortar excedidos"
         opt 2 "Ver consumo"         5 "Reset contadores"
         opt 3 "Poner limite GB"
-        printf '\n'
+        ui_row ""
         opt 0 "Volver"
         botline
         prompt; read -r op
@@ -1825,7 +1901,7 @@ instalar_webmin(){
     local wp; wp=$(grep -o '^port=[0-9]*' /etc/webmin/miniserv.conf 2>/dev/null | cut -d= -f2 | head -1); wp=${wp:-10000}
     local ip; ip=$(get_ipv4)
     pgrep -f miniserv >/dev/null 2>&1 \
-        && { OK "Webmin activo :$wp"; printf '   https://%s:%s\n' "$ip" "$wp"; } \
+        && { OK "Webmin activo :$wp"; printf '  https://%s:%s\n' "$ip" "$wp"; } \
         || ERR "Webmin no arranco."
     PAUSA
 }
@@ -1838,7 +1914,7 @@ menu_webmin(){
         opt 1 "Instalar Webmin"   4 "Cambiar puerto"
         opt 2 "Estado / reiniciar" 5 "Remover Webmin"
         opt 3 "Abrir puerto 10000"
-        printf '\n'
+        ui_row ""
         opt 0 "Volver"
         botline
         prompt; read -r op
@@ -1846,7 +1922,7 @@ menu_webmin(){
             1) instalar_webmin ;;
             2) systemctl restart webmin 2>/dev/null; sleep 1; pgrep -f miniserv >/dev/null && OK "Corriendo." || ERR "No arranco."; PAUSA ;;
             3) ufw allow 10000/tcp 2>/dev/null && OK "Puerto abierto." || ERR "UFW no activo."; PAUSA ;;
-            4) local p; read -r -p "   Nuevo puerto: " p; sed -i "s/^port=.*/port=$p/" /etc/webmin/miniserv.conf; systemctl restart webmin 2>/dev/null; OK "Puerto: $p."; PAUSA ;;
+            4) local p; read -r -p "  Nuevo puerto: " p; sed -i "s/^port=.*/port=$p/" /etc/webmin/miniserv.conf; systemctl restart webmin 2>/dev/null; OK "Puerto: $p."; PAUSA ;;
             5) systemctl stop webmin 2>/dev/null; apt purge -y webmin 2>/dev/null; rm -f /etc/apt/sources.list.d/webmin.list; OK "Removido."; PAUSA ;;
             0) pop_crumb; break ;; *) ERR "Invalida."; sleep 1 ;;
         esac
@@ -1870,12 +1946,12 @@ backup_basico(){
 restaurar_backup(){
     local dir=/root/backups f conf
     ls -lh "$dir"/*.tar.gz 2>/dev/null || { ERR "Sin backups."; PAUSA; return; }
-    read -r -p "   Archivo (Enter = ultimo): " f
+    read -r -p "  Archivo (Enter = ultimo): " f
     [[ -z "$f" ]] && f=$(ls -t "$dir"/*.tar.gz 2>/dev/null | head -1)
     [[ -f "$f" ]] || f="$dir/$f"
     [[ -f "$f" ]] || { ERR "No encontrado."; PAUSA; return; }
     WARN "Esto pisa la configuracion actual de /etc."
-    read -r -p "   Escribi RESTAURAR para confirmar: " conf
+    read -r -p "  Escribi RESTAURAR para confirmar: " conf
     [[ "$conf" != "RESTAURAR" ]] && { ERR "Cancelado."; PAUSA; return; }
     tar xzf "$f" -C / 2>/dev/null
     OK "Restaurado. Reinicia el VPS recomendado."
@@ -1888,7 +1964,7 @@ menu_backup(){
         header
         subtop "BACKUP / RESTAURAR"
         opt 1 "Crear backup"  2 "Restaurar backup"
-        printf '\n'
+        ui_row ""
         opt 0 "Volver"
         botline
         prompt; read -r op
@@ -1949,14 +2025,14 @@ auto_update(){
 
 ver_logs(){
     echo; INFO "Ultimas 40 lineas del log"
-    tail -40 "$LOG_PANEL" 2>/dev/null || echo "   (vacio)"
+    tail -40 "$LOG_PANEL" 2>/dev/null || echo "  (vacio)"
     PAUSA
 }
 
 cambiar_tema(){
     local t
-    echo "   Temas: ghost | matrix | dracula | minimal"
-    read -r -p "   Nuevo tema: " t
+    echo "  Temas: ghost | matrix | dracula | minimal"
+    read -r -p "  Nuevo tema: " t
     case "$t" in
         ghost|matrix|dracula|minimal)
             sed -i "s/^PANEL_THEME=.*/PANEL_THEME=$t/" "$CONF_FILE"
@@ -1969,33 +2045,33 @@ cambiar_tema(){
 
 doctor(){
     echo; INFO "Ghost Panel doctor"
-    hline
+    printf '  %b%s%b\n' "$C_DIM" "$(ui_line 58 $C_DIM)" "$RS"
     local ok=0 fail=0
     local check_cmd=(bash python3 curl wget openssl systemctl iptables)
     local c
     for c in "${check_cmd[@]}"; do
         if command -v "$c" >/dev/null 2>&1; then
-            printf '   %bOK%b   %-12s %s\n' "$G" "$NC" "$c" "$(command -v "$c")"
+            printf '  %b●%b %-12s %s\n' "$C_OK" "$RS" "$c" "$(command -v "$c")"
             ok=$((ok+1))
         else
-            printf '   %bFAIL%b %-12s faltante\n' "$R" "$NC" "$c"
+            printf '  %b○%b %-12s faltante\n' "$C_ERR" "$RS" "$c"
             fail=$((fail+1))
         fi
     done
     for svc in ssh sshd vps-checkuser xray ghost-ws ghost-ss badvpn; do
         if systemctl list-unit-files 2>/dev/null | grep -q "^${svc}\.service"; then
             if systemctl is-active --quiet "$svc" 2>/dev/null; then
-                printf '   %bOK%b   svc %-18s activo\n' "$G" "$NC" "$svc"
+                printf '  %b●%b svc %-18s activo\n' "$C_OK" "$RS" "$svc"
                 ok=$((ok+1))
             else
-                printf '   %bWARN%b svc %-18s detenido\n' "$Y" "$NC" "$svc"
+                printf '  %b○%b svc %-18s detenido\n' "$C_WARN" "$RS" "$svc"
             fi
         fi
     done
-    [[ -n "${LICENSE_URL:-}" ]] && printf '   %bOK%b   LICENSE_URL configurado\n' "$G" "$NC" || { printf '   %bFAIL%b LICENSE_URL vacio\n' "$R" "$NC"; fail=$((fail+1)); }
-    [[ -f /etc/cron.d/ghost-panel-vencidos ]] && printf '   %bOK%b   Cron de vencidos\n' "$G" "$NC" || printf '   %bWARN%b Cron no instalado\n' "$Y" "$NC"
-    hline
-    printf '   Total: %b%d OK%b, %b%d problemas%b\n' "$G" "$ok" "$NC" "$R" "$fail" "$NC"
+    [[ -n "${LICENSE_URL:-}" ]] && printf '  %b●%b LICENSE_URL configurado\n' "$C_OK" "$RS" || { printf '  %b○%b LICENSE_URL vacio\n' "$C_ERR" "$RS"; fail=$((fail+1)); }
+    [[ -f /etc/cron.d/ghost-panel-vencidos ]] && printf '  %b●%b Cron de vencidos\n' "$C_OK" "$RS" || printf '  %b○%b Cron no instalado\n' "$C_WARN" "$RS"
+    printf '  %b%s%b\n' "$C_DIM" "$(ui_line 58 $C_DIM)" "$RS"
+    printf '  Total: %b%d OK%b, %b%d problemas%b\n' "$C_OK" "$ok" "$RS" "$C_ERR" "$fail" "$RS"
     PAUSA
 }
 
@@ -2058,7 +2134,7 @@ menu_herramientas(){
         opt 2 "Activar auto-menu"        5 "CheckUser API"
         opt 3 "Quitar auto-menu"         6 "Ver logs"
         opt 7 "Cambiar tema"             8 "Doctor (diagnostico)"
-        printf '\n'
+        ui_row ""
         opt 0 "Volver"
         botline
         prompt; read -r op
@@ -2083,7 +2159,7 @@ main_menu(){
         opt 3 "Seguridad"          4 "Sistema"
         opt 5 "Herramientas"       6 "Webmin"
         opt 7 "Backup"             8 "Diagnostico"
-        printf '\n'
+        ui_row ""
         opt 0 "Salir"
         botline
         prompt; read -r op
@@ -2092,7 +2168,7 @@ main_menu(){
             3) menu_seguridad ;;   4) menu_sistema ;;
             5) menu_herramientas ;; 6) menu_webmin ;;
             7) menu_backup ;;      8) diagnostico ;;
-            0) printf '%bHasta luego.%b\n' "$G" "$NC"; exit 0 ;;
+            0) printf '%bHasta luego.%b\n' "$C_OK" "$RS"; exit 0 ;;
             *) ERR "Invalida."; sleep 1 ;;
         esac
     done
@@ -2105,10 +2181,10 @@ check_deps || exit 1
 if [[ $# -gt 0 ]]; then
     case "$1" in
         users|status|doctor) cli_cmd "$@"; exit $? ;;
-        --version|-v) echo "Ghost Panel v3.0.2"; exit 0 ;;
+        --version|-v) echo "Ghost Panel v3.1.0"; exit 0 ;;
         --help|-h)
             cat <<HELP
-Ghost Panel v3.0.2
+Ghost Panel v3.1.0
   ghostpanel                    Menu interactivo
   ghostpanel users list
   ghostpanel users create U --dias 30 --max 1 --pass 1234
@@ -2121,7 +2197,7 @@ HELP
 fi
 
 if ! bash -n "$0" 2>/dev/null; then
-    printf '%b[FATAL]%b Script con errores de sintaxis. Abortando.\n' "$R" "$NC"
+    printf '%b[FATAL]%b Script con errores de sintaxis.\n' "$C_ERR" "$RS"
     exit 1
 fi
 
