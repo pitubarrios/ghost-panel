@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  GHOST PANEL v3.0.1 by Jorge Barrios
+#  GHOST PANEL v3.0.2 by Jorge Barrios
 #  Administracion profesional de VPS (Ubuntu / Debian)
 #  Uso:  sudo bash ghost-panel.sh  |  ghostpanel
 # ============================================================
@@ -11,24 +11,20 @@ IFS=$'\n\t'
 # ---------- COLORES ----------
 R='\033[1;31m'; G='\033[1;32m'; Y='\033[1;33m'
 B='\033[1;34m'; C='\033[1;36m'; W='\033[1;37m'
+M='\033[1;35m'
 DIM='\033[2m'; BOLD='\033[1m'; NC='\033[0m'
 
-# ---------- CONFIG (se autogenera si no existe) ----------
+# ---------- CONFIG ----------
 CONF_FILE='/etc/ghost-panel.conf'
 if [[ ! -f "$CONF_FILE" ]]; then
     cat > "$CONF_FILE" <<'CONFEOF'
 # ============================================================
 #  GHOST PANEL - Configuracion
 # ============================================================
-# URL de tu Worker de Cloudflare (validacion de licencia)
 LICENSE_URL=https://vps-licencias.jorgebarriosmpya.workers.dev
-# URL del script en tu repo (auto-update)
 REPO_RAW=https://raw.githubusercontent.com/pitubarrios/vps-manager/refs/heads/main/ghost-panel.sh
-# Prefijo de las keys de licencia
 PREFIJO_KEY=VPSJB1
-# Modo compacto (1=sin marco grande, 0=normal)
 PANEL_COMPACT=0
-# Tema: ghost | matrix | dracula | minimal
 PANEL_THEME=ghost
 CONFEOF
     chmod 600 "$CONF_FILE"
@@ -49,10 +45,7 @@ USUARIOS_DIR='/etc/vps-users'
 LIMITS_DIR='/etc/vps-limits'
 TRAF_DIR='/etc/vps-trafico'
 PROTECTED_FILE='/etc/ghost-panel.protected'
-LINKS_FILE='/root/vps-links.txt'
-IP_CACHE_FILE='/tmp/vps-ip.cache'
 
-# Lista protegida centralizada
 if [[ ! -f "$PROTECTED_FILE" ]]; then
     cat > "$PROTECTED_FILE" <<'PROTEOF'
 root daemon bin sys sync games man lp mail news uucp proxy www-data backup
@@ -63,15 +56,14 @@ PROTEOF
     chmod 644 "$PROTECTED_FILE"
 fi
 
-# Tema activo
 case "$PANEL_THEME" in
     matrix)   ACC="$G"; SEC="$G"; ;;
-    dracula)  ACC="$C"; SEC='\033[1;35m'; ;;
+    dracula)  ACC="$C"; SEC="$M"; ;;
     minimal)  ACC="$W"; SEC="$W"; ;;
     *)        ACC="$C"; SEC="$B"; ;;
 esac
 
-# ---------- TRAP DE LIMPIEZA ----------
+# ---------- TRAP ----------
 TMP_FILES=()
 cleanup(){
     local f
@@ -85,7 +77,7 @@ mktmp(){
     printf '%s' "$f"
 }
 
-# ---------- HELPERS CORE ----------
+# ---------- CORE ----------
 vps_log(){
     local NIV=${1:-INFO}; shift || true
     mkdir -p "$(dirname "$LOG_PANEL")" 2>/dev/null
@@ -101,14 +93,11 @@ PAUSA(){ printf '\n%b%s%b\n' "$Y" "Presiona ENTER para continuar..." "$NC"; read
 
 pkill_user(){
     local u="${1:-}"
-    [[ -z "$u" ]] && return 0
-    [[ "$u" == "root" ]] && return 0
+    [[ -z "$u" || "$u" == "root" ]] && return 0
     pkill -u "$u" 2>/dev/null || true
 }
 
-user_home(){
-    getent passwd "$1" 2>/dev/null | cut -d: -f6
-}
+user_home(){ getent passwd "$1" 2>/dev/null | cut -d: -f6; }
 
 machine_hash(){
     if [[ -f /etc/machine-id ]]; then
@@ -122,7 +111,6 @@ require_root(){
     [[ $EUID -ne 0 ]] && { printf '%bEjecuta como root o con sudo.%b\n' "$R" "$NC"; exit 1; }
 }
 
-# Devuelve la primera IPv4 valida del sistema
 get_ipv4(){
     local ip
     ip=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -m1 -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || true)
@@ -130,7 +118,6 @@ get_ipv4(){
     printf '%s' "$ip"
 }
 
-# ---------- VERIFICACION DE DEPENDENCIAS ----------
 check_deps(){
     local missing=() cmd
     for cmd in bash python3 curl wget openssl systemctl; do
@@ -156,9 +143,12 @@ fw_backend(){
 }
 
 # ============================================================
-#  UI FRAMEWORK v3
+#  UI FRAMEWORK v3.0.2
 # ============================================================
 BC=()
+UIW=62                          # ancho total del marco
+UITXT=58                        # ancho visible dentro del marco
+UICOL=29                        # ancho por columna (modo 2-col)
 
 push_crumb(){ BC+=("$1"); }
 pop_crumb(){  [[ ${#BC[@]} -gt 0 ]] && unset 'BC[-1]'; }
@@ -166,83 +156,96 @@ crumbs(){     local s=""; local i; for i in "${BC[@]:-}"; do s+=" $i ›"; done;
 
 clear_if_tty(){ [[ -t 1 ]] && clear; }
 
-hline(){
-    local n=${1:-56} c=${2:-$SEC}
-    local line=""; local i
-    for ((i=0;i<n;i++)); do line+="─"; done
-    printf '%b%s%b\n' "$c" "$line" "$NC"
+hline_str(){ local n=${1:-60}; local s=""; local i; for ((i=0;i<n;i++)); do s+="─"; done; printf '%s' "$s"; }
+
+ui_top(){ printf '%b╭%s╮%b\n' "$SEC" "$(hline_str 60)" "$NC"; }
+ui_mid(){ printf '%b├%s┤%b\n' "$SEC" "$(hline_str 60)" "$NC"; }
+ui_bot(){ printf '%b╰%s╯%b\n' "$SEC" "$(hline_str 60)" "$NC"; }
+
+# Imprime una fila del marco con padding automático.
+# Cuenta caracteres visibles saltando secuencias ANSI.
+ui_row(){
+    local raw="$1" out="" vis=0 esc
+    raw="${raw//\\033/$'\x1b'}"
+    while [[ -n "$raw" ]]; do
+        if [[ "$raw" == $'\x1b['* ]]; then
+            esc="${raw%%m*}m"
+            out+="$esc"
+            raw="${raw#"$esc"}"
+            continue
+        fi
+        [[ $vis -ge $UITXT ]] && break
+        out+="${raw:0:1}"
+        vis=$((vis+1))
+        raw="${raw:1}"
+    done
+    printf '%b│%b %s%*s %b│%b\n' "$SEC" "$NC" "$out" "$((UITXT - vis))" "" "$SEC" "$NC"
 }
 
+# Fila de dos columnas
+opt(){
+    if [[ $# -ge 4 ]]; then
+        local c1 c2
+        c1=$(printf '%b[%s]%b %-24s' "$ACC" "$1" "$NC" "$2")
+        c2=$(printf '%b[%s]%b %s'    "$ACC" "$3" "$NC" "$4")
+        ui_row "${c1}${c2}"
+    else
+        ui_row "$(printf '%b[%s]%b %s' "$ACC" "$1" "$NC" "$2")"
+    fi
+}
+
+# Abre submenú con marco + título en la misma línea superior
+subtop(){
+    local title="$1"
+    local n=${#title}
+    local fill=$(( 57 - n ))
+    [[ $fill -lt 1 ]] && fill=1
+    printf '\n'
+    printf '%b╭─ %s %s╮%b\n' "$SEC" "$title" "$(hline_str $fill)" "$NC"
+}
+
+botline(){ printf '%b╰%s╯%b\n\n' "$SEC" "$(hline_str 60)" "$NC"; }
+
+prompt(){ printf '   %b▸%b %s > ' "$ACC" "$NC" "${1:-Opcion}"; }
+
+# ---------- HEADER PRINCIPAL ----------
 header(){
     clear_if_tty
-    local ram_t ram_u cpu disk online lic="" ipv4
+    local ram_t ram_u cpu disk online lic="" ipv4 osver
     ram_t=$(free -m | awk '/Mem:/{print $2}')
-    ram_u=$(free -m | awk '/Mem:/{printf "%d%% (%dM)", $3*100/$2, $3}')
+    ram_u=$(free -m | awk '/Mem:/{printf "%d%%", $3*100/$2}')
     cpu=$(top -bn1 2>/dev/null | awk '/%Cpu/{printf "%.1f%%", 100-$8}' || echo "n/a")
     disk=$(df -h / | awk 'NR==2{print $5}')
     online=$(who 2>/dev/null | wc -l)
     ipv4=$(get_ipv4)
+    osver=$(lsb_release -rs 2>/dev/null || echo '?')
 
     if [[ "${LICENSE_EXP:-0}" == "0" ]]; then
-        lic="${LICENSE_OK:- -} · ${G}PERMANENTE${NC}"
+        lic="permanente"
     elif [[ -n "${LICENSE_EXP:-}" ]]; then
         local d=$(( (LICENSE_EXP - $(date +%s)) / 86400 )); ((d<0)) && d=0
-        lic="${LICENSE_OK:- -} · ${d}d"
+        lic="${d} dias"
     else
-        lic="${LICENSE_OK:- -}"
-    fi
-
-    if [[ "$PANEL_COMPACT" == "1" ]]; then
-        printf '%b👻 GHOST%b │ %s@%s │ IP %s │ %s\n' \
-            "$G" "$NC" "$(whoami)" "$(hostname)" "$ipv4" "$(date '+%d/%m %H:%M')"
-        printf '%b%s%b\n' "$DIM" "$(crumbs)" "$NC"
-        hline 56 "$SEC"
-        return
+        lic="-"
     fi
 
     printf '\n'
-    printf '%b╭─%b 👻 %bGHOST PANEL%b %bv3.0.1%b ─ %b%s%b\n' \
-        "$SEC" "$NC" "$G" "$NC" "$DIM" "$NC" "$DIM" "$(crumbs)" "$NC"
-    hline 62 "$SEC"
-    printf '%b│%b  🌐  %s  ·  %s  ·  Ubuntu %s\n' \
-        "$SEC" "$NC" "$ipv4" "$(hostname)" \
-        "$(lsb_release -rs 2>/dev/null || echo '?')"
-    printf '%b│%b  💾  RAM %s   ⚡ CPU %s   📀 %s   👥 %b%s%b\n' \
-        "$SEC" "$NC" "$ram_u/$ram_t" "$cpu" "$disk" "$G" "$online" "$NC"
-    printf '%b│%b  🎫  %b   🖥️  Webmin: %s\n' \
-        "$SEC" "$NC" "$lic" "$(webmin_status_min)"
-    printf '%b╰─%b\n' "$SEC" "$NC"
-    printf '\n'
-}
-
-webmin_status_min(){
-    if dpkg -l webmin >/dev/null 2>&1; then
-        if pgrep -f miniserv >/dev/null 2>&1; then printf '%bACTIVO%b' "$G" "$NC"
-        else printf '%bdetenido%b' "$Y" "$NC"; fi
-    else
-        printf '%bno instalado%b' "$R" "$NC"
+    ui_top
+    ui_row "$(printf '%bGHOST PANEL%b  %bv3.0.2%b' "$G" "$NC" "$DIM" "$NC")"
+    ui_mid
+    ui_row "$(printf 'IP      %-21s Fecha    %s' "$ipv4" "$(date '+%d/%m/%Y %H:%M')")"
+    ui_row "$(printf 'Host    %-21s Ubuntu   %s' "$(hostname)" "$osver")"
+    ui_row "$(printf 'CPU     %-21s RAM      %s of %sM' "$cpu" "$ram_u" "$ram_t")"
+    ui_row "$(printf 'Disk    %-21s Online   %b%s%b' "$disk" "$G" "$online" "$NC")"
+    ui_row "$(printf 'User    %-21s Lic      %b%s%b' "$(whoami)" "$G" "$lic" "$NC")"
+    ui_bot
+    if [[ ${#BC[@]} -gt 0 ]]; then
+        printf '  %b%s%b\n' "$DIM" "$(crumbs)" "$NC"
     fi
 }
-
-subtop(){
-    printf '%b╭─%b %b%s%b\n' "$SEC" "$NC" "$BOLD" "$1" "$NC"
-    hline 62 "$SEC"
-}
-
-botline(){ hline 62 "$SEC"; printf '\n'; }
-
-opt(){
-    if [[ $# -ge 4 ]]; then
-        printf '   %b[%s]%b %-28s %b[%s]%b %s\n' "$ACC" "$1" "$NC" "$2" "$ACC" "$3" "$NC" "$4"
-    else
-        printf '   %b[%s]%b %s\n' "$ACC" "$1" "$NC" "$2"
-    fi
-}
-
-prompt(){ printf '   %b▸%b %s > ' "$ACC" "$NC" "${1:-Opcion}"; }
 
 # ============================================================
-#  LICENCIA PERMANENTE UN SOLO USO
+#  LICENCIA
 # ============================================================
 consultar_licencia(){
     local KEY="$1" RESP
@@ -250,7 +253,6 @@ consultar_licencia(){
     RESP=$(curl -G -fsS --max-time 10 -A "Mozilla/5.0" "$LICENSE_URL" \
         --data-urlencode "key=$KEY" --data-urlencode "id=$(machine_hash)" 2>/dev/null) || return 2
     [[ -z "$RESP" ]] && return 2
-
     if printf '%s' "$RESP" | grep -q '"valid":[[:space:]]*true'; then
         LICENSE_NOMBRE=$(printf '%s' "$RESP" | grep -o '"name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
         LICENSE_PERMANENTE=0
@@ -274,16 +276,14 @@ apply_license_times(){
 
 gate_licencia(){
     local intentos=0 k rc perm_hash=""
-    printf '%b╭─%b %bLICENCIA%b\n' "$SEC" "$NC" "$Y" "$NC"
-    hline 62 "$SEC"
-    printf '%b│%b  ID del servidor: %b%s%b\n' "$SEC" "$NC" "$W" "$(machine_hash)" "$NC"
+    printf '%b╭─ LICENCIA %s╮%b\n' "$SEC" "$(hline_str 48)" "$NC"
+    ui_row "ID del servidor: $(machine_hash)"
     if [[ -z "$LICENSE_URL" ]]; then
-        printf '%b│%b  %bFalta configurar LICENSE_URL en %s%b\n' \
-            "$SEC" "$NC" "$R" "$CONF_FILE" "$NC"
-        printf '%b╰─%b\n' "$SEC" "$NC"
+        ui_row "$(printf '%bFalta configurar LICENSE_URL en %s%b' "$R" "$CONF_FILE" "$NC")"
+        ui_bot
         exit 1
     fi
-    printf '%b╰─%b\n' "$SEC" "$NC"
+    ui_bot
 
     [[ -f "$PERM_FILE" ]] && perm_hash=$(cat "$PERM_FILE" 2>/dev/null)
     INFO "Validando licencia online..."
@@ -340,7 +340,7 @@ gate_licencia(){
         fi
         intentos=$((intentos+1))
     done
-    ERR "Sin licencia valida. Contacta al administrador."
+    ERR "Sin licencia valida."
     exit 1
 }
 
@@ -480,7 +480,7 @@ PY
 xray_sync_all(){
     [[ -d "$USUARIOS_DIR" ]] || return 0
     [[ -f /usr/local/etc/xray/config.json ]] || return 0
-    local u
+    local u f
     for f in "$USUARIOS_DIR"/*; do
         [[ -f "$f" ]] || continue
         u=$(basename "$f")
@@ -493,14 +493,13 @@ crear_usuario(){
     local usu dias maxc clave
     read -r -p "   Nombre: " usu
     [[ -z "$usu" ]] && { ERR "Vacio."; PAUSA; return; }
-    [[ "$usu" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || { ERR "Nombre invalido (solo a-z, 0-9, _, -)."; PAUSA; return; }
+    [[ "$usu" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || { ERR "Nombre invalido."; PAUSA; return; }
     id "$usu" >/dev/null 2>&1 && { ERR "Ya existe."; PAUSA; return; }
     usuario_protegido "$usu" && { ERR "Nombre reservado."; PAUSA; return; }
     read -r -p "   Dias de validez (30): " dias; dias=${dias:-30}
     read -r -p "   Max conexiones (1): " maxc; maxc=${maxc:-1}
     read -r -p "   Contrasena: " clave
     [[ -z "$clave" ]] && { ERR "Contrasena vacia."; PAUSA; return; }
-
     useradd -m -s /bin/bash "$usu" 2>/dev/null || { ERR "No se pudo crear."; PAUSA; return; }
     printf '%s:%s\n' "$usu" "$clave" | chpasswd
     if [[ "$dias" =~ ^[0-9]+$ ]]; then
@@ -509,7 +508,6 @@ crear_usuario(){
     printf '%s\n' "$maxc" > "$LIMITS_DIR/$usu"
     usermod -aG vpsusers "$usu" 2>/dev/null || true
     xray_usuario add "$usu" 2>/dev/null || true
-
     OK "Usuario '$usu' creado."
     printf '   IP: %s  Puerto SSH: %s\n' \
         "$(get_ipv4)" \
@@ -521,7 +519,7 @@ crear_usuario(){
 listar_usuarios(){
     echo
     printf '   %b%-16s %-22s %-8s %s%b\n' "$BOLD" "USUARIO" "EXPIRA" "ESTADO" "HOME" "$NC"
-    hline 62 "$SEC"
+    hline
     local u exp est home
     while IFS= read -r u; do
         exp=$(chage -l "$u" 2>/dev/null | awk -F': ' '/Password expires/{print $2}')
@@ -536,10 +534,12 @@ listar_usuarios(){
     PAUSA
 }
 
+hline(){ printf '%b%s%b\n' "$DIM" "$(hline_str 62)" "$NC"; }
+
 cambiar_clave(){
     local u; read -r -p "   Usuario: " u
     id "$u" >/dev/null 2>&1 || { ERR "No existe."; PAUSA; return; }
-    passwd "$u" && OK "Clave actualizada." || ERR "Fallo el cambio."
+    passwd "$u" && OK "Clave actualizada." || ERR "Fallo."
     PAUSA
 }
 
@@ -609,7 +609,7 @@ matar_conexion(){
     local u
     who 2>/dev/null
     read -r -p "   Usuario a desconectar: " u
-    if pkill_user "$u"; then OK "Sesiones cerradas."; else ERR "Sin sesiones activas."; fi
+    if pkill_user "$u"; then OK "Sesiones cerradas."; else ERR "Sin sesiones."; fi
     PAUSA
 }
 
@@ -644,7 +644,7 @@ eliminar_vencidos(){
             rm -f "$LIMITS_DIR/$u" "$TRAF_DIR/$u"
             xray_usuario del "$u" 2>/dev/null || true
             userdel -r "$u" 2>/dev/null
-            INFO "Eliminado vencido: $u (vencio: $n)"
+            INFO "Eliminado vencido: $u"
             borr=$((borr+1))
         fi
     done < <(awk -F: '$3>=1000 && $1!="nobody"{print $1}' /etc/passwd)
@@ -663,6 +663,7 @@ menu_usuarios(){
         opt 4 "Bloquear / Desbloquear"   10 "Conexiones online"
         opt 5 "Renovar usuario"          11 "Desconectar usuario"
         opt 6 "Cambiar limite sesiones"
+        printf '\n'
         opt 0 "Volver"
         botline
         prompt
@@ -673,7 +674,7 @@ menu_usuarios(){
             7) eliminar_usuario ;; 8) eliminar_vencidos ;; 9) crear_test_ssh ;;
             10) conexiones_online ;; 11) matar_conexion ;;
             0) pop_crumb; break ;;
-            *) ERR "Opcion invalida."; sleep 1 ;;
+            *) ERR "Invalida."; sleep 1 ;;
         esac
     done
 }
@@ -684,7 +685,7 @@ menu_usuarios(){
 instalar_fail2ban(){
     INFO "Instalando fail2ban..."
     apt update -y >/dev/null 2>&1
-    apt install -y fail2ban >/dev/null 2>&1 || { ERR "Fallo la instalacion."; PAUSA; return; }
+    apt install -y fail2ban >/dev/null 2>&1 || { ERR "Fallo."; PAUSA; return; }
     cat > /etc/fail2ban/jail.local <<'F2B'
 [sshd]
 enabled  = true
@@ -784,6 +785,7 @@ menu_seguridad(){
         opt 2 "Activar limiter"          6  "Abrir puerto"
         opt 3 "Quitar limiter"           7  "Banner SSH / HTTP Custom"
         opt 4 "Cambiar puerto SSH"
+        printf '\n'
         opt 0 "Volver"
         botline
         prompt; read -r op
@@ -827,10 +829,10 @@ banner_publicar(){
     [[ -s "$tmp" ]] || { ERR "Vacio."; return 1; }
     if [[ "${BANNER_HC:-0}" == "1" ]]; then
         if grep -qE '\$|\[[A-Za-z]+\]' "$tmp"; then
-            ERR "No uses \$ ni [VAR]. Tokens permitidos: USER EXP DAYS WARN"; return 1
+            ERR "No uses \$ ni [VAR]. Tokens: USER EXP DAYS WARN"; return 1
         fi
         if grep -qE '[A-Za-z]EXP|EXP[A-Za-z]' "$tmp"; then
-            ERR "Texto fijo contiene 'EXP'. Usa 'VENCIMIENTO :'."; return 1
+            ERR "Texto con 'EXP'. Usa 'VENCIMIENTO :'."; return 1
         fi
     fi
     install -m 644 "$tmp" /etc/banner-vps
@@ -881,6 +883,7 @@ menu_banner(){
         subtop "BANNER SSH / HTTP CUSTOM"
         opt 1 "Plantilla GHOST PANEL"    3 "Eliminar banner"
         opt 2 "Pegar HTML propio"        4 "CheckUser + banner"
+        printf '\n'
         opt 0 "Volver"
         botline
         prompt; read -r op
@@ -1040,6 +1043,7 @@ menu_checkuser(){
         opt 1 "Instalar / reinstalar"  4 "Ver token y puerto"
         opt 2 "Estado del servicio"    5 "Remover"
         opt 3 "Probar consulta"
+        printf '\n'
         opt 0 "Volver"
         botline
         prompt; read -r op
@@ -1184,6 +1188,7 @@ menu_sistema(){
         opt 3 "Optimizar (BBR)"        7 "Update sistema"
         opt 4 "Agregar swap"           8 "Reiniciar VPS"
         opt 9 "Agregar zram"
+        printf '\n'
         opt 0 "Volver"
         botline
         prompt; read -r op
@@ -1209,7 +1214,7 @@ instalar_xray(){
     read -r -p "   SNI (www.microsoft.com): " sni; sni=${sni:-www.microsoft.com}
     INFO "Instalando Xray..."
     bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1 \
-        || { ERR "Fallo la instalacion."; PAUSA; return; }
+        || { ERR "Fallo."; PAUSA; return; }
     local keys priv pub uuidv
     keys=$(xray x25519 2>/dev/null)
     priv=$(printf '%s' "$keys" | grep -iE 'private' | awk '{print $NF}')
@@ -1639,6 +1644,7 @@ menu_quitar(){
         opt 3 "Stunnel"         7 "Trojan"
         opt 4 "BadVPN"          8 "WireGuard"
         opt 9 "Tunel CDN"
+        printf '\n'
         opt 0 "Volver"
         botline
         prompt; read -r op
@@ -1694,6 +1700,7 @@ menu_protocolos(){
         opt 9 "Trojan"               10 "WireGuard"
         opt 11 "Estado protocolos"   12 "Quitar protocolos"
         opt 13 "Tunel CDN (prueba)"
+        printf '\n'
         opt 0 "Volver"
         botline
         prompt; read -r op
@@ -1731,7 +1738,7 @@ trafico_activar(){
 trafico_ver(){
     echo; INFO "Consumo por usuario"
     printf '   %-16s %12s %s\n' "USUARIO" "USADO" "LIMITE(GB)"
-    hline 62 "$SEC"
+    hline
     iptables -L VPS-TRAFFIC -v -x -n 2>/dev/null | awk '/owner UID match/ {print $2, $NF}' | while read -r bytes uidn; do
         local u mb lim
         u=$(id -un "$uidn" 2>/dev/null || echo "uid$uidn")
@@ -1783,6 +1790,7 @@ menu_trafico(){
         opt 1 "Activar contadores"  4 "Cortar excedidos"
         opt 2 "Ver consumo"         5 "Reset contadores"
         opt 3 "Poner limite GB"
+        printf '\n'
         opt 0 "Volver"
         botline
         prompt; read -r op
@@ -1830,6 +1838,7 @@ menu_webmin(){
         opt 1 "Instalar Webmin"   4 "Cambiar puerto"
         opt 2 "Estado / reiniciar" 5 "Remover Webmin"
         opt 3 "Abrir puerto 10000"
+        printf '\n'
         opt 0 "Volver"
         botline
         prompt; read -r op
@@ -1879,6 +1888,7 @@ menu_backup(){
         header
         subtop "BACKUP / RESTAURAR"
         opt 1 "Crear backup"  2 "Restaurar backup"
+        printf '\n'
         opt 0 "Volver"
         botline
         prompt; read -r op
@@ -1958,38 +1968,37 @@ cambiar_tema(){
 }
 
 doctor(){
-    echo; INFO "Ghost Panel --doctor"
-    hline 62 "$SEC"
+    echo; INFO "Ghost Panel doctor"
+    hline
     local ok=0 fail=0
     local check_cmd=(bash python3 curl wget openssl systemctl iptables)
     local c
     for c in "${check_cmd[@]}"; do
         if command -v "$c" >/dev/null 2>&1; then
-            printf '   %b✅%b %-12s %s\n' "$G" "$NC" "$c" "$(command -v "$c")"
+            printf '   %bOK%b   %-12s %s\n' "$G" "$NC" "$c" "$(command -v "$c")"
             ok=$((ok+1))
         else
-            printf '   %b❌%b %-12s faltante\n' "$R" "$NC" "$c"
+            printf '   %bFAIL%b %-12s faltante\n' "$R" "$NC" "$c"
             fail=$((fail+1))
         fi
     done
     for svc in ssh sshd vps-checkuser xray ghost-ws ghost-ss badvpn; do
         if systemctl list-unit-files 2>/dev/null | grep -q "^${svc}\.service"; then
             if systemctl is-active --quiet "$svc" 2>/dev/null; then
-                printf '   %b✅%b svc %-18s activo\n' "$G" "$NC" "$svc"
+                printf '   %bOK%b   svc %-18s activo\n' "$G" "$NC" "$svc"
                 ok=$((ok+1))
             else
-                printf '   %b⚠️%b  svc %-18s detenido\n' "$Y" "$NC" "$svc"
+                printf '   %bWARN%b svc %-18s detenido\n' "$Y" "$NC" "$svc"
             fi
         fi
     done
-    [[ -n "${LICENSE_URL:-}" ]] && printf '   %b✅%b LICENSE_URL configurado\n' "$G" "$NC" || { printf '   %b❌%b LICENSE_URL vacio\n' "$R" "$NC"; fail=$((fail+1)); }
-    [[ -f /etc/cron.d/ghost-panel-vencidos ]] && printf '   %b✅%b Cron de vencidos\n' "$G" "$NC" || printf '   %b⚠️%b  Cron no instalado\n' "$Y" "$NC"
-    hline 62 "$SEC"
+    [[ -n "${LICENSE_URL:-}" ]] && printf '   %bOK%b   LICENSE_URL configurado\n' "$G" "$NC" || { printf '   %bFAIL%b LICENSE_URL vacio\n' "$R" "$NC"; fail=$((fail+1)); }
+    [[ -f /etc/cron.d/ghost-panel-vencidos ]] && printf '   %bOK%b   Cron de vencidos\n' "$G" "$NC" || printf '   %bWARN%b Cron no instalado\n' "$Y" "$NC"
+    hline
     printf '   Total: %b%d OK%b, %b%d problemas%b\n' "$G" "$ok" "$NC" "$R" "$fail" "$NC"
     PAUSA
 }
 
-# CLI NO INTERACTIVO
 cli_cmd(){
     local c1="${1:-}" c2="${2:-}" c3="${3:-}"
     case "$c1" in
@@ -2049,6 +2058,7 @@ menu_herramientas(){
         opt 2 "Activar auto-menu"        5 "CheckUser API"
         opt 3 "Quitar auto-menu"         6 "Ver logs"
         opt 7 "Cambiar tema"             8 "Doctor (diagnostico)"
+        printf '\n'
         opt 0 "Volver"
         botline
         prompt; read -r op
@@ -2068,13 +2078,13 @@ main_menu(){
     push_crumb "Inicio"
     while true; do
         header
-        printf '%b  ▸ Principal%b\n\n' "$BOLD" "$NC"
-        opt 1 "👥 Usuarios SSH"    2 "🔌 Protocolos"
-        opt 3 "🛡️  Seguridad"      4 "⚙️  Sistema"
-        opt 5 "🧰 Herramientas"    6 "🖥️  Webmin"
-        opt 7 "💾 Backup"          8 "🩺 Diagnostico"
+        subtop "PRINCIPAL"
+        opt 1 "Usuarios SSH"       2 "Protocolos"
+        opt 3 "Seguridad"          4 "Sistema"
+        opt 5 "Herramientas"       6 "Webmin"
+        opt 7 "Backup"             8 "Diagnostico"
         printf '\n'
-        opt 0 "⏻  Salir"
+        opt 0 "Salir"
         botline
         prompt; read -r op
         case "$op" in
@@ -2082,7 +2092,7 @@ main_menu(){
             3) menu_seguridad ;;   4) menu_sistema ;;
             5) menu_herramientas ;; 6) menu_webmin ;;
             7) menu_backup ;;      8) diagnostico ;;
-            0) printf '%bHasta luego!%b\n' "$G" "$NC"; exit 0 ;;
+            0) printf '%bHasta luego.%b\n' "$G" "$NC"; exit 0 ;;
             *) ERR "Invalida."; sleep 1 ;;
         esac
     done
@@ -2092,26 +2102,24 @@ main_menu(){
 require_root
 check_deps || exit 1
 
-# CLI NO INTERACTIVO
 if [[ $# -gt 0 ]]; then
     case "$1" in
         users|status|doctor) cli_cmd "$@"; exit $? ;;
-        --version|-v) echo "Ghost Panel v3.0.1"; exit 0 ;;
+        --version|-v) echo "Ghost Panel v3.0.2"; exit 0 ;;
         --help|-h)
             cat <<HELP
-Ghost Panel v3.0.1
+Ghost Panel v3.0.2
   ghostpanel                    Menu interactivo
-  ghostpanel users list         Listar usuarios
+  ghostpanel users list
   ghostpanel users create U --dias 30 --max 1 --pass 1234
-  ghostpanel users delete U     Eliminar usuario
-  ghostpanel status             Estado rapido
-  ghostpanel doctor             Diagnostico del sistema
+  ghostpanel users delete U
+  ghostpanel status
+  ghostpanel doctor
 HELP
             exit 0 ;;
     esac
 fi
 
-# Auto-check de sintaxis
 if ! bash -n "$0" 2>/dev/null; then
     printf '%b[FATAL]%b Script con errores de sintaxis. Abortando.\n' "$R" "$NC"
     exit 1
