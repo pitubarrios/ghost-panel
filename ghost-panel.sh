@@ -22,7 +22,7 @@ PREFIJO_KEY='VPSJB1'
 REPO_RAW='https://raw.githubusercontent.com/pitubarrios/vps-manager/refs/heads/main/ghost-panel.sh'
 
 # Pon aqui la URL de tu Worker de Cloudflare (ej: https://tu-worker.workers.dev/)
-LICENSE_URL=''
+LICENSE_URL='https://vps-licencias.jorgebarriosmpya.workers.dev'
 GRACE_SECS=259200
 LICENSE_CACHE='/etc/vps-license.cache'
 
