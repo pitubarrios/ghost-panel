@@ -2,7 +2,7 @@
 # ============================================================
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
-#  Uso:  sudo bash vps-manager.sh
+#  Uso:  sudo bash ghost-panel.sh
 # ============================================================
 
 set -u
@@ -12,10 +12,16 @@ AZUL='\033[1;34m'; CIAN='\033[1;36m'; BLANCO='\033[1;37m'
 NC='\033[0m'
 
 # --- LICENCIA / KEY -------------------------------------------
+# Validacion ONLINE obligatoria (Worker de Cloudflare con KV).
+# Sistema de UN SOLO USO: la primera vez que un VPS valida la key,
+# el Worker la ata a su machine-id y NO se puede reutilizar en otro VPS.
 SECRET_KEY='Copiaesta**'
 KEY_FILE='/etc/vps-manager.key'
+PERM_FILE='/etc/vps-license.permanent'
 PREFIJO_KEY='VPSJB1'
 REPO_RAW='https://raw.githubusercontent.com/pitubarrios/vps-manager/refs/heads/main/ghost-panel.sh'
+
+# Pon aqui la URL de tu Worker de Cloudflare (ej: https://tu-worker.workers.dev/)
 LICENSE_URL=''
 GRACE_SECS=259200
 LICENSE_CACHE='/etc/vps-license.cache'
@@ -28,43 +34,39 @@ machine_hash(){
     fi
 }
 
-validar_key(){
-    local KEY BODY B64 SIG SIGC PAYLOAD NOMBRE EXP MACH
-    KEY=$(echo "$1" | tr -d '[:space:]')
-    case "$KEY" in ${PREFIJO_KEY}-*|VPSMGR1-*) ;; *) return 1 ;; esac
-    BODY=${KEY#*-}
-    SIG=${BODY##*-}
-    B64=${BODY%-*}
-    [[ -n "$B64" && -n "$SIG" && "$B64" != "$SIG" ]] || return 1
-    SIGC=$(printf '%s' "$B64" | openssl dgst -sha256 -hmac "$SECRET_KEY" 2>/dev/null | awk '{print $NF}' | cut -c1-16 | tr 'a-f' 'A-F')
-    [[ "$SIGC" == "$SIG" ]] || return 1
-    PAYLOAD=$(printf '%s' "$B64" | base64 -d 2>/dev/null) || return 1
-    NOMBRE=${PAYLOAD%%|*}; PAYLOAD=${PAYLOAD#*|}
-    EXP=${PAYLOAD%%|*};  MACH=${PAYLOAD#*|}
-    [[ -n "$NOMBRE" && -n "$EXP" ]] || return 1
-    [[ "$EXP" != "0" && "$(date +%s)" -gt "$EXP" ]] && return 1
-    if [[ -n "$MACH" && "$MACH" != "$(machine_hash)" ]]; then return 1; fi
-    KEY_NOMBRE="$NOMBRE"
-    KEY_EXP="$EXP"
-    return 0
-}
-
 consultar_licencia(){
+    # Devuelve: 0 valida / 1 invalida / 2 servidor sin respuesta
+    # Setea: LICENSE_NOMBRE, LICENSE_PERMANENTE, LICENSE_DIAS, LICENSE_REASON
     local KEY="$1" RESP
     [[ -z "$LICENSE_URL" ]] && return 2
+
     RESP=$(curl -G -fsS --max-time 10 -A "Mozilla/5.0" "$LICENSE_URL" \
         --data-urlencode "key=$KEY" --data-urlencode "id=$(machine_hash)" 2>/dev/null)
     [[ -z "$RESP" ]] && return 2
+
     if echo "$RESP" | grep -q '"valid":[[:space:]]*true'; then
-        LICENSE_NOMBRE=$(echo "$RESP" | grep -o '"name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
-        LICENSE_DIAS=$(echo "$RESP" | grep -o '"days_left"[[:space:]]*:[[:space:]]*[0-9]*' | head -1 | grep -o '[0-9]*$')
+        LICENSE_NOMBRE=$(echo "$RESP" | grep -o '"name"[[:space:]]*:[[:space:]]*"[^"]*"' \
+            | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+        if echo "$RESP" | grep -q '"permanent":[[:space:]]*true'; then
+            LICENSE_PERMANENTE=1
+        else
+            LICENSE_PERMANENTE=0
+        fi
+        LICENSE_DIAS=$(echo "$RESP" | grep -o '"days_left"[[:space:]]*:[[:space:]]*[0-9]*' \
+            | head -1 | grep -o '[0-9]*$')
         return 0
     fi
+
+    LICENSE_REASON=$(echo "$RESP" \
+        | grep -o '"reason"[[:space:]]*:[[:space:]]*"[^"]*"' \
+        | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
     return 1
 }
 
 gate_licencia(){
     local INTENTOS=0 K RC
+    local PERM_HASH=''
+
     FR_TOP
     FR_TXT "  ${AMARILLO}$(T t_lic_req)${NC} - $(T t_panel_jb)"
     FR_MID
@@ -77,38 +79,72 @@ gate_licencia(){
         exit 1
     fi
 
+    [[ -f "$PERM_FILE" ]] && PERM_HASH=$(cat "$PERM_FILE" 2>/dev/null)
     INFO "Validacion online activa."
+
+    # --- Intento con la key guardada ---
     if [[ -f "$KEY_FILE" ]]; then
         K=$(cat "$KEY_FILE" 2>/dev/null)
         consultar_licencia "$K"; RC=$?
         if [[ $RC -eq 0 ]]; then
-            date +%s > "$LICENSE_CACHE" 2>/dev/null
+            echo "$(machine_hash)" > "$PERM_FILE" 2>/dev/null
+            chmod 600 "$PERM_FILE" 2>/dev/null
             LICENSE_OK="${LICENSE_NOMBRE:-cliente}"
-            [[ -n "${LICENSE_DIAS:-}" ]] && LICENSE_EXP=$(( $(date +%s) + LICENSE_DIAS * 86400 ))
+            if [[ "${LICENSE_PERMANENTE:-0}" == "1" ]]; then
+                LICENSE_EXP=0
+            elif [[ -n "${LICENSE_DIAS:-}" ]]; then
+                LICENSE_EXP=$(( $(date +%s) + LICENSE_DIAS * 86400 ))
+            else
+                LICENSE_EXP=0
+            fi
             return 0
         elif [[ $RC -eq 2 ]]; then
-            if [[ -f "$LICENSE_CACHE" ]] && (( $(date +%s) - $(cat "$LICENSE_CACHE" 2>/dev/null || echo 0) < GRACE_SECS )); then
-                LICENSE_OK="modo gracia (servidor caido)"
+            if [[ -n "$PERM_HASH" && "$PERM_HASH" == "$(machine_hash)" ]]; then
+                LICENSE_OK="modo offline (licencia local permanente)"
+                LICENSE_EXP=0
                 return 0
             fi
-            ERR "Servidor de licencias no responde y no hay gracia acumulada."
+            ERR "Servidor de licencias no responde y esta key nunca fue activada en este VPS."
+        else
+            ERR "Key rechazada: ${LICENSE_REASON:-invalida}."
+            case "${LICENSE_REASON:-}" in
+                already_used_other_machine|revoked|unknown_key)
+                    rm -f "$KEY_FILE" "$PERM_FILE" 2>/dev/null ;;
+            esac
         fi
     fi
+
+    # --- Pedir key al usuario ---
     while [[ $INTENTOS -lt 3 ]]; do
         read -r -p " INGRESE SU KEY > " K
         consultar_licencia "$K"; RC=$?
         if [[ $RC -eq 0 ]]; then
-            echo "$K" > "$KEY_FILE" 2>/dev/null
-            date +%s > "$LICENSE_CACHE" 2>/dev/null
+            echo "$K" > "$KEY_FILE" 2>/dev/null;          chmod 600 "$KEY_FILE" 2>/dev/null
+            echo "$(machine_hash)" > "$PERM_FILE" 2>/dev/null; chmod 600 "$PERM_FILE" 2>/dev/null
             LICENSE_OK="${LICENSE_NOMBRE:-cliente}"
-            [[ -n "${LICENSE_DIAS:-}" ]] && LICENSE_EXP=$(( $(date +%s) + LICENSE_DIAS * 86400 ))
-            OK "Licencia aceptada. Bienvenido, ${LICENSE_OK}."
+            if [[ "${LICENSE_PERMANENTE:-0}" == "1" ]]; then
+                LICENSE_EXP=0
+            elif [[ -n "${LICENSE_DIAS:-}" ]]; then
+                LICENSE_EXP=$(( $(date +%s) + LICENSE_DIAS * 86400 ))
+            else
+                LICENSE_EXP=0
+            fi
+            OK "Licencia activada PERMANENTEMENTE en este VPS. Bienvenido, ${LICENSE_OK}."
             sleep 1
             return 0
         elif [[ $RC -eq 2 ]]; then
             ERR "Servidor de licencias no responde. Intenta mas tarde."
         else
-            ERR "Key invalida, expirada, revocada o de otro servidor."
+            case "${LICENSE_REASON:-}" in
+                already_used_other_machine)
+                    ERR "Esta key ya fue usada en OTRO VPS y no se puede reutilizar." ;;
+                revoked)
+                    ERR "Esta key fue revocada por el administrador." ;;
+                unknown_key)
+                    ERR "Key inexistente. Verifica que este bien copiada." ;;
+                *)
+                    ERR "Key invalida o expirada." ;;
+            esac
         fi
         INTENTOS=$((INTENTOS+1))
     done
@@ -442,7 +478,7 @@ ghost_bootstrap(){
     mkdir -p "$USUARIOS_DIR" /etc/vps-limits /etc/vps-trafico
     touch "$LOG_PANEL" 2>/dev/null
     chmod 640 "$LOG_PANEL" 2>/dev/null || true
-    # Asegurar el grupo del limiter (asi crear_usuario puede añadir siempre)
+    # Grupo del limiter siempre existente (para usermod en crear_usuario)
     getent group vpsusers >/dev/null 2>&1 || groupadd vpsusers 2>/dev/null || true
     [[ -f /etc/cron.d/ghost-panel-vencidos ]] || cron_vencidos_instalar
 }
@@ -493,7 +529,9 @@ cabecera(){
     CPU=$(top -bn1 | awk '/%Cpu/{printf "%.1f%%", 100-$8}' 2>/dev/null || echo "n/a")
     DISCO=$(df -h / | awk 'NR==2{print $5}')
     ONLINE=$(who 2>/dev/null | wc -l)
-    if [[ -n "${LICENSE_EXP:-}" && "${LICENSE_EXP:-0}" != "0" ]]; then
+    if [[ "${LICENSE_EXP:-0}" == "0" ]]; then
+        DIAS_LIC=" (PERMANENTE)"
+    elif [[ -n "${LICENSE_EXP:-}" ]]; then
         DIAS_LIC=$(( (LICENSE_EXP - $(date +%s)) / 86400 ))
         [[ $DIAS_LIC -lt 0 ]] && DIAS_LIC=0
         DIAS_LIC=" (${DIAS_LIC}d)"
@@ -533,7 +571,6 @@ crear_usuario(){
     [[ "$DIAS" =~ ^[0-9]+$ ]] && chage -M "$DIAS" -E "$(date -d "+${DIAS} days" +%Y-%m-%d)" "$USU"
     mkdir -p /etc/vps-limits
     echo "$MAXC" > "/etc/vps-limits/$USU"
-    # El grupo ya lo garantiza ghost_bootstrap()
     usermod -aG vpsusers "$USU" 2>/dev/null
     xray_usuario add "$USU" 2>/dev/null
     OK "Usuario '$USU' creado. Expira: $(chage -l "$USU" 2>/dev/null | awk -F': ' '/Password expires/{print $2}')"
@@ -656,9 +693,8 @@ backup_basico(){
 #  - Una sola linea, sin saltos.
 #  - Cada renglon visual dentro de su propio <p style="text-align:center;">.
 #  - Solo etiquetas inline: <font color="#HEX">, <b>, <i>.
-#  - Nunca escribir texto fijo que contenga la subcadena "EXP".
-#    Usar "VENCIMIENTO :" como etiqueta de fecha.
-#  - La linea de WARN lleva SOLO la variable, sin prefijos tipo "AVISO :".
+#  - Nunca texto fijo con la subcadena "EXP" (usar "VENCIMIENTO :").
+#  - WARN va SOLO, sin prefijos tipo "AVISO :".
 banner_html_http_custom(){
     cat <<'HTMLEOF'
 <p style="text-align:center;"><font color="#00FFFF"><b>════════════════════════════════</b></font></p><p style="text-align:center;"><font color="#FF00FF"><b>✦ GHOST PANEL ✦</b></font></p><p style="text-align:center;"><font color="#00FF7F"><i>── CONEXION VIP ESTABLE ──</i></font></p><p style="text-align:center;"><font color="#00FFFF"><b>════════════════════════════════</b></font></p><p style="text-align:center;"><font color="#00BFFF"><b>👤 USUARIO : USER</b></font></p><p style="text-align:center;"><font color="#FFD700"><b>📅 VENCIMIENTO : EXP</b></font></p><p style="text-align:center;"><font color="#FF8C00"><b>⏳ RESTANTES : DAYS</b></font></p><p style="text-align:center;"><font color="#FF4444"><b>WARN</b></font></p><p style="text-align:center;"><font color="#7CFC00"><i>🚀 Disfruta de la mejor velocidad 🚀</i></font></p><p style="text-align:center;"><font color="#00FFFF"><b>════════════════════════════════</b></font></p>
@@ -684,7 +720,6 @@ banner_activar_en_dropbear(){
     return 0
 }
 
-# Recibe HTML por stdin (una linea) y lo activa en OpenSSH + Dropbear.
 banner_publicar(){
     local tmp
     tmp=$(mktemp /tmp/banner-vps.XXXXXX) || { ERR "No se pudo crear temporal."; return 1; }
@@ -695,17 +730,15 @@ banner_publicar(){
         return 1
     fi
     if [[ "${BANNER_HC:-0}" == "1" ]]; then
-        # Sin $, sin [], sin ${}  (reglas de sustitucion de HTTP Custom)
         if grep -qE '\$|\[[A-Za-z]+\]' "$tmp"; then
             rm -f "$tmp"
             ERR "Sintaxis invalida: no uses \$, [] ni \${}. Tokens permitidos: USER EXP DAYS WARN"
             return 1
         fi
-        # EXP solo puede aparecer como token suelto (no dentro de otra palabra).
-        # Falla si EXP esta pegado a letras (EXPIRA, EXPIRE, MIEXP, etc.).
+        # EXP solo como token suelto (no pegado a letras)
         if grep -qE '[A-Za-z]EXP|EXP[A-Za-z]' "$tmp"; then
             rm -f "$tmp"
-            ERR "Texto fijo contiene 'EXP' (solo se permite como token suelto). Usa 'VENCIMIENTO :'"
+            ERR "Texto fijo contiene 'EXP'. Usa 'VENCIMIENTO :' como etiqueta."
             return 1
         fi
     fi
@@ -810,7 +843,7 @@ menu_banner(){
 }
 
 # ------------------------------------------------------------
-# WEBMIN  (instalador oficial vía repositorio)
+# WEBMIN
 # ------------------------------------------------------------
 instalar_webmin(){
     echo -e "${CIAN}--- INSTALADOR WEBMIN ---${NC}"
@@ -953,4 +986,1521 @@ instalar_fail2ban(){
     INFO "Instalando fail2ban (anti fuerza bruta SSH)..."
     apt update -y >/dev/null 2>&1
     apt install -y fail2ban >/dev/null 2>&1
-    cat > /etc/fail2ban/jail.local <<
+    cat > /etc/fail2ban/jail.local <<'F2BEOF'
+[sshd]
+enabled  = true
+port     = ssh
+maxretry = 5
+bantime  = 1h
+F2BEOF
+    systemctl enable --now fail2ban 2>/dev/null
+    OK "Fail2ban activo: 5 intentos fallidos = baneo de 1 hora."
+    PAUSA
+}
+
+cambiar_puerto_ssh(){
+    read -r -p "Puerto SSH nuevo (ej. 2222): " P
+    [[ "$P" =~ ^[0-9]+$ && "$P" -ge 1 && "$P" -le 65535 ]] || { ERR "Puerto invalido."; PAUSA; return; }
+    sed -i 's/^#\?Port .*/Port '$P'/' /etc/ssh/sshd_config
+    grep -q "^Port $P" /etc/ssh/sshd_config || echo "Port $P" >> /etc/ssh/sshd_config
+    ufw allow "$P/tcp" >/dev/null 2>&1
+    systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null
+    OK "Puerto SSH: $P. ${AMARILLO}Abri otra terminal y proba conectarte ANTES de cerrar esta.${NC}"
+    PAUSA
+}
+
+ver_puertos(){
+    echo -e "${CIAN}--- PUERTOS ESCUCHANDO (TCP) ---${NC}"
+    ss -tlnp 2>/dev/null | head -25
+    echo
+    echo -e "${CIAN}--- UFW (firewall) ---${NC}"
+    if command -v ufw >/dev/null 2>&1; then
+        ufw status verbose 2>/dev/null | head -20
+    else
+        echo "UFW no instalado."
+    fi
+    PAUSA
+}
+
+abrir_puerto(){
+    read -r -p "Puerto a abrir (ej. 8080): " P
+    [[ "$P" =~ ^[0-9]+$ && "$P" -ge 1 && "$P" -le 65535 ]] || { ERR "Puerto invalido."; PAUSA; return; }
+    read -r -p "Protocolo (tcp/udp) [tcp]: " PROTO; PROTO=${PROTO:-tcp}
+    [[ "$PROTO" != "tcp" && "$PROTO" != "udp" ]] && { ERR "Protocolo invalido."; PAUSA; return; }
+    if ! command -v ufw >/dev/null 2>&1; then
+        INFO "UFW no instalado, instalando..."
+        apt update -y >/dev/null 2>&1 && apt install -y ufw >/dev/null 2>&1
+    fi
+    if ! ufw status 2>/dev/null | grep -q "Status: active"; then
+        read -r -p "UFW no esta activo. Activarlo ahora? (s/n): " SN
+        [[ "$SN" == "s" ]] && { ufw --force enable; INFO "UFW activado."; }
+    fi
+    ufw allow "$P/$PROTO" >/dev/null 2>&1 && OK "Puerto $P/$PROTO abierto."
+    ufw status 2>/dev/null | grep -E "^$P/" || ERR "No se confirmo la regla."
+    PAUSA
+}
+
+cambiar_limite(){
+    echo -e "${CIAN}--- CAMBIAR LIMITE DE SESIONES ---${NC}"
+    ls /etc/vps-limits/ 2>/dev/null | while read -r U; do
+        printf "  %-16s max: %s\n" "$U" "$(cat /etc/vps-limits/$U 2>/dev/null)"
+    done
+    read -r -p "Usuario: " USU
+    [[ -f "/etc/vps-limits/$USU" ]] || { ERR "Ese usuario no tiene limite (creado fuera del script?)."; PAUSA; return; }
+    read -r -p "Nuevo maximo de sesiones: " M
+    [[ "$M" =~ ^[0-9]+$ ]] || { ERR "Numero invalido."; PAUSA; return; }
+    echo "$M" > "/etc/vps-limits/$USU"
+    OK "Limite de '$USU' actualizado a $M sesiones."
+    PAUSA
+}
+
+crear_test_ssh(){
+    echo -e "${CIAN}--- CREAR USUARIO DE PRUEBA (vence en 1 dia) ---${NC}"
+    read -r -p "Nombre base (le agrego prefijo test-): " NOMBRE
+    local USU CLAVE
+    USU="test-$(echo "$NOMBRE" | tr -cd 'a-zA-Z0-9' | tr 'A-Z' 'a-z' | cut -c1-18)"
+    id "$USU" >/dev/null 2>&1 && { ERR "Ya existe."; PAUSA; return; }
+    read -r -p "Conexion maxima [1]: " MAXC; MAXC=${MAXC:-1}
+    CLAVE=$(tr -dc 'a-zA-Z0-9' </dev/urandom 2>/dev/null | head -c 10)
+    [[ -z "$CLAVE" ]] && CLAVE="test123456"
+    useradd -m -s /bin/bash "$USU" 2>/dev/null || { ERR "No se pudo crear."; PAUSA; return; }
+    echo "$USU:$CLAVE" | chpasswd
+    chage -M 1 -E "$(date -d '+1 day' +%Y-%m-%d)" "$USU" 2>/dev/null
+    mkdir -p /etc/vps-limits; echo "$MAXC" > "/etc/vps-limits/$USU"
+    usermod -aG vpsusers "$USU" 2>/dev/null
+    xray_usuario add "$USU" 2>/dev/null
+    OK "Usuario de prueba creado:"
+    echo -e "  Usuario: ${VERDE}$USU${NC}   Clave: ${VERDE}$CLAVE${NC}"
+    echo -e "  ${AMARILLO}Vence manana. IP: $(hostname -I | awk '{print $1}')  Puerto: $(grep -i '^Port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -1 || echo 22)${NC}"
+    PAUSA
+}
+
+eliminar_vencidos(){
+    local HOY N BORRADOS=0 U EXP
+    HOY=$(date +%Y-%m-%d)
+    for U in $(awk -F: '$3>=1000 && $1!="nobody"{print $1}' /etc/passwd); do
+        EXP=$(chage -l "$U" 2>/dev/null | awk -F': ' '/Password expires/{print $2}')
+        [[ -z "$EXP" || "$EXP" == "never" ]] && continue
+        N=$(date -d "$EXP" +%Y-%m-%d 2>/dev/null) || continue
+        if [[ "$N" < "$HOY" ]]; then
+            pkill -u "$U" 2>/dev/null
+            rm -f "/etc/vps-limits/$U"
+            xray_usuario del "$U" 2>/dev/null
+            userdel -r "$U" 2>/dev/null
+            INFO "Eliminado vencido: $U (vencio: $N)"
+            BORRADOS=$((BORRADOS+1))
+        fi
+    done
+    [[ $BORRADOS -eq 0 ]] && OK "No hay usuarios vencidos." || OK "Eliminados $BORRADOS usuarios vencidos."
+    PAUSA
+}
+
+mantenimiento(){
+    INFO "Limpiando sistema..."
+    apt autoremove -y >/dev/null 2>&1
+    apt clean >/dev/null 2>&1
+    journalctl --vacuum-time=7d >/dev/null 2>&1
+    find /tmp -type f -mtime +7 -delete 2>/dev/null
+    ls -t /root/backups/*.tar.gz 2>/dev/null | tail -n +4 | xargs -r rm -f
+    find /var/log -name "*.gz" -mtime +7 -delete 2>/dev/null
+    systemctl enable --now fstrim.timer >/dev/null 2>&1
+    INFO "TRIM semanal: $(systemctl is-enabled fstrim.timer 2>/dev/null || echo "no aplica en este entorno")"
+    OK "Listo: paquetes huerfanos, logs viejos, /tmp y backups (conservo los ultimos 3)."
+    PAUSA
+}
+
+auto_menu(){
+    if grep -q "VPS-JB-AUTOMENU-INICIO" "$HOME/.bashrc" 2>/dev/null; then
+        OK "El auto-menu ya estaba activo."; PAUSA; return
+    fi
+    cat >> "$HOME/.bashrc" <<'AMEOF'
+# VPS-JB-AUTOMENU-INICIO
+case "$-" in *i*) [ -x /usr/local/bin/vpsmgr ] && /usr/local/bin/vpsmgr ;; esac
+# VPS-JB-AUTOMENU-FIN
+AMEOF
+    OK "Auto-menu activo: la proxima vez que root inicie sesion (SSH o consola), el menu abre solo."
+    PAUSA
+}
+
+quitar_auto_menu(){
+    sed -i '/VPS-JB-AUTOMENU-INICIO/,/VPS-JB-AUTOMENU-FIN/d' "$HOME/.bashrc" 2>/dev/null
+    OK "Auto-menu desactivado."
+    PAUSA
+}
+
+diagnostico(){
+    echo -e "${CIAN}--- DIAGNOSTICO DEL SERVIDOR ---${NC}"
+    local RAM_P DISCO_P LOAD ADV=0
+    RAM_P=$(free | awk '/Mem/{printf "%d", $3*100/$2}')
+    DISCO_P=$(df -h / | awk 'NR==2{gsub(/%/,"",$5); print $5}')
+    LOAD=$(cut -d' ' -f1 /proc/loadavg)
+    echo -e " RAM: ${RAM_P}%   Disco: ${DISCO_P}%   Carga: $LOAD"
+    [[ "$RAM_P" -gt 85 ]]    && { echo -e " ${ROJO}!${NC} RAM al ${RAM_P}%: cerrar procesos o agregar swap."; ADV=1; }
+    [[ "$DISCO_P" -gt 85 ]]  && { echo -e " ${ROJO}!${NC} Disco al ${DISCO_P}%: correr Mantenimiento (26) y revisar /root/backups."; ADV=1; }
+    systemctl is-failed --quiet sshd 2>/dev/null && { echo -e " ${ROJO}!${NC} sshd con fallos: 'systemctl status sshd'."; ADV=1; }
+    pgrep -f miniserv >/dev/null 2>&1 || echo -e " ${AMARILLO}-${NC} Webmin no corre (menu 11)."
+    lastb -i 2>/dev/null | head -5 | grep -q . && echo -e " ${AMARILLO}-${NC} Intentos de login fallidos recientes: conviene Fail2ban (17)."
+    [[ $ADV -eq 0 ]] && echo -e " ${VERDE}OK${NC} Sin alertas graves."
+    PAUSA
+}
+
+cambiar_hostname(){
+    echo -e "${CIAN}Hostname actual: ${BLANCO}$(hostname)${NC}"
+    read -r -p "Nuevo hostname (sin espacios, ej. vps): " H
+    [[ -z "$H" || "$H" =~ [^a-zA-Z0-9.-] ]] && { ERR "Hostname invalido."; PAUSA; return; }
+    hostnamectl set-hostname "$H" 2>/dev/null || { ERR "No se pudo cambiar."; PAUSA; return; }
+    sed -i "s/127.0.1.1.*/127.0.1.1\t$H/" /etc/hosts 2>/dev/null
+    OK "Hostname cambiado a '$H'. Se ve completo en la proxima sesion."
+    PAUSA
+}
+
+auto_update(){
+    [[ -z "$REPO_RAW" ]] && { ERR "REPO_RAW sin configurar."; PAUSA; return; }
+    INFO "Descargando ultima version desde tu repo..."
+    local TMP; TMP=$(mktemp /tmp/vpsmgr.XXXXXX)
+
+    if wget -q "$REPO_RAW" -O "$TMP" 2>/dev/null; then
+        # Normalizar CRLF (evita romper heredocs)
+        sed -i 's/\r$//' "$TMP"
+        # Validar sintaxis ANTES de sobrescribir (nunca dejar el panel roto)
+        if bash -n "$TMP" 2>/dev/null; then
+            install -m 755 "$TMP" /usr/local/bin/vpsmgr 2>/dev/null
+            cp -f "$TMP" "$(readlink -f "$0")" 2>/dev/null
+            OK "Script actualizado y validado. Volves a entrar con vpsmgr."
+        else
+            ERR "La version descargada tiene errores de sintaxis. NO se reemplazo."
+            ERR "Diagnostico: bash -n $TMP"
+        fi
+    else
+        ERR "No se pudo descargar (sin red o repo caido)."
+    fi
+    rm -f "$TMP"
+    PAUSA
+}
+
+# ------------------------------------------------------------
+# CHECKUSER API
+# ------------------------------------------------------------
+checkuser_escribir_py(){
+    cat > /usr/local/bin/vps-checkuser.py <<'PYEOF'
+#!/usr/bin/env python3
+import json, os, subprocess, time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse, parse_qs
+CONF = "/etc/vps-checkuser.conf"
+ENV_C = dict(os.environ)
+ENV_C["LC_ALL"] = "C"
+ENV_C["LANG"] = "C"
+def conf():
+    d = {"PORT": "8080", "TOKEN": ""}
+    try:
+        for line in open(CONF):
+            k, _, v = line.strip().partition("=")
+            if k in ("PORT", "TOKEN"): d[k] = v.strip()
+    except FileNotFoundError: pass
+    return d
+def sh(*a):
+    return subprocess.run(a, capture_output=True, text=True, env=ENV_C)
+def user_info(name):
+    if sh("id", name).returncode != 0:
+        return {"username": name, "exists": False, "status": "notfound",
+                "expiration": "", "days_left": None, "warning": ""}
+    exp_raw = ""
+    for line in sh("chage", "-l", name).stdout.splitlines():
+        if line.startswith("Password expires"):
+            exp_raw = line.split(":", 1)[1].strip()
+    days, status, exp_iso = None, "active", ""
+    if exp_raw and exp_raw.lower() != "never":
+        try:
+            ts = time.mktime(time.strptime(exp_raw, "%b %d, %Y"))
+            days = int((ts - time.time()) // 86400)
+            exp_iso = time.strftime("%Y-%m-%d", time.localtime(ts))
+            if days < 0:
+                status = "expired"
+                days = 0
+        except ValueError:
+            exp_iso = exp_raw
+    warn = ""
+    if status == "expired":
+        warn = "Cuenta vencida"
+    elif days is not None and days <= 3:
+        warn = "Por vencer"
+    try: lim = open(f"/etc/vps-limits/{name}").read().strip()
+    except FileNotFoundError: lim = None
+    who = sh("who").stdout
+    online = sum(1 for l in who.splitlines() if l.split() and l.split()[0] == name)
+    return {"username": name, "user": name, "exists": True, "status": status,
+            "password_expires": exp_raw, "expiration": exp_iso,
+            "expired": (status == "expired"),
+            "days_left": days, "remaining": days, "warning": warn, "warn": warn,
+            "online": online, "limit": lim, "limit_connection": lim}
+class H(BaseHTTPRequestHandler):
+    def _send(self, code, obj):
+        b = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers(); self.wfile.write(b)
+    def log_message(self, *a): pass
+    def do_GET(self):
+        c = conf(); u = urlparse(self.path); qs = parse_qs(u.query)
+        if c["TOKEN"] and qs.get("token", [""])[0] != c["TOKEN"]:
+            return self._send(403, {"error": "forbidden"})
+        if u.path in ("/checkuser.php", "/checkuser", "/check"):
+            name = qs.get("user", [""])[0]
+            if not name: return self._send(400, {"error": "falta parametro user"})
+            return self._send(200, user_info(name))
+        if u.path == "/status":
+            who = [l for l in sh("who").stdout.splitlines() if l.strip()]
+            tot = sh("awk", "-F:", "$3>=1000 && $1!=\"nobody\"", "/etc/passwd").stdout
+            return self._send(200, {"service": "checkuser", "online_now": len(who),
+                                    "total_users": len([l for l in tot.splitlines() if l.strip()])})
+        return self._send(404, {"error": "not found"})
+if __name__ == "__main__":
+    c = conf()
+    print(f"checkuser en 0.0.0.0:{c['PORT']}", flush=True)
+    HTTPServer(("0.0.0.0", int(c["PORT"])), H).serve_forever()
+PYEOF
+    chmod 755 /usr/local/bin/vps-checkuser.py
+}
+
+checkuser_instalar(){
+    echo -e "${CIAN}--- INSTALADOR CHECKUSER ---${NC}"
+    local PORT TOKEN
+    read -r -p "Puerto para el checkuser [8080]: " PORT; PORT=${PORT:-8080}
+    [[ "$PORT" =~ ^[0-9]+$ ]] || { ERR "Puerto invalido."; PAUSA; return; }
+    read -r -p "Token de seguridad (entero = aleatorio): " TOKEN
+    [[ -z "$TOKEN" ]] && TOKEN=$(tr -dc 'a-zA-Z0-9' </dev/urandom 2>/dev/null | head -c 20)
+    printf 'PORT=%s\nTOKEN=%s\n' "$PORT" "$TOKEN" > /etc/vps-checkuser.conf
+    chmod 600 /etc/vps-checkuser.conf
+    checkuser_escribir_py
+
+    cat > /etc/systemd/system/vps-checkuser.service <<SVCEOF
+[Unit]
+Description=CheckUser API (VPS-JORGEBARRIOS)
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/vps-checkuser.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+    systemctl daemon-reload
+    systemctl enable --now vps-checkuser 2>/dev/null
+    ufw allow "$PORT/tcp" >/dev/null 2>&1
+    local IP; IP=$(hostname -I | awk '{print $1}')
+    OK "CheckUser instalado y corriendo."
+    echo -e " Prueba desde la VM:  curl http://localhost:$PORT/checkuser.php?user=TUUSUARIO&token=$TOKEN"
+    echo -e " Desde afuera:        http://$IP:$PORT/checkuser.php?user=TUUSUARIO&token=$TOKEN"
+    echo -e " ${AMARILLO}Guarda este token, se guarda en /etc/vps-checkuser.conf${NC}"
+    PAUSA
+}
+
+checkuser_probar(){
+    local P T IP
+    P=$(awk -F= '/^PORT=/{print $2}' /etc/vps-checkuser.conf 2>/dev/null)
+    T=$(awk -F= '/^TOKEN=/{print $2}' /etc/vps-checkuser.conf 2>/dev/null)
+    IP=$(hostname -I | awk '{print $1}')
+    read -r -p "Usuario a consultar: " U
+    echo
+    curl -s "http://localhost:${P:-8080}/checkuser.php?user=$U&token=$T" && echo || ERR "No responde. Estado:"
+    systemctl status vps-checkuser --no-pager 2>/dev/null | head -6
+    PAUSA
+}
+
+checkuser_quitar(){
+    systemctl disable --now vps-checkuser 2>/dev/null
+    rm -f /usr/local/bin/vps-checkuser.py /etc/systemd/system/vps-checkuser.service /etc/vps-checkuser.conf
+    systemctl daemon-reload 2>/dev/null
+    OK "CheckUser removido."
+    PAUSA
+}
+
+menu_checkuser(){
+    while true; do
+        cabecera
+        SUBTOP "$(T t_sub_cu)"
+        FR_OPT 1 "$(T t_cu_inst)" 4 "$(T t_cu_token)"
+        FR_OPT 2 "$(T t_estado_svc)" 5 "$(T t_remover)"
+        FR_OPT 3 "$(T t_cu_probar)" "" ""
+        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_BOT
+        PROMPT
+        case "$OP" in
+            1) checkuser_instalar ;;
+            2) systemctl status vps-checkuser --no-pager 2>/dev/null | head -15; PAUSA ;;
+            3) checkuser_probar ;;
+            4) cat /etc/vps-checkuser.conf 2>/dev/null || ERR "No instalado."; PAUSA ;;
+            5) checkuser_quitar ;;
+            0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
+        esac
+    done
+}
+
+reiniciar_vps(){
+    read -r -p "Reiniciar el VPS ahora? Los servicios caeran. (s/n): " SN
+    if [[ "$SN" == "s" ]]; then
+        WARN "Reiniciando en 3 segundos..."
+        sleep 3
+        reboot
+    else
+        OK "Reinicio cancelado."
+        PAUSA
+    fi
+}
+
+# ------------------------------------------------------------
+# PROTOCOLOS / CONEXIONES
+# ------------------------------------------------------------
+instalar_xray(){
+    if command -v xray >/dev/null 2>&1; then
+        read -r -p "Xray ya esta instalado. Reinstalar/configurar de nuevo? (s/n): " SN
+        [[ "$SN" != "s" ]] && { PAUSA; return; }
+    fi
+    echo -e "${CIAN}--- INSTALADOR XRAY (VLESS + REALITY) ---${NC}"
+    read -r -p "Puerto para Xray [8443]: " XP; XP=${XP:-8443}
+    [[ "$XP" =~ ^[0-9]+$ && "$XP" -ge 1 && "$XP" -le 65535 ]] || { ERR "Puerto invalido."; PAUSA; return; }
+    read -r -p "SNI (dominio camuflaje) [www.microsoft.com]: " SNI; SNI=${SNI:-www.microsoft.com}
+
+    INFO "Instalando Xray (descarga oficial)..."
+    bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1 \
+        || { ERR "No se pudo instalar Xray (sin red?)."; PAUSA; return; }
+
+    local KEYS UUID PRIV PUB
+    KEYS=$(xray x25519 2>/dev/null)
+    PRIV=$(echo "$KEYS" | awk '/Private/{print $3}')
+    PUB=$(echo "$KEYS"  | awk '/Public/{print $3}')
+    UUID=$(xray uuid)
+    [[ -z "$PRIV" || -z "$PUB" || -z "$UUID" ]] && { ERR "No se pudieron generar las claves."; PAUSA; return; }
+
+    mkdir -p /usr/local/etc/xray
+    cat > /usr/local/etc/xray/config.json <<XEOF
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [{
+    "port": $XP,
+    "protocol": "vless",
+    "settings": {
+      "clients": [{ "id": "$UUID", "flow": "xtls-rprx-vision" }],
+      "decryption": "none"
+    },
+    "streamSettings": {
+      "network": "tcp",
+      "security": "reality",
+      "realitySettings": {
+        "show": false,
+        "dest": "$SNI:443",
+        "xver": 0,
+        "serverNames": ["$SNI"],
+        "privateKey": "$PRIV",
+        "shortIds": [""]
+      }
+    },
+    "sniffing": { "enabled": true, "destOverride": ["http", "tls"] }
+  }],
+  "outbounds": [{ "protocol": "freedom" }]
+}
+XEOF
+
+    ufw allow "$XP/tcp" >/dev/null 2>&1
+    systemctl enable --now xray 2>/dev/null || { /usr/local/bin/xray run -c /usr/local/etc/xray/config.json & }
+    sleep 2
+    local IP; IP=$(hostname -I | awk '{print $1}')
+    local LINK="vless://$UUID@$IP:$XP?security=reality&encryption=none&pbk=$PUB&fp=chrome&sni=$SNI&flow=xtls-rprx-vision&sid=#VPS-JORGEBARRIOS"
+    OK "Xray corriendo en el puerto $XP"
+    echo
+    echo -e " ${AMARILLO}Enlace para tu app (VLESS + Reality):${NC}"
+    echo -e " ${VERDE}$LINK${NC}"
+    echo
+    INFO "Guarda ese enlace: es la config que importas en el cliente (v2rayNG / tu app)."
+    PAUSA
+}
+
+instalar_openvpn(){
+    if command -v openvpn >/dev/null 2>&1; then
+        ERR "OpenVPN ya esta instalado."; PAUSA; return
+    fi
+    INFO "Descargando instalador de OpenVPN..."
+    curl -fsSL -o /root/openvpn-install.sh https://raw.githubusercontent.com/angristan/openvpn-install/master/openvpn-install.sh \
+        || { ERR "Sin red, no se pudo descargar."; PAUSA; return; }
+    chmod +x /root/openvpn-install.sh
+    INFO "Arrancando instalador (configuralo con los valores que quieras)..."
+    AUTO_INSTALL=y bash /root/openvpn-install.sh
+    OK "Listo. El archivo .ovpn del cliente queda en /root/"
+    PAUSA
+}
+
+instalar_ssl_stunnel(){
+    if command -v stunnel4 >/dev/null 2>&1 || command -v stunnel >/dev/null 2>&1; then
+        read -r -p "Stunnel ya esta instalado. Reconfigurar? (s/n): " SN
+        [[ "$SN" != "s" ]] && { PAUSA; return; }
+    fi
+    echo -e "${CIAN}--- INSTALADOR SSL (STUNNEL) ---${NC}"
+    read -r -p "Puerto SSL [443]: " SP; SP=${SP:-443}
+    [[ "$SP" =~ ^[0-9]+$ && "$SP" -ge 1 && "$SP" -le 65535 ]] || { ERR "Puerto invalido."; PAUSA; return; }
+    read -r -p "Puerto SSH destino [22]: " SSHP; SSHP=${SSHP:-22}
+
+    INFO "Instalando stunnel4..."
+    apt update -y >/dev/null 2>&1
+    apt install -y stunnel4 >/dev/null 2>&1 || { ERR "No se pudo instalar stunnel4."; PAUSA; return; }
+
+    INFO "Generando certificado autofirmado (10 años)..."
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+        -subj "/CN=vps-jorgebarrios" \
+        -keyout /etc/stunnel/stunnel.key -out /etc/stunnel/stunnel.crt >/dev/null 2>&1
+    cat /etc/stunnel/stunnel.crt /etc/stunnel/stunnel.key > /etc/stunnel/stunnel.pem 2>/dev/null
+
+    cat > /etc/stunnel/stunnel.conf <<SEOF
+pid = /var/run/stunnel4.pid
+cert = /etc/stunnel/stunnel.pem
+client = no
+socket = a:SO_REUSEADDR=1
+
+[ssh-ssl]
+accept = $SP
+connect = 127.0.0.1:$SSHP
+SEOF
+
+    sed -i 's/^ENABLED=.*/ENABLED=1/' /etc/default/stunnel4 2>/dev/null
+    ufw allow "$SP/tcp" >/dev/null 2>&1
+    systemctl restart stunnel4 2>/dev/null || service stunnel4 restart 2>/dev/null
+    sleep 1
+    local IP; IP=$(hostname -I | awk '{print $1}')
+    if pgrep -f stunnel >/dev/null 2>&1; then
+        OK "Stunnel ACTIVO: SSL en el puerto $SP -> SSH local $SSHP"
+        echo
+        echo -e " ${AMARILLO}Datos para la config del cliente (HTTP Injector / tu app):${NC}"
+        echo -e "  IP/Host: ${VERDE}$IP${NC}   Puerto SSL: ${VERDE}$SP${NC}"
+        echo -e "  La app debe conectar por SSL/TLS al $SP y el trafico sale por SSH ($SSHP)."
+    else
+        ERR "Stunnel no levanto. Revisa con: systemctl status stunnel4"
+    fi
+    PAUSA
+}
+
+estado_protocolos(){
+    echo -e "${CIAN}--- PROTOCOLOS ---${NC}"
+    if command -v xray >/dev/null 2>&1; then
+        local PUERTO; PUERTO=$(grep -o '"port": [0-9]*' /usr/local/etc/xray/config.json 2>/dev/null | head -1 | grep -o '[0-9]*')
+        if pgrep -x xray >/dev/null 2>&1 || systemctl is-active --quiet xray 2>/dev/null; then
+            echo -e " Xray:   ${VERDE}ACTIVO${NC} (puerto ${PUERTO:-?})"
+        else
+            echo -e " Xray:   ${AMARILLO}instalado, detenido${NC}"
+        fi
+    else
+        echo -e " Xray:   ${ROJO}no instalado${NC}"
+    fi
+    if command -v stunnel4 >/dev/null 2>&1 || pgrep -f stunnel >/dev/null 2>&1; then
+        local SPORT; SPORT=$(grep -A1 'ssh-ssl' /etc/stunnel/stunnel.conf 2>/dev/null | grep -o 'accept = [0-9]*' | grep -o '[0-9]*')
+        pgrep -f stunnel >/dev/null 2>&1 \
+            && echo -e " Stunnel (SSL): ${VERDE}ACTIVO${NC} (puerto ${SPORT:-?})" \
+            || echo -e " Stunnel (SSL): ${AMARILLO}instalado, detenido${NC}"
+    else
+        echo -e " Stunnel (SSL): ${ROJO}no instalado${NC}"
+    fi
+    if pgrep -f badvpn-udpgw >/dev/null 2>&1; then
+        echo -e " BadVPN: ${VERDE}ACTIVO${NC} (UDP GW local)"
+    else
+        echo -e " BadVPN: ${ROJO}no instalado${NC}"
+    fi
+    if grep -q '"ws"' /usr/local/etc/xray/config.json 2>/dev/null; then
+        local WSP; WSP=$(grep -B4 '"ws"' /usr/local/etc/xray/config.json 2>/dev/null | grep -o '"port": [0-9]*' | head -1 | grep -o '[0-9]*')
+        echo -e " Xray WS: ${VERDE}ACTIVO${NC} (puerto ${WSP:-?})"
+    else
+        echo -e " Xray WS: ${ROJO}no instalado${NC}"
+    fi
+    if systemctl is-active --quiet vpsjb-ws 2>/dev/null || pgrep -f vpsjb-ws.py >/dev/null 2>&1; then
+        echo -e " WS-epro: ${VERDE}ACTIVO${NC} (WS -> SSH)"
+    else
+        echo -e " WS-epro: ${ROJO}no instalado${NC}"
+    fi
+    if systemctl is-active --quiet vpsjb-ss 2>/dev/null; then
+        echo -e " Shadowsocks: ${VERDE}ACTIVO${NC}"
+    else
+        echo -e " Shadowsocks: ${ROJO}no instalado${NC}"
+    fi
+    if grep -q '"protocol": "trojan"' /usr/local/etc/xray/config.json 2>/dev/null; then
+        echo -e " Trojan: ${VERDE}ACTIVO${NC} (en Xray)"
+    else
+        echo -e " Trojan: ${ROJO}no instalado${NC}"
+    fi
+    if systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
+        echo -e " WireGuard: ${VERDE}ACTIVO${NC}"
+    else
+        echo -e " WireGuard: ${ROJO}no instalado${NC}"
+    fi
+    if pgrep -x cloudflared >/dev/null 2>&1; then
+        echo -e " Tunel CDN: ${VERDE}ACTIVO${NC} ($(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cf-tunnel.log 2>/dev/null | head -1))"
+    else
+        echo -e " Tunel CDN: ${ROJO}inactivo${NC}"
+    fi
+    if command -v openvpn >/dev/null 2>&1; then
+        systemctl is-active --quiet openvpn-server@server 2>/dev/null \
+            && echo -e " OpenVPN: ${VERDE}ACTIVO${NC}" || echo -e " OpenVPN: ${AMARILLO}instalado, detenido${NC}"
+    else
+        echo -e " OpenVPN: ${ROJO}no instalado${NC}"
+    fi
+    PAUSA
+}
+
+# ------------------------------------------------------------
+# TRAFICO POR USUARIO (iptables)
+# ------------------------------------------------------------
+trafico_activar(){
+    iptables -N VPS-TRAFFIC 2>/dev/null
+    iptables -F VPS-TRAFFIC 2>/dev/null
+    local N=0 U
+    for U in $(awk -F: '$3>=1000 && $1!="nobody"{print $1}' /etc/passwd); do
+        iptables -A VPS-TRAFFIC -m owner --uid-owner "$U" -j RETURN 2>/dev/null && N=$((N+1))
+    done
+    iptables -C OUTPUT -j VPS-TRAFFIC 2>/dev/null || iptables -A OUTPUT -j VPS-TRAFFIC 2>/dev/null
+    [[ $N -gt 0 ]] && OK "Contadores activos para $N usuarios (se suman usuarios nuevos al re-activar)." \
+                   || ERR "No se pudieron crear reglas (iptables fallo?)."
+    PAUSA
+}
+
+trafico_ver(){
+    echo -e "${CIAN}--- CONSUMO POR USUARIO (desde el ultimo reset) ---${NC}"
+    printf "%-16s %-12s %s\n" "USUARIO" "USADO" "LIMITE(GB)"
+    iptables -L VPS-TRAFFIC -v -x -n 2>/dev/null | awk '/owner UID match/ {print $2, $NF}' | while read -r BYTES UIDN; do
+        local U MB LIM
+        U=$(id -un "$UIDN" 2>/dev/null || echo "uid$UIDN")
+        MB=$(( BYTES / 1048576 ))
+        LIM=$(cat "/etc/vps-trafico/$U" 2>/dev/null || echo "-")
+        printf "%-16s %7d MB   %s\n" "$U" "$MB" "$LIM"
+    done
+    echo
+    INFO "Para medir desde cero, usa la opcion 'reset' del menu de trafico."
+    PAUSA
+}
+
+trafico_limite(){
+    read -r -p "Usuario: " USU
+    id "$USU" >/dev/null 2>&1 || { ERR "No existe."; PAUSA; return; }
+    read -r -p "Limite en GB (0 = sin limite): " G
+    [[ "$G" =~ ^[0-9]+$ ]] || { ERR "Numero invalido."; PAUSA; return; }
+    mkdir -p /etc/vps-trafico
+    echo "$G" > "/etc/vps-trafico/$USU"
+    OK "Limite de $USU = ${G}GB."
+    PAUSA
+}
+
+trafico_cortar(){
+    local CORTADOS=0
+    for F in /etc/vps-trafico/*; do
+        [[ -f "$F" ]] || continue
+        local U G USED
+        U=$(basename "$F"); G=$(cat "$F")
+        [[ "$G" =~ ^[0-9]+$ && "$G" -gt 0 ]] || continue
+        USED=$(iptables -L VPS-TRAFFIC -v -x -n 2>/dev/null | awk -v uid="$(id -u "$U" 2>/dev/null)" '$0 ~ "owner UID match "uid {print $2; exit}')
+        [[ -n "$USED" && $(( USED / 1073741824 )) -ge "$G" ]] || continue
+        if ! passwd -S "$U" 2>/dev/null | grep -q ' L '; then
+            usermod -L "$U" 2>/dev/null; pkill -u "$U" 2>/dev/null
+            INFO "$U supero su limite (${G}GB) y fue bloqueado."
+            CORTADOS=$((CORTADOS+1))
+        fi
+    done
+    [[ $CORTADOS -eq 0 ]] && OK "Nadie supero su limite." || OK "Bloqueados: $CORTADOS."
+    PAUSA
+}
+
+trafico_reset(){
+    iptables -Z VPS-TRAFFIC 2>/dev/null && OK "Contadores en cero." || ERR "La cadena no existe (activa antes)."
+    PAUSA
+}
+
+menu_trafico(){
+    while true; do
+        cabecera
+        SUBTOP "$(T t_sub_trafico)"
+        FR_OPT 1 "$(T t_tr_activar)" 4 "$(T t_tr_cortar)"
+        FR_OPT 2 "$(T t_tr_ver)" 5 "$(T t_tr_reset)"
+        FR_OPT 3 "$(T t_tr_limite)" "" ""
+        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_BOT
+        PROMPT
+        case "$OP" in
+            1) trafico_activar ;;
+            2) trafico_ver ;;
+            3) trafico_limite ;;
+            4) trafico_cortar ;;
+            5) trafico_reset ;;
+            0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
+        esac
+    done
+}
+
+# ------------------------------------------------------------
+# SWAP / HYSTERIA2 / RESTORE / ZRAM
+# ------------------------------------------------------------
+agregar_swap(){
+    if swapon --show 2>/dev/null | grep -q '/swapfile'; then
+        ERR "Ya hay una swapfile activa."; PAUSA; return
+    fi
+    read -r -p "Tamaño del swap en GB [1]: " G; G=${G:-1}
+    [[ "$G" =~ ^[0-9]+$ && "$G" -ge 1 ]] || { ERR "Tamaño invalido."; PAUSA; return; }
+    INFO "Creando swap de ${G}GB..."
+    fallocate -l "${G}G" /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=$((G*1024)) status=none
+    chmod 600 /swapfile
+    mkswap /swapfile >/dev/null 2>&1
+    swapon /swapfile 2>/dev/null
+    if swapon --show 2>/dev/null | grep -q '/swapfile'; then
+        grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+        OK "Swap de ${G}GB activa y persistente."
+    else
+        rm -f /swapfile
+        ERR "No se pudo activar la swap."
+    fi
+    PAUSA
+}
+
+agregar_zram(){
+    if swapon --show 2>/dev/null | grep -q zram; then
+        read -r -p "ZRAM ya esta activa. Reconfigurar? (s/n): " SN
+        [[ "$SN" != "s" ]] && { PAUSA; return; }
+        swapoff /dev/zram0 2>/dev/null; zramctl --reset /dev/zram0 2>/dev/null; rmmod zram 2>/dev/null
+    fi
+    echo -e "${CIAN}--- ZRAM (memoria comprimida) ---${NC}"
+    read -r -p "Tamaño zram en GB [1]: " G; G=${G:-1}
+    [[ "$G" =~ ^[0-9]+$ && "$G" -ge 1 ]] || { ERR "Tamaño invalido."; PAUSA; return; }
+    INFO "Cargando modulo zram..."
+    modprobe zram 2>/dev/null || { ERR "Sin acceso al kernel (OpenVZ/LXC). Usa la opcion de swap."; PAUSA; return; }
+    zramctl /dev/zram0 --algorithm zstd --size "${G}G" >/dev/null 2>&1 \
+        || zramctl /dev/zram0 --algorithm lzo --size "${G}G" >/dev/null 2>&1 \
+        || { ERR "zramctl fallo."; PAUSA; return; }
+    mkswap /dev/zram0 >/dev/null 2>&1
+    swapon -p 100 /dev/zram0 2>/dev/null || swapon /dev/zram0 2>/dev/null
+    cat > /etc/systemd/system/vpsjb-zram.service <<ZEOF
+[Unit]
+Description=ZRAM VPS-JORGEBARRIOS
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c "modprobe zram && (zramctl /dev/zram0 -a zstd -s ${G}G || zramctl /dev/zram0 -a lzo -s ${G}G) && mkswap /dev/zram0 && swapon -p 100 /dev/zram0"
+ExecStop=/bin/bash -c "swapoff /dev/zram0 2>/dev/null; zramctl --reset /dev/zram0 2>/dev/null; rmmod zram 2>/dev/null"
+
+[Install]
+WantedBy=multi-user.target
+ZEOF
+    systemctl daemon-reload
+    systemctl enable vpsjb-zram 2>/dev/null
+    if swapon --show 2>/dev/null | grep -q zram; then
+        OK "ZRAM de ${G}GB activa (prioridad alta, mas rapida que swap de disco)."
+    else
+        ERR "ZRAM no pudo activarse en este entorno."
+    fi
+    PAUSA
+}
+
+restaurar_backup(){
+    local DIR=/root/backups
+    echo -e "${CIAN}--- BACKUPS DISPONIBLES ---${NC}"
+    ls -lh "$DIR"/*.tar.gz 2>/dev/null || { ERR "No hay backups en $DIR."; PAUSA; return; }
+    read -r -p "Archivo a restaurar (nombre exacto, Enter = el mas reciente): " F
+    [[ -z "$F" ]] && F=$(ls -t "$DIR"/*.tar.gz 2>/dev/null | head -1)
+    [[ -f "$F" ]] || F="$DIR/$F"
+    [[ -f "$F" ]] || { ERR "Archivo no encontrado."; PAUSA; return; }
+    echo
+    echo -e "${ROJO}ATENCION: esto pisa la configuracion actual de /etc${NC}"
+    echo -e "${ROJO}(incluye usuarios, claves y la key de licencia).${NC}"
+    read -r -p "Escribi RESTAURAR para confirmar: " CONF
+    [[ "$CONF" != "RESTAURAR" ]] && { ERR "Cancelado."; PAUSA; return; }
+    INFO "Restaurando $F ..."
+    tar xzf "$F" -C / 2>/dev/null
+    OK "Restaurado. Recomendado: reiniciar el VPS (opcion 32)."
+    PAUSA
+}
+
+instalar_hysteria(){
+    if command -v hysteria >/dev/null 2>&1; then
+        read -r -p "Hysteria2 ya esta instalado. Reconfigurar? (s/n): " SN
+        [[ "$SN" != "s" ]] && { PAUSA; return; }
+    fi
+    echo -e "${CIAN}--- INSTALADOR HYSTERIA2 (UDP) ---${NC}"
+    read -r -p "Puerto UDP [8443]: " HP; HP=${HP:-8443}
+    [[ "$HP" =~ ^[0-9]+$ && "$HP" -ge 1 && "$HP" -le 65535 ]] || { ERR "Puerto invalido."; PAUSA; return; }
+    INFO "Instalando Hysteria2..."
+    bash <(curl -fsSL https://get.hy2.sh/) >/dev/null 2>&1 \
+        || { ERR "No se pudo instalar (sin red?)."; PAUSA; return; }
+    mkdir -p /etc/hysteria
+    openssl req -x509 -nodes -newkey rsa:2048 -days 3650 -subj "/CN=vps-jorgebarrios" \
+        -keyout /etc/hysteria/server.key -out /etc/hysteria/server.crt >/dev/null 2>&1
+    local PASS; PASS=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 20)
+    cat > /etc/hysteria/config.yaml <<HEOF
+listen: :$HP
+auth:
+  type: password
+  password: "$PASS"
+tls:
+  cert: /etc/hysteria/server.crt
+  key: /etc/hysteria/server.key
+HEOF
+    ufw allow "$HP/udp" >/dev/null 2>&1
+    systemctl enable --now hysteria-server >/dev/null 2>&1
+    sleep 1
+    local IP; IP=$(hostname -I | awk '{print $1}')
+    if systemctl is-active --quiet hysteria-server 2>/dev/null || pgrep -x hysteria >/dev/null 2>&1; then
+        OK "Hysteria2 corriendo en UDP $HP"
+        echo
+        echo -e " ${AMARILLO}Enlace para el cliente (NekoBox / tu app):${NC}"
+        echo -e " ${VERDE}hysteria2://$PASS@$IP:$HP/?insecure=1#VPS-JORGEBARRIOS${NC}"
+    else
+        ERR "Hysteria no levanto. Revisa: journalctl -u hysteria-server"
+    fi
+    PAUSA
+}
+
+# ------------------------------------------------------------
+# BADVPN
+# ------------------------------------------------------------
+instalar_badvpn(){
+    if pgrep -f badvpn-udpgw >/dev/null 2>&1; then
+        read -r -p "BadVPN ya esta corriendo. Reconfigurar? (s/n): " SN
+        [[ "$SN" != "s" ]] && { PAUSA; return; }
+    fi
+    echo -e "${CIAN}--- INSTALADOR BADVPN (UDP GW) ---${NC}"
+    read -r -p "Puerto UDP GW [7300]: " BP; BP=${BP:-7300}
+    [[ "$BP" =~ ^[0-9]+$ && "$BP" -ge 1 && "$BP" -le 65535 ]] || { ERR "Puerto invalido."; PAUSA; return; }
+    INFO "Instalando badvpn (repositorio oficial Ubuntu)..."
+    apt update -y >/dev/null 2>&1
+    apt install -y badvpn >/dev/null 2>&1 || { ERR "No se pudo instalar badvpn (sin red o paquete ausente)."; PAUSA; return; }
+    cat > /etc/systemd/system/badvpn.service <<BEOF
+[Unit]
+Description=BadVPN UDP Gateway (VPS-JORGEBARRIOS)
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/badvpn-udpgw --listen-addr 127.0.0.1:$BP --max-clients 500
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+BEOF
+    systemctl daemon-reload
+    systemctl enable --now badvpn 2>/dev/null
+    sleep 1
+    if systemctl is-active --quiet badvpn 2>/dev/null || pgrep -f badvpn-udpgw >/dev/null 2>&1; then
+        OK "BadVPN ACTIVO en 127.0.0.1:$BP"
+        echo
+        echo -e " ${AMARILLO}En la app del cliente (HTTP Injector / eProxy / tu app):${NC}"
+        echo -e "  UDP Gateway: ${VERDE}127.0.0.1:$BP${NC} a traves del tunel SSH/SSL"
+        echo -e "  ${CIAN}Con eso funcionan juegos UDP y llamadas de WhatsApp/Telegram.${NC}"
+    else
+        ERR "BadVPN no levanto. Revisa: journalctl -u badvpn"
+    fi
+    PAUSA
+}
+
+quitar_badvpn(){
+    systemctl disable --now badvpn 2>/dev/null
+    rm -f /etc/systemd/system/badvpn.service
+    systemctl daemon-reload 2>/dev/null
+    pkill -f badvpn-udpgw 2>/dev/null
+    OK "BadVPN detenido y removido."
+    PAUSA
+}
+
+# ------------------------------------------------------------
+# WEBSOCKET: Xray WS y WS-epro
+# ------------------------------------------------------------
+instalar_xray_ws(){
+    if ! command -v xray >/dev/null 2>&1; then
+        INFO "Xray no esta instalado, instalando primero..."
+        bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1 \
+            || { ERR "No se pudo instalar Xray."; PAUSA; return; }
+    fi
+    echo -e "${CIAN}--- XRAY VLESS + WEBSOCKET (para CDN) ---${NC}"
+    read -r -p "Puerto WS [8080]: " WP; WP=${WP:-8080}
+    [[ "$WP" =~ ^[0-9]+$ && "$WP" -ge 1 && "$WP" -le 65535 ]] || { ERR "Puerto invalido."; PAUSA; return; }
+    read -r -p "Path WS [/vpsjb]: " WPATH; WPATH=${WPATH:-/vpsjb}
+    [[ "$WPATH" == /* ]] || WPATH="/$WPATH"
+    local UUID; UUID=$(xray uuid)
+    mkdir -p /usr/local/etc/xray
+    python3 - "$WP" "$WPATH" "$UUID" <<'PYEOF'
+import json, sys
+port, path, uid = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+cfgp = "/usr/local/etc/xray/config.json"
+try:
+    cfg = json.load(open(cfgp))
+except Exception:
+    cfg = {"log":{"loglevel":"warning"},"inbounds":[],
+           "outbounds":[{"protocol":"freedom"}]}
+ib = [i for i in cfg.get("inbounds", []) if i.get("port") != port]
+ib.append({
+    "port": port,
+    "protocol": "vless",
+    "settings": {"clients":[{"id": uid}], "decryption": "none"},
+    "streamSettings": {"network": "ws", "wsSettings": {"path": path}},
+    "sniffing": {"enabled": True, "destOverride": ["http","tls"]}
+})
+cfg["inbounds"] = ib
+json.dump(cfg, open(cfgp, "w"), indent=2)
+print("ok")
+PYEOF
+    ufw allow "$WP/tcp" >/dev/null 2>&1
+    systemctl restart xray 2>/dev/null
+    sleep 1
+    local IP; IP=$(hostname -I | awk '{print $1}')
+    if systemctl is-active --quiet xray 2>/dev/null || pgrep -x xray >/dev/null 2>&1; then
+        OK "Xray WS corriendo en el puerto $WP (path $WPATH)"
+        echo
+        echo -e " ${AMARILLO}Enlace VLESS + WebSocket (ponelo detras de Cloudflare):${NC}"
+        echo -e " ${VERDE}vless://$UUID@$IP:$WP?type=ws&path=%2F${WPATH#/}&security=none#VPSJB-WS${NC}"
+        INFO "En tu app: network=ws, path=$WPATH, TLS desactivado (el CDN lo pone)."
+    else
+        ERR "Xray no levanto. Revisa: journalctl -u xray"
+    fi
+    PAUSA
+}
+
+instalar_wsepro(){
+    if systemctl is-active --quiet vpsjb-ws 2>/dev/null; then
+        read -r -p "WS-epro ya esta corriendo. Reconfigurar? (s/n): " SN
+        [[ "$SN" != "s" ]] && { PAUSA; return; }
+    fi
+    echo -e "${CIAN}--- WEBSOCKET SSH (ws-epro propio, WS -> SSH 22) ---${NC}"
+    read -r -p "Puerto WS [80]: " EP; EP=${EP:-80}
+    [[ "$EP" =~ ^[0-9]+$ && "$EP" -ge 1 && "$EP" -le 65535 ]] || { ERR "Puerto invalido."; PAUSA; return; }
+
+    cat > /usr/local/bin/vpsjb-ws.py <<'WSEOF'
+#!/usr/bin/env python3
+import socket, base64, hashlib, struct, threading, sys
+
+LISTEN = ('0.0.0.0', int(sys.argv[1]) if len(sys.argv) > 1 else 80)
+TARGET = ('127.0.0.1', int(sys.argv[2]) if len(sys.argv) > 2 else 22)
+GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
+
+def recv_until(sock, marker, limit=8192):
+    data = b''
+    while marker not in data and len(data) < limit:
+        chunk = sock.recv(1024)
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+def handshake(c):
+    req = recv_until(c, b'\r\n\r\n')
+    if not req:
+        return False
+    key = ''
+    for line in req.split(b'\r\n'):
+        if line.lower().startswith(b'sec-websocket-key:'):
+            key = line.split(b':', 1)[1].strip().decode()
+    if not key:
+        return False
+    acc = base64.b64encode(hashlib.sha1((key + GUID).encode()).digest()).decode()
+    c.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+               "Connection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n" % acc).encode())
+    return True
+
+def read_frame(c):
+    hdr = c.recv(2)
+    if len(hdr) < 2:
+        return None, None
+    op = hdr[0] & 0x0F
+    b2 = hdr[1]
+    masked = b2 & 0x80
+    ln = b2 & 0x7F
+    if ln == 126:
+        ln = struct.unpack('>H', c.recv(2))[0]
+    elif ln == 127:
+        ln = struct.unpack('>Q', c.recv(8))[0]
+    mask = c.recv(4) if masked else None
+    payload = b''
+    while len(payload) < ln:
+        chunk = c.recv(ln - len(payload))
+        if not chunk:
+            break
+        payload += chunk
+    if mask:
+        payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+    return op, payload
+
+def send_frame(s, data, op=2):
+    h = bytes([0x80 | op])
+    ln = len(data)
+    if ln < 126:
+        h += bytes([ln])
+    elif ln < 65536:
+        h += bytes([126]) + struct.pack('>H', ln)
+    else:
+        h += bytes([127]) + struct.pack('>Q', ln)
+    s.sendall(h + data)
+
+def ws_to_tcp(ws, tcp):
+    try:
+        while True:
+            op, data = read_frame(ws)
+            if op is None or op == 8:
+                break
+            if op in (0, 1, 2) and data:
+                tcp.sendall(data)
+    except Exception:
+        pass
+    finally:
+        try:
+            tcp.shutdown(socket.SHUT_WR)
+        except Exception:
+            pass
+
+def tcp_to_ws(tcp, ws):
+    try:
+        while True:
+            data = tcp.recv(65536)
+            if not data:
+                break
+            send_frame(ws, data)
+    except Exception:
+        pass
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            pass
+
+def handle(c):
+    try:
+        if not handshake(c):
+            c.close()
+            return
+        tcp = socket.create_connection(TARGET, timeout=15)
+    except Exception:
+        c.close()
+        return
+    t1 = threading.Thread(target=ws_to_tcp, args=(c, tcp))
+    t2 = threading.Thread(target=tcp_to_ws, args=(tcp, c))
+    t1.start(); t2.start()
+    t1.join(); t2.join()
+    for s in (c, tcp):
+        try:
+            s.close()
+        except Exception:
+            pass
+
+srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(LISTEN)
+srv.listen(256)
+print("WS->SSH proxy en %s:%d (destino %s:%d)" % (LISTEN[0], LISTEN[1], TARGET[0], TARGET[1]), flush=True)
+while True:
+    client, _ = srv.accept()
+    threading.Thread(target=handle, args=(client,), daemon=True).start()
+WSEOF
+    chmod +x /usr/local/bin/vpsjb-ws.py
+
+    cat > /etc/systemd/system/vpsjb-ws.service <<SVCEOF
+[Unit]
+Description=WS-epro VPS-JORGEBARRIOS (WS -> SSH)
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/vpsjb-ws.py $EP 22
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+    systemctl daemon-reload
+    systemctl enable --now vpsjb-ws 2>/dev/null
+    sleep 1
+    local IP; IP=$(hostname -I | awk '{print $1}')
+    if systemctl is-active --quiet vpsjb-ws 2>/dev/null || pgrep -f vpsjb-ws.py >/dev/null 2>&1; then
+        ufw allow "$EP/tcp" >/dev/null 2>&1
+        OK "WS-epro ACTIVO: ws://$IP:$EP (cualquier path) -> SSH 22"
+        echo
+        echo -e " ${AMARILLO}Config del cliente (HTTP Injector / eProxy / tu app):${NC}"
+        echo -e "  Servidor WS: ${VERDE}$IP:$EP${NC}   (tildar WebSocket, sin path o path /)"
+    else
+        ERR "El proxy WS no levanto. Revisa: journalctl -u vpsjb-ws"
+    fi
+    PAUSA
+}
+
+menu_protocolos(){
+    while true; do
+        cabecera
+        SUBTOP "$(T t_sub_prot)"
+        FR_OPT 1 "$(T t_xray)" 2 "$(T t_xray_ws)"
+        FR_OPT 3 "$(T t_openvpn)" 4 "$(T t_stunnel)"
+        FR_OPT 5 "$(T t_hysteria)" 6 "$(T t_badvpn)"
+        FR_OPT 7 "$(T t_wsepro)" 8 "$(T t_shadowsocks)"
+        FR_OPT 9 "$(T t_trojan)" 10 "$(T t_wireguard)"
+        FR_OPT 11 "$(T t_estado_prot)" 12 "$(T t_quitar)"
+        FR_OPT 13 "$(T t_cf_test)" "" ""
+        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_BOT
+        PROMPT
+        case "$OP" in
+            1) instalar_xray ;;        2) instalar_xray_ws ;;
+            3) instalar_openvpn ;;     4) instalar_ssl_stunnel ;;
+            5) instalar_hysteria ;;    6) instalar_badvpn ;;
+            7) instalar_wsepro ;;      8) instalar_shadowsocks ;;
+            9) instalar_trojan ;;      10) instalar_wireguard ;;
+            11) estado_protocolos ;;   12) menu_quitar ;;
+            13) tunel_trycloudflare ;;
+            0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
+        esac
+    done
+}
+
+# ------------------------------------------------------------
+# SUBMENUS DEL PANEL
+# ------------------------------------------------------------
+menu_usuarios(){
+    while true; do
+        cabecera
+        SUBTOP "$(T t_sub_usuarios)"
+        FR_OPT 1 "$(T t_crear)" 7 "$(T t_eliminar)"
+        FR_OPT 2 "$(T t_listar)" 8 "$(T t_vencidos)"
+        FR_OPT 3 "$(T t_clave)" 9 "$(T t_test)"
+        FR_OPT 4 "$(T t_bloquear)" 10 "$(T t_conexiones)"
+        FR_OPT 5 "$(T t_renovar)" 11 "$(T t_desconectar)"
+        FR_OPT 6 "$(T t_limite)" "" ""
+        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_BOT
+        PROMPT
+        case "$OP" in
+            1) crear_usuario ;;   2) listar_usuarios ;; 3) cambiar_clave ;;
+            4) bloquear_usuario ;; 5) renovar_usuario ;; 6) cambiar_limite ;;
+            7) eliminar_usuario ;; 8) eliminar_vencidos ;; 9) crear_test_ssh ;;
+            10) conexiones_online ;; 11) matar_conexion ;;
+            0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
+        esac
+    done
+}
+
+menu_seguridad(){
+    while true; do
+        cabecera
+        SUBTOP "$(T t_sub_seg)"
+        FR_OPT 1 "$(T t_fail2ban)" 5 "$(T t_ver_puertos)"
+        FR_OPT 2 "$(T t_limiter_on)" 6 "$(T t_abrir_puerto)"
+        FR_OPT 3 "$(T t_limiter_off)" 7 "$(T t_banner)"
+        FR_OPT 4 "$(T t_puerto_ssh)" "" ""
+        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_BOT
+        PROMPT
+        case "$OP" in
+            1) instalar_fail2ban ;; 2) limiter_aplicar ;; 3) limiter_quitar ;;
+            4) cambiar_puerto_ssh ;; 5) ver_puertos ;; 6) abrir_puerto ;; 7) menu_banner ;;
+            0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
+        esac
+    done
+}
+
+menu_sistema(){
+    while true; do
+        cabecera
+        SUBTOP "$(T t_sub_sistema)"
+        FR_OPT 1 "$(T t_monitoreo)" 5 "$(T t_mantenimiento)"
+        FR_OPT 2 "$(T t_diagnostico)" 6 "$(T t_hostname)"
+        FR_OPT 3 "$(T t_optimizar)" 7 "$(T t_update)"
+        FR_OPT 4 "$(T t_swap)" 8 "$(T t_reiniciar)"
+        FR_OPT 9 "$(T t_zram)" "" ""
+        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_BOT
+        PROMPT
+        case "$OP" in
+            1) monitoreo ;; 2) diagnostico ;; 3) optimizar ;; 4) agregar_swap ;;
+            5) mantenimiento ;; 6) cambiar_hostname ;; 7) update_sistema ;; 8) reiniciar_vps ;;
+            9) agregar_zram ;;
+            0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
+        esac
+    done
+}
+
+menu_herramientas(){
+    while true; do
+        cabecera
+        SUBTOP "$(T t_sub_herr)"
+        FR_OPT 1 "$(T t_global)" 4 "$(T t_autoupdate)"
+        FR_OPT 2 "$(T t_automenu_on)" 5 "$(T t_checkuser)"
+        FR_OPT 3 "$(T t_automenu_off)" 6 "$(T t_idioma)"
+        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_BOT
+        PROMPT
+        case "$OP" in
+            1) instalar_comando_global ;; 2) auto_menu ;; 3) quitar_auto_menu ;;
+            4) auto_update ;; 5) menu_checkuser ;;
+            6) rm -f /etc/vps-manager.lang; seleccionar_idioma; OK "Idioma: $IDIOMA / Language: $IDIOMA"; PAUSA ;;
+            0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
+        esac
+    done
+}
+
+menu_backup(){
+    while true; do
+        cabecera
+        SUBTOP "$(T t_sub_backup)"
+        FR_OPT 1 "$(T t_backup_crear)" 2 "$(T t_backup_restaurar)"
+        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_BOT
+        PROMPT
+        case "$OP" in
+            1) backup_basico ;; 2) restaurar_backup ;;
+            0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
+        esac
+    done
+}
+
+# ------------------------------------------------------------
+# SHADOWSOCKS / TROJAN / WIREGUARD
+# ------------------------------------------------------------
+instalar_shadowsocks(){
+    if systemctl is-active --quiet vpsjb-ss 2>/dev/null; then
+        read -r -p "Shadowsocks ya esta activo. Reconfigurar? (s/n): " SN
+        [[ "$SN" != "s" ]] && { PAUSA; return; }
+    fi
+    echo -e "${CIAN}--- SHADOWSOCKS ---${NC}"
+    read -r -p "Puerto SS [8388]: " SP; SP=${SP:-8388}
+    [[ "$SP" =~ ^[0-9]+$ && "$SP" -ge 1 && "$SP" -le 65535 ]] || { ERR "Puerto invalido."; PAUSA; return; }
+    INFO "Instalando shadowsocks-libev (repositorio Ubuntu)..."
+    apt update -y >/dev/null 2>&1
+    apt install -y shadowsocks-libev >/dev/null 2>&1 || { ERR "No se pudo instalar shadowsocks-libev."; PAUSA; return; }
+    local PASS; PASS=$(tr -dc 'a-zA-Z0-9' </dev/urandom 2>/dev/null | head -c 16)
+    mkdir -p /etc/shadowsocks-libev
+    cat > /etc/shadowsocks-libev/config.json <<SSEOF
+{
+    "server": "0.0.0.0",
+    "server_port": $SP,
+    "password": "$PASS",
+    "method": "aes-256-gcm",
+    "mode": "tcp_and_udp",
+    "fast_open": true
+}
+SSEOF
+    cat > /etc/systemd/system/vpsjb-ss.service <<SSSVC
+[Unit]
+Description=Shadowsocks VPS-JORGEBARRIOS
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/ss-server -c /etc/shadowsocks-libev/config.json
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SSSVC
+    systemctl daemon-reload
+    systemctl enable --now vpsjb-ss 2>/dev/null
+    ufw allow "$SP/tcp" >/dev/null 2>&1; ufw allow "$SP/udp" >/dev/null 2>&1
+    sleep 1
+    if systemctl is-active --quiet vpsjb-ss 2>/dev/null; then
+        local IP B64
+        IP=$(hostname -I | awk '{print $1}')
+        B64=$(printf 'aes-256-gcm:%s' "$PASS" | base64 -w0 2>/dev/null || printf 'aes-256-gcm:%s' "$PASS" | base64)
+        OK "Shadowsocks ACTIVO en puerto $SP (aes-256-gcm)"
+        echo
+        echo -e " ${AMARILLO}Enlace para el cliente (SS/SSR compatible):${NC}"
+        echo -e " ${VERDE}ss://$B64@$IP:$SP#VPSJB-SS${NC}"
+    else
+        ERR "Shadowsocks no levanto. Revisa: journalctl -u vpsjb-ss"
+    fi
+    PAUSA
+}
+
+instalar_trojan(){
+    if ! command -v xray >/dev/null 2>&1; then
+        INFO "Xray no esta instalado, instalando primero..."
+        bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1 \
+            || { ERR "No se pudo instalar Xray."; PAUSA; return; }
+    fi
+    echo -e "${CIAN}--- TROJAN (dentro de Xray) ---${NC}"
+    read -r -p "Puerto Trojan [9443]: " TP; TP=${TP:-9443}
+    [[ "$TP" =~ ^[0-9]+$ && "$TP" -ge 1 && "$TP" -le 65535 ]] || { ERR "Puerto invalido."; PAUSA; return; }
+    read -r -p "SNI (dominio camuflaje) [www.microsoft.com]: " SNI; SNI=${SNI:-www.microsoft.com}
+    mkdir -p /etc/vpsjb-trojan
+    openssl req -x509 -nodes -newkey rsa:2048 -days 3650 -subj "/CN=$SNI" \
+        -keyout /etc/vpsjb-trojan/key.pem -out /etc/vpsjb-trojan/cert.pem >/dev/null 2>&1
+    local PASS; PASS=$(tr -dc 'a-zA-Z0-9' </dev/urandom 2>/dev/null | head -c 20)
+    python3 - "$TP" "$SNI" "$PASS" <<'PYEOF'
+import json, sys
+port, sni, pwd = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+cfgp = "/usr/local/etc/xray/config.json"
+try:
+    cfg = json.load(open(cfgp))
+except Exception:
+    cfg = {"log":{"loglevel":"warning"},"inbounds":[],"outbounds":[{"protocol":"freedom"}]}
+ib = [i for i in cfg.get("inbounds", []) if i.get("port") != port]
+ib.append({
+    "port": port,
+    "protocol": "trojan",
+    "settings": {"clients":[{"password": pwd}]},
+    "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {
+            "serverName": sni,
+            "certificates": [{"certificateFile": "/etc/vpsjb-trojan/cert.pem",
+                              "keyFile": "/etc/vpsjb-trojan/key.pem"}]
+        }
+    }
+})
+cfg["inbounds"] = ib
+json.dump(cfg, open(cfgp, "w"), indent=2)
+print("ok")
+PYEOF
+    ufw allow "$TP/tcp" >/dev/null 2>&1
+    systemctl restart xray 2>/dev/null
+    sleep 1
+    if systemctl is-active --quiet xray 2>/dev/null || pgrep -x xray >/dev/null 2>&1; then
+        local IP; IP=$(hostname -I | awk '{print $1}')
+        OK "Trojan ACTIVO en puerto $TP (SNI $SNI)"
+        echo
+        echo -e " ${AMARILLO}Enlace para el cliente (activar 'allowInsecure'):${NC}"
+        echo -e " ${VERDE}trojan://$PASS@$IP:$TP?security=tls&sni=$SNI&allowInsecure=1#VPSJB-Trojan${NC}"
+    else
+        ERR "Xray no levanto. Revisa: journalctl -u xray"
+    fi
+    PAUSA
+}
+
+instalar_wireguard(){
+    if systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
+        read -r -p "WireGuard ya esta activo. Reconfigurar? (s/n): " SN
+        [[ "$SN" != "s" ]] && { PAUSA; return; }
+    fi
+    echo -e "${CIAN}--- WIREGUARD ---${NC}"
+    read -r -p "Puerto UDP [51820]: " WP; WP=${WP:-51820}
+    [[ "$WP" =~ ^[0-9]+$ && "$WP" -ge 1 && "$WP" -le 65535 ]] || { ERR "Puerto invalido."; PAUSA; return; }
+    INFO "Instalando wireguard..."
+    apt update -y >/dev/null 2>&1
+    apt install -y wireguard >/dev/null 2>&1 || { ERR "No se pudo instalar wireguard."; PAUSA; return; }
+    local SPRIV SPRIV2 CPRIV CPUB SPUB IFACE
+    SPRIV=$(wg genkey); SPUB=$(echo "$SPRIV" | wg pubkey)
+    CPRIV=$(wg genkey); CPUB=$(echo "$CPRIV" | wg pubkey)
+    IFACE=$(ip route show default 2>/dev/null | awk '{print $5}' | head -1)
+    [[ -z "$IFACE" ]] && IFACE="eth0"
+    cat > /etc/wireguard/wg0.conf <<WGEOF
+[Interface]
+Address = 10.66.0.1/24
+ListenPort = $WP
+PrivateKey = $SPRIV
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o $IFACE -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o $IFACE -j MASQUERADE
+
+[Peer]
+PublicKey = $CPUB
+AllowedIPs = 10.66.0.2/32
+WGEOF
+    chmod 600 /etc/wireguard/wg0.conf
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
+    grep -q '^net.ipv4.ip_forward=1' /etc/sysctl.conf 2>/dev/null || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+    ufw allow "$WP/udp" >/dev/null 2>&1
+    systemctl enable --now wg-quick@wg0 2>/dev/null
+    sleep 1
+    if systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
+        local IP; IP=$(hostname -I | awk '{print $1}')
+        cat > /root/wg-client.conf <<CLIENTEOF
+[Interface]
+PrivateKey = $CPRIV
+Address = 10.66.0.2/24
+DNS = 1.1.1.1
+
+[Peer]
+PublicKey = $SPUB
+Endpoint = $IP:$WP
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25
+CLIENTEOF
+        OK "WireGuard ACTIVO (puerto UDP $WP)"
+        INFO "Config del cliente: /root/wg-client.conf"
+        echo -e " ${AMARILLO}--- para la app WireGuard ---${NC}"
+        cat /root/wg-client.conf
+    else
+        ERR "WireGuard no levanto. Revisa: journalctl -u wg-quick@wg0"
+    fi
+    PAUSA
+}
+
+# ------------------------------------------------------------
+# DESINSTALADORES
+# ------------------------------------------------------------
+quitar_xray_completo(){
+    systemctl disable --now xray 2>/dev/null
+    rm -f /etc/systemd/system/xray.service /usr/local/bin/xray /usr/local/bin/xray-linux-*
+    rm -rf /usr/local/etc/xray /etc/vpsjb-trojan
+    systemctl daemon-reload 2>/dev/null
+    pkill -x xray 2>/dev/null
+    OK "Xray (y Trojan/WS) removido."
+    PAUSA
+}
+quitar_wsepro(){
+    systemctl disable --now vpsjb-ws 2>/dev/null
+    rm -f /etc/systemd/system/vpsjb-ws.service /usr/local/bin/vpsjb-ws.py
+    systemctl daemon-reload 2>/dev/null
+    pkill -f vpsjb-ws.py 2>/dev/null
+    OK "WS-epro removido."
+    PAUSA
+}
+quitar_stunnel(){
+    systemctl disable --now stunnel4 2>/dev/null
+    rm -f /etc/stunnel/stunnel.conf /etc/stunnel/stunnel.pem /etc/stunnel/stunnel.crt /etc/stunnel/stunnel.key
+    OK "Stunnel detenido (el paquete queda instalado)."
+    PAUSA
+}
+quitar_hysteria(){
+    systemctl disable --now hysteria-server 2>/dev/null
+    rm -f /etc/systemd/system/hysteria-server.service /etc/hysteria/config.yaml
+    systemctl daemon-reload 2>/dev/null
+    pkill -x hysteria 2>/dev/null
+    OK "Hysteria2 removido."
+    PAUSA
+}
+quitar_shadowsocks(){
+    systemctl disable --now vpsjb-ss 2>/dev/null
+    rm -f /etc/systemd/system/vpsjb-ss.service /etc/shadowsocks-libev/config.json
+    systemctl daemon-reload 2>/dev/null
+    pkill -x ss-server 2>/dev/null
+    OK "Shadowsocks removido (el paquete queda instalado)."
+    PAUSA
+}
+quitar_trojan(){
+    python3 <<'PYEOF'
+import json
+try:
+    cfg = json.load(open("/usr/local/etc/xray/config.json"))
+    cfg["inbounds"] = [i for i in cfg.get("inbounds", []) if i.get("protocol") != "trojan"]
+    json.dump(cfg, open("/usr/local/etc/xray/config.json", "w"), indent=2)
+    print("ok")
+except Exception:
+    pass
+PYEOF
+    rm -rf /etc/vpsjb-trojan
+    systemctl restart xray 2>/dev/null
+    OK "Trojan removido del Xray."
+    PAUSA
+}
+quitar_wireguard(){
+    systemctl disable --now wg-quick@wg0 2>/dev/null
+    rm -f /etc/wireguard/wg0.conf /root/wg-client.conf
+    OK "WireGuard removido."
+    PAUSA
+}
+
+menu_quitar(){
+    while true; do
+        cabecera
+        SUBTOP "$(T t_sub_quitar)"
+        FR_OPT 1 "$(T t_q_xray)" 5 "Hysteria2"
+        FR_OPT 2 "WS-epro" 6 "$(T t_shadowsocks)"
+        FR_OPT 3 "Stunnel" 7 "$(T t_trojan)"
+        FR_OPT 4 "BadVPN" 8 "$(T t_wireguard)"
+        FR_OPT 9 "$(T t_q_tunnel)" "" ""
+        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_BOT
+        PROMPT
+        case "$OP" in
+            1) quitar_xray_completo ;; 2) quitar_wsepro ;; 3) quitar_stunnel ;; 4) quitar_badvpn ;;
+            5) quitar_hysteria ;; 6) quitar_shadowsocks ;; 7) quitar_trojan ;; 8) quitar_wireguard ;;
+            9) quitar_tunel_cdn ;;
+            0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
+        esac
+    done
+}
+
+# ------------------------------------------------------------
+# TUNEL CDN
+# ------------------------------------------------------------
+tunel_trycloudflare(){
+    if pgrep -x cloudflared >/dev/null 2>&1; then
+        read -r -p "Ya hay un tunel CDN corriendo. Reiniciarlo (nueva URL)? (s/n): " SN
+        [[ "$SN" != "s" ]] && { PAUSA; return; }
+        pkill -x cloudflared 2>/dev/null; sleep 2
+    fi
+    if ! command -v cloudflared >/dev/null 2>&1; then
+        INFO "Instalando cloudflared..."
+        local ARCH="amd64"; [[ "$(uname -m)" == "aarch64" || "$(uname -m)" == "arm64" ]] && ARCH="arm64"
+        timeout 25 wget -q "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}.deb" -O /tmp/cloudflared.deb 2>/dev/null \
+            && dpkg -i /tmp/cloudflared.deb >/dev/null 2>&1 && rm -f /tmp/cloudflared.deb \
+            || { ERR "No se pudo descargar cloudflared (sin red?)."; PAUSA; return; }
+    fi
+    local PUERTO=80
+    if [[ -f /etc/systemd/system/vpsjb-ws.service ]]; then
+        PUERTO=$(grep -o 'vpsjb-ws.py [0-9]*' /etc/systemd/system/vpsjb-ws.service | awk '{print $2}' | head -1)
+        PUERTO=${PUERTO:-80}
+    fi
+    if ! pgrep -f vpsjb-ws.py >/dev/null 2>&1; then
+        WARN "WS-epro no esta corriendo. Instalalo primero (Protocolos -> 7, puerto 80)."
+        PAUSA; return
+    fi
+    INFO "Levantando tunel CDN hacia 127.0.0.1:${PUERTO}..."
+    nohup cloudflared tunnel --url "http://127.0.0.1:${PUERTO}" > /tmp/cf-tunnel.log 2>&1 &
+    local URL="" i
+    for i in $(seq 1 15); do
+        sleep 2
+        URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cf-tunnel.log | head -1)
+        [[ -n "$URL" ]] && break
+    done
+    echo
+    if [[ -n "$URL" ]]; then
+        OK "Tunel CDN activo:"
+        echo
+        echo -e " ${VERDE}${URL}${NC}"
+        echo
+        echo -e " ${AMARILLO}Uso en la app: WebSocket activado, servidor ${URL#https://} puerto 443, path /${NC}"
+        echo -e " ${AMARILLO}OJO: la URL cambia al reiniciar el tunel. Es para pruebas/demos.${NC}"
+        echo -e " ${CIAN}Log: /tmp/cf-tunnel.log  |  Frenar: pkill cloudflared${NC}"
+    else
+        ERR "El tunel no dio URL a tiempo. Log:"
+        tail -5 /tmp/cf-tunnel.log 2>/dev/null
+    fi
+    PAUSA
+}
+
+quitar_tunel_cdn(){
+    pkill -x cloudflared 2>/dev/null && OK "Tunel CDN detenido." || ERR "No habia tunel corriendo."
+    PAUSA
+}
+
+# ------------------------------------------------------------
+# MENU PRINCIPAL
+# ------------------------------------------------------------
+[[ $EUID -ne 0 ]] && { echo -e "${ROJO}Ejecuta como root o con sudo.${NC}"; exit 1; }
+
+# Validacion rapida de sintaxis (evita ejecutar un script corrupto)
+if ! bash -n "$0" 2>/dev/null; then
+    echo -e "${ROJO}[FATAL]${NC} El script tiene errores de sintaxis. NO continuar."
+    exit 1
+fi
+
+seleccionar_idioma
+ghost_bootstrap
+gate_licencia
+
+while true; do
+    cabecera
+    FR_TOP
+    FR_TXT "  ${BLANCO}$(T t_menu_principal)${NC}"
+    FR_MID
+    FR_OPT 1 "$(T t_usuarios)" 2 "$(T t_protocolos)"
+    FR_OPT 3 "$(T t_seguridad)" 4 "$(T t_sistema)"
+    FR_OPT 5 "$(T t_herramientas)" 6 "$(T t_webmin)"
+    FR_OPT 7 "$(T t_backup)" 8 "$(T t_diagnostico)"
+    FR_MID
+    FR_TXT "  $(T t_servidor_id): ${VERDE}$(machine_hash)${NC}   |   $(date '+%d/%m/%Y %H:%M')"
+    FR_OPT 0 "$(T t_salir)" "" ""
+    FR_BOT
+    PROMPT
+    case "$OP" in
+        1) menu_usuarios ;;
+        2) menu_protocolos ;;
+        3) menu_seguridad ;;
+        4) menu_sistema ;;
+        5) menu_herramientas ;;
+        6) menu_webmin ;;
+        7) menu_backup ;;
+        8) diagnostico ;;
+        0) echo -e "${VERDE}Hasta luego!${NC}"; exit 0 ;;
+        *) ERR "$(T t_opinv)"; sleep 1 ;;
+    esac
+done
