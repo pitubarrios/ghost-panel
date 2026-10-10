@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  GHOST PANEL v3.1.1 by Jorge Barrios
+#  GHOST PANEL v3.1.2 by Jorge Barrios
 #  Administracion profesional de VPS (Ubuntu / Debian)
 #  Uso:  sudo bash ghost-panel.sh  |  ghostpanel
 # ============================================================
@@ -9,7 +9,8 @@ set -uo pipefail
 IFS=$'\n\t'
 
 # ---------- LOCALE UTF-8 (critico para ${#s} y padding visual) ----------
-# Sin esto, en Termux con LANG=C las lineas de la UI no se alinean.
+# Sin esto, en Termux con LANG=C las lineas de la UI no se alinean
+# porque ${#s} cuenta bytes en lugar de caracteres multibyte.
 for _loc in C.UTF-8 en_US.UTF-8 es_AR.UTF-8 es_ES.UTF-8 es_MX.UTF-8; do
     if locale -a 2>/dev/null | grep -qx "$_loc"; then
         export LANG="$_loc" LC_ALL="$_loc"
@@ -179,7 +180,7 @@ fw_backend(){
 }
 
 # ============================================================
-#  UI FRAMEWORK v3.1.1
+#  UI FRAMEWORK v3.1.2
 # ============================================================
 BC=()
 
@@ -257,12 +258,23 @@ ui_center(){
     local vw; vw=$(vis_width "$txt")
     local p=$(( (58 - vw) / 2 ))
     ((p<0)) && p=0
-    printf '%b│%b %*s%s%*s %b│%b\n' "$C_FRM" "$RS" "$p" "" "$txt" "$((58 - p - vw))" "" "$C_FRM" "$RS"
+    local i
+    printf '%b│%b ' "$C_FRM" "$RS"
+    for ((i=0; i<p; i++)); do printf ' '; done
+    printf '%s' "$txt"
+    local r=$(( 58 - p - vw ))
+    ((r<0)) && r=0
+    for ((i=0; i<r; i++)); do printf ' '; done
+    printf ' %b│%b\n' "$C_FRM" "$RS"
 }
 
+# subtop: cabecera de seccion con borde alineado al frame (62 celdas).
+# Calculo: 62 = 2 (╭─) + 1 (sp) + tw + 1 (sp) + fill + 1 (╮)
+#          => fill = 62 - 5 - tw = 57 - tw
 subtop(){
     local title="$1"
-    local fill=$(( 56 - ${#title} - 2 ))
+    local tw=${#title}
+    local fill=$(( 57 - tw ))
     ((fill<1)) && fill=1
     printf '\n%b╭─%b %b%s%b %b%s╮%b\n' \
         "$C_FRM" "$RS" "$C_FRM2$BD" "$title" "$RS" \
@@ -293,7 +305,7 @@ barra(){
 # ---------- HEADER ----------
 header(){
     clear_if_tty
-    local ram_total ram_used_mb ram_pct cpu_pct disk_pct online lic="-" ipv4 osver kern uptime
+    local ram_total ram_used_mb ram_pct cpu_pct disk_pct online lic="-" ipv4 osver kern uptime mhash
     ram_total=$(free -m | awk '/Mem:/{print $2}')
     ram_used_mb=$(free -m | awk '/Mem:/{print $3}')
     ram_pct=$(free | awk '/Mem:/{printf "%d", $3*100/$2}')
@@ -307,6 +319,7 @@ header(){
     osver=$(lsb_release -rs 2>/dev/null || echo '?')
     kern=$(uname -r | cut -d- -f1)
     uptime=$(uptime -p 2>/dev/null | sed 's/^up //' || echo "-")
+    mhash=$(machine_hash)
 
     if [[ "${LICENSE_EXP:-0}" == "0" ]]; then
         lic="permanente"
@@ -332,7 +345,7 @@ header(){
     printf '\n'
     ui_top
     local title
-    title=$(printf '%b◆%b %bGHOST PANEL%b  %b·%b  %bv3.1.1%b' "$C_FRM2" "$RS" "$BD$CW" "$RS" "$C_LBL" "$RS" "$C_DIM" "$RS")
+    title=$(printf '%b◆%b %bGHOST PANEL%b  %b·%b  %bv3.1.2%b' "$C_FRM2" "$RS" "$BD$CW" "$RS" "$C_LBL" "$RS" "$C_DIM" "$RS")
     ui_row "$title"
     ui_mid
     ui_row "$(printf '%bSISTEMA%b' "$C_LBL" "$RS")"
@@ -348,6 +361,7 @@ header(){
     ui_row "$(printf '  %bIP%b       %s' "$C_LBL" "$RS" "$(printf '%b%s%b' "$C_ACC" "$ipv4" "$RS")")"
     ui_row "$(printf '  %bHost%b     %s   %bOnline%b  %b%s%b' "$C_LBL" "$RS" "$(hostname)" "$C_LBL" "$RS" "$C_OK" "$online" "$RS")"
     ui_row "$(printf '  %bUsuario%b  %s   %bLic%b  %b%s%b' "$C_LBL" "$RS" "$(whoami)" "$C_LBL" "$RS" "$C_OK" "$lic" "$RS")"
+    ui_row "$(printf '  %bID%b       %s' "$C_LBL" "$RS" "$(printf '%b%s%b' "$C_FRM2" "$mhash" "$RS")")"
     ui_bot
 
     if [[ ${#BC[@]} -gt 0 ]]; then
@@ -2153,8 +2167,8 @@ cli_cmd(){
                 *) echo "Uso: ghostpanel users {list|create|delete} [args]"; return 1 ;;
             esac ;;
         status)
-            printf 'IP: %s\nHost: %s\nLicencia: %s\n' \
-                "$(get_ipv4)" "$(hostname)" "${LICENSE_OK:- -}"
+            printf 'IP: %s\nHost: %s\nID: %s\nLicencia: %s\n' \
+                "$(get_ipv4)" "$(hostname)" "$(machine_hash)" "${LICENSE_OK:- -}"
             ;;
         doctor) doctor ;;
         *) echo "Ghost Panel - comandos: users | status | doctor"; return 1 ;;
@@ -2248,10 +2262,10 @@ check_deps || exit 1
 if [[ $# -gt 0 ]]; then
     case "$1" in
         users|status|doctor) cli_cmd "$@"; exit $? ;;
-        --version|-v) echo "Ghost Panel v3.1.1"; exit 0 ;;
+        --version|-v) echo "Ghost Panel v3.1.2"; exit 0 ;;
         --help|-h)
             cat <<HELP
-Ghost Panel v3.1.1
+Ghost Panel v3.1.2
   ghostpanel                    Menu interactivo
   ghostpanel users list
   ghostpanel users create U --dias 30 --max 1 --pass 1234
