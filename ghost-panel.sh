@@ -8,6 +8,16 @@
 set -uo pipefail
 IFS=$'\n\t'
 
+# ---------- LOCALE UTF-8 (critico para ${#s} y padding visual) ----------
+# Sin esto, en Termux con LANG=C las lineas de la UI no se alinean.
+for _loc in C.UTF-8 en_US.UTF-8 es_AR.UTF-8 es_ES.UTF-8 es_MX.UTF-8; do
+    if locale -a 2>/dev/null | grep -qx "$_loc"; then
+        export LANG="$_loc" LC_ALL="$_loc"
+        break
+    fi
+done
+unset _loc
+
 # ---------- PALETA ----------
 RS='\033[0m'
 BD='\033[1m'
@@ -103,12 +113,35 @@ pkill_user(){
 
 user_home(){ getent passwd "$1" 2>/dev/null | cut -d: -f6; }
 
+# machine_hash: ID estable del servidor.
+# Orden: /etc/machine-id -> /etc/hostname -> /var/lib/dbus/machine-id -> ID persistido.
 machine_hash(){
-    if [[ -f /etc/machine-id ]]; then
-        sha256sum /etc/machine-id 2>/dev/null | cut -c1-12
+    local src="" cache="" dir=""
+    if [[ -r /etc/machine-id && -s /etc/machine-id ]]; then
+        src=$(cat /etc/machine-id 2>/dev/null)
+    elif [[ -r /etc/hostname && -s /etc/hostname ]]; then
+        src=$(cat /etc/hostname 2>/dev/null)
+    elif [[ -r /var/lib/dbus/machine-id && -s /var/lib/dbus/machine-id ]]; then
+        src=$(cat /var/lib/dbus/machine-id 2>/dev/null)
     else
-        sha256sum /etc/hostname 2>/dev/null | cut -c1-12
+        # Fallback persistente: si nada existe (Termux, contenedores raros)
+        for dir in /etc /var/lib "$HOME" /tmp; do
+            [[ -n "$dir" && -w "$dir" ]] && { cache="$dir/.vps-machine-id"; break; }
+        done
+        if [[ -z "$cache" ]]; then
+            src="unknown-$(uname -n)-$(date +%s)"
+        else
+            if [[ ! -s "$cache" ]]; then
+                { hostname 2>/dev/null; \
+                  cat /proc/sys/kernel/random/uuid 2>/dev/null; \
+                  date +%s; } | sha256sum | cut -c1-32 > "$cache" 2>/dev/null
+                chmod 600 "$cache" 2>/dev/null || true
+            fi
+            src=$(cat "$cache" 2>/dev/null)
+        fi
     fi
+    [[ -z "$src" ]] && src="fallback-$(uname -n)"
+    printf '%s' "$src" | sha256sum | cut -c1-12
 }
 
 require_root(){
@@ -160,14 +193,24 @@ crumbs(){
 
 clear_if_tty(){ [[ -t 1 ]] && clear; }
 
+# vis_width: ancho visual (en celdas de terminal) de una cadena con ANSI.
+# Requiere locale UTF-8 (forzado arriba). Maneja wide-chars tipo emoji/CJK.
 vis_width(){
-    local s="$1" w=0 i c
+    local s="$1" w=0 i c cp len
     s=$(printf '%s' "$s" | sed 's/\x1b\[[0-9;]*m//g')
-    local len=${#s}
+    len=${#s}
     for ((i=0; i<len; i++)); do
         c="${s:i:1}"
-        local cp; cp=$(printf '%d' "'$c" 2>/dev/null || echo 0)
+        cp=$(printf '%d' "'$c" 2>/dev/null) || { w=$((w+1)); continue; }
         if (( cp >= 0x1F000 && cp <= 0x1FFFF )); then
+            w=$((w+2))
+        elif (( cp >= 0x1100 && cp <= 0x115F )) || \
+             (( cp >= 0x2E80 && cp <= 0xA4CF )) || \
+             (( cp >= 0xAC00 && cp <= 0xD7A3 )) || \
+             (( cp >= 0xF900 && cp <= 0xFAFF )) || \
+             (( cp >= 0xFE30 && cp <= 0xFE4F )) || \
+             (( cp >= 0xFF00 && cp <= 0xFF60 )) || \
+             (( cp >= 0xFFE0 && cp <= 0xFFE6 )); then
             w=$((w+2))
         else
             w=$((w+1))
@@ -176,12 +219,16 @@ vis_width(){
     printf '%d' "$w"
 }
 
+# pad_vis: rellena con espacios ASCII hasta 'target' celdas visuales.
+# Usa printf ' ' iterativo (inmune a %*s y a locales C/POSIX).
 pad_vis(){
     local s="$1" target="$2"
-    local vw; vw=$(vis_width "$s")
-    local p=$((target - vw))
-    ((p<0)) && p=0
-    printf '%s%*s' "$s" "$p" ""
+    local vw p i
+    vw=$(vis_width "$s")
+    p=$(( target - vw ))
+    (( p < 0 )) && p=0
+    printf '%s' "$s"
+    for ((i=0; i<p; i++)); do printf ' '; done
 }
 
 ui_line(){ local n=${1:-60} c=${2:-$C_FRM}; local s=""; local i; for ((i=0;i<n;i++)); do s+="─"; done; printf '%b%s%b' "$c" "$s" "$RS"; }
@@ -227,7 +274,6 @@ botline(){ printf '%b╰%s╯%b\n\n' "$C_FRM" "$(ui_line 60 $C_FRM)" "$RS"; }
 prompt(){ printf '  %b▸%b %b%s%b %b>%b ' "$C_FRM2" "$RS" "$C_LBL" "${1:-Opcion}" "$RS" "$C_FRM2" "$RS"; }
 
 # Barra visual tipo [████░░░░░░]  20 celdas
-# Acepta enteros o floats ("0.0%"). Normaliza antes de hacer aritmética.
 barra(){
     local pct="${1:-0}" ancho="${2:-20}" color="${3:-$C_OK}"
     pct="${pct%\%}"
@@ -341,13 +387,14 @@ apply_license_times(){
 }
 
 gate_licencia(){
-    local intentos=0 k rc perm_hash=""
+    local intentos=0 k rc perm_hash="" mhash
     clear_if_tty
     printf '\n'
     ui_top
     ui_center "$(printf '%b◆%b %bLICENCIA%b' "$C_FRM2" "$RS" "$BD$CW" "$RS")"
     ui_mid
-    ui_row "$(printf '  %bServidor ID%b  %s' "$C_LBL" "$RS" "$(printf '%b%s%b' "$C_ACC" "$(machine_hash)" "$RS")")"
+    mhash=$(machine_hash)
+    ui_row "$(printf '  %bServidor ID%b  %s' "$C_LBL" "$RS" "$(printf '%b%s%b' "$C_ACC" "$mhash" "$RS")")"
     if [[ -z "$LICENSE_URL" ]]; then
         ui_row "$(printf '  %bConfigurar LICENSE_URL en:%b' "$C_ERR" "$RS")"
         ui_row "  $CONF_FILE"
@@ -363,7 +410,7 @@ gate_licencia(){
         k=$(cat "$KEY_FILE" 2>/dev/null)
         consultar_licencia "$k"; rc=$?
         if [[ $rc -eq 0 ]]; then
-            printf '%s' "$(machine_hash)" > "$PERM_FILE" 2>/dev/null
+            printf '%s' "$mhash" > "$PERM_FILE" 2>/dev/null
             chmod 600 "$PERM_FILE" 2>/dev/null
             LICENSE_OK="${LICENSE_NOMBRE:-cliente}"
             apply_license_times
@@ -371,7 +418,7 @@ gate_licencia(){
             sleep 1
             return 0
         elif [[ $rc -eq 2 ]]; then
-            if [[ -n "$perm_hash" && "$perm_hash" == "$(machine_hash)" ]]; then
+            if [[ -n "$perm_hash" && "$perm_hash" == "$mhash" ]]; then
                 LICENSE_OK="offline (permanente local)"
                 LICENSE_EXP=0
                 WARN "Worker no responde, usando licencia local."
@@ -393,7 +440,7 @@ gate_licencia(){
         consultar_licencia "$k"; rc=$?
         if [[ $rc -eq 0 ]]; then
             printf '%s' "$k" > "$KEY_FILE"; chmod 600 "$KEY_FILE"
-            printf '%s' "$(machine_hash)" > "$PERM_FILE"; chmod 600 "$PERM_FILE"
+            printf '%s' "$mhash" > "$PERM_FILE"; chmod 600 "$PERM_FILE"
             LICENSE_OK="${LICENSE_NOMBRE:-cliente}"
             apply_license_times
             OK "Licencia activada PERMANENTEMENTE. Bienvenido, ${LICENSE_OK}."
