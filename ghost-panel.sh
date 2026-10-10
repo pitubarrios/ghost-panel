@@ -21,7 +21,7 @@ if [[ ! -f "$CONF_FILE" ]]; then
 #  GHOST PANEL - Configuracion
 # ============================================================
 # URL de tu Worker de Cloudflare (validacion de licencia)
-LICENSE_URL=
+LICENSE_URL=https://vps-licencias.jorgebarriosmpya.workers.dev
 # URL del script en tu repo (auto-update)
 REPO_RAW=https://raw.githubusercontent.com/pitubarrios/vps-manager/refs/heads/main/ghost-panel.sh
 # Prefijo de las keys de licencia
