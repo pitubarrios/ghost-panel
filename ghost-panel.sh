@@ -8,10 +8,14 @@
 # ============================================================
 
 set -u
+if locale -a 2>/dev/null | grep -qiE '^c\.utf-?8$'; then export LC_ALL=C.UTF-8; fi
 
 ROJO='\033[1;31m'; VERDE='\033[1;32m'; AMARILLO='\033[1;33m'
 AZUL='\033[1;34m'; CIAN='\033[1;36m'; BLANCO='\033[1;37m'
 NC='\033[0m'
+NARANJA='\033[38;5;208m'; GRIS='\033[38;5;245m'; MORADO='\033[38;5;141m'
+BORDE="$GRIS"          # color del marco
+GHOST_VER='3.2.0'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -133,7 +137,12 @@ gate_licencia(){
 IDIOMA="es"
 [[ -f /etc/vps-manager.lang ]] && IDIOMA=$(cat /etc/vps-manager.lang 2>/dev/null)
 declare -A TXT_ES TXT_EN
-TXT_ES[t_menu_principal]="MENU PRINCIPAL"; TXT_EN[t_menu_principal]="MAIN MENU"
+TXT_ES[t_menu_principal]="PRINCIPAL"; TXT_EN[t_menu_principal]="MAIN"
+TXT_ES[t_ui_sys]="SISTEMA"; TXT_EN[t_ui_sys]="SYSTEM"
+TXT_ES[t_ui_res]="RECURSOS"; TXT_EN[t_ui_res]="RESOURCES"
+TXT_ES[t_ui_ses]="SESION"; TXT_EN[t_ui_ses]="SESSION"
+TXT_ES[t_ui_user]="Usuario"; TXT_EN[t_ui_user]="User"
+TXT_ES[t_ui_days]="dias"; TXT_EN[t_ui_days]="days"
 TXT_ES[t_usuarios]="Usuarios SSH"; TXT_EN[t_usuarios]="SSH Users"
 TXT_ES[t_protocolos]="Protocolos"; TXT_EN[t_protocolos]="Protocols"
 TXT_ES[t_seguridad]="Seguridad"; TXT_EN[t_seguridad]="Security"
@@ -254,7 +263,7 @@ seleccionar_idioma(){
     echo "$IDIOMA" > /etc/vps-manager.lang 2>/dev/null
 }
 
-PAUSA(){ echo -e "\n${AMARILLO}Presiona ENTER para continuar...${NC}"; read -r; }
+PAUSA(){ echo -e "\n  ${GRIS}↵ ENTER para continuar...${NC}"; read -r; }
 
 # ---------- HELPERS DE PRODUCCION ----------
 LOG_PANEL='/var/log/ghost-panel.log'
@@ -559,32 +568,93 @@ ghost_bootstrap(){
 }
 
 # ---------- MARCO / DISEÑO DEL PANEL ----------
-FR_TOP(){ printf '%b\n' "${AZUL}╔══════════════════════════════════════════════════════════╗${NC}"; }
-FR_MID(){ printf '%b\n' "${AZUL}╠══════════════════════════════════════════════════════════╣${NC}"; }
-FR_BOT(){ printf '%b\n' "${AZUL}╚══════════════════════════════════════════════════════════╝${NC}"; }
+UI_W=56
+ui_init(){
+    # ancho del marco segun la terminal (celular ~58 col, PC hasta 62)
+    local c
+    c=$(tput cols 2>/dev/null) || c=80
+    [[ "$c" =~ ^[0-9]+$ ]] || c=80
+    UI_W=$(( c - 4 ))
+    (( UI_W > 62 )) && UI_W=62
+    (( UI_W < 38 )) && UI_W=38
+}
+ui_rep(){ local s; printf -v s '%*s' "$2" ''; printf '%s' "${s// /$1}"; }
+FR_TOP(){ printf '%b\n' "${BORDE}┌$(ui_rep ─ $((UI_W+2)))┐${NC}"; }
+FR_MID(){ printf '%b\n' "${BORDE}├$(ui_rep ─ $((UI_W+2)))┤${NC}"; }
+FR_BOT(){ printf '%b\n' "${BORDE}└$(ui_rep ─ $((UI_W+2)))┘${NC}"; }
+ui_box_top(){
+    # ┌─ TITULO ─────────┐   (titulo en morado dentro del marco)
+    local t=" $1 " n
+    n=$(( UI_W + 1 - ${#t} ))
+    (( n < 1 )) && n=1
+    printf '%b\n' "${BORDE}┌─${NC}${MORADO}${t}${NC}${BORDE}$(ui_rep ─ "$n")┐${NC}"
+}
+ui_crumb(){
+    if [[ -n "${1:-}" ]]; then printf '%b\n' "  ${GRIS}Inicio ›${NC} ${CIAN}${1}${NC}"
+    else printf '%b\n' "  ${GRIS}Inicio ›${NC}"; fi
+}
 FR_TXT(){
-    local raw="$1" out="" vis=0 esc
+    local raw="$1" out="" vis=0 esc W=$UI_W
     raw="${raw//\\033/$'\x1b'}"
     while [[ -n "$raw" ]]; do
         if [[ "$raw" == $'\x1b['* ]]; then
             esc="${raw%%m*}m"; out+="$esc"; raw="${raw#"$esc"}"; continue
         fi
-        [[ $vis -ge 56 ]] && break
+        [[ $vis -ge $W ]] && break
         out+="${raw:0:1}"; vis=$((vis+1)); raw="${raw:1}"
     done
-    printf '%b %s%*s %b\n' "${AZUL}║${NC}" "$out" "$((56-vis))" "" "${AZUL}║${NC}"
+    printf '%b %s%b%*s %b\n' "${BORDE}│${NC}" "$out" "$NC" "$((W-vis))" "" "${BORDE}│${NC}"
+}
+ui_cell(){
+    # ui_cell INDICE ETIQUETA ANCHO -> "[1]  Etiqueta" coloreado, relleno a ANCHO columnas visibles
+    local k="$1" lbl="${2:-}" w="$3" ic="$CIAN" pad txt
+    [[ "$k" == "0" ]] && ic="$ROJO"
+    txt=$(printf '%-4s' "[$k]")
+    lbl="${lbl:0:$((w-6))}"
+    pad=$(( w - 5 - ${#lbl} ))
+    (( pad < 0 )) && pad=0
+    printf '%b%s%b %b%s%b%*s' "$ic" "$txt" "$NC" "$BLANCO" "$lbl" "$NC" "$pad" ""
 }
 FR_OPT(){
-    if [[ -n "$3" ]]; then
-        FR_TXT "$(printf "  ${AZUL}[%-2s]${NC} %-24s  ${AZUL}[%-2s]${NC} %-18s" "$1" "$2" "$3" "$4")"
+    local half=$(( UI_W / 2 ))
+    if [[ -n "${3:-}" ]]; then
+        FR_TXT "  $(ui_cell "$1" "$2" $((half-2)))$(ui_cell "$3" "${4:-}" $((half-2)))"
     else
-        FR_TXT "$(printf "  ${AZUL}[%-2s]${NC} %s" "$1" "$2")"
+        FR_TXT "  $(ui_cell "$1" "$2" $((UI_W-2)))"
     fi
 }
-OK(){ echo -e "${VERDE}[OK]${NC} $1"; }
-ERR(){ echo -e "${ROJO}[ERROR]${NC} $1"; }
-INFO(){ echo -e "${CIAN}[INFO]${NC} $1"; }
-WARN(){ echo -e "${AMARILLO}[AVISO]${NC} $1"; }
+ui_sec(){ FR_MID; FR_TXT " ${GRIS}$1${NC}"; }
+ui_kv(){ FR_TXT "$(printf '  %b%-8s%b %b' "$GRIS" "$1" "$NC" "$2")"; }
+ui_bar(){
+    # ui_bar PORCENTAJE ANCHO  (verde <70, naranja <90, rojo >=90)
+    local p=${1:-0} w=$2 f e col
+    [[ "$p" =~ ^[0-9]+$ ]] || p=0
+    (( p > 100 )) && p=100
+    f=$(( p * w / 100 )); e=$(( w - f ))
+    if (( p >= 90 )); then col=$ROJO; elif (( p >= 70 )); then col=$NARANJA; else col=$VERDE; fi
+    printf '%b%s%b%s%b' "$col" "$(ui_rep █ "$f")" "$GRIS" "$(ui_rep ░ "$e")" "$NC"
+}
+ui_gauge(){
+    # ui_gauge ETIQUETA PORCENTAJE [TEXTO]
+    local bw=$(( UI_W - 33 ))
+    (( bw > 24 )) && bw=24
+    (( bw < 8 )) && bw=8
+    FR_TXT "$(printf '  %b%-6s%b %s %b%3s%%%b  %b%s%b' "$GRIS" "$1" "$NC" "$(ui_bar "$2" "$bw")" "$BLANCO" "${2:-0}" "$NC" "$GRIS" "${3:-}" "$NC")"
+}
+cpu_pct(){
+    # CPU instantaneo (2 lecturas de /proc/stat); 0 si no esta disponible (p. ej. proot)
+    local _c a b c d e f g h t1 i1 t2 i2
+    read -r _c a b c d e f g h _ < /proc/stat 2>/dev/null || { echo 0; return; }
+    t1=$((a+b+c+d+e+f+g+h)); i1=$((d+e))
+    sleep 0.2
+    read -r _c a b c d e f g h _ < /proc/stat 2>/dev/null || { echo 0; return; }
+    t2=$((a+b+c+d+e+f+g+h)); i2=$((d+e))
+    if (( t2 > t1 )); then echo $(( 100 * ((t2-t1) - (i2-i1)) / (t2-t1) )); else echo 0; fi
+}
+OK(){ echo -e "  ${VERDE}✔${NC} $1"; }
+ERR(){ echo -e "  ${ROJO}✘${NC} $1"; }
+INFO(){ echo -e "  ${CIAN}●${NC} $1"; }
+WARN(){ echo -e "  ${AMARILLO}▲${NC} $1"; }
 FILA(){
     if [[ -n "$3" ]]; then
         printf " ${AZUL}[%-2s]${NC} %-26s ${AZUL}[%-2s]${NC} %s\n" "$1" "$2" "$3" "$4"
@@ -593,29 +663,41 @@ FILA(){
     fi
 }
 
-SUBTOP(){ FR_TOP; FR_TXT "  ${CIAN}${1}${NC}"; FR_MID; }
-PROMPT(){ read -r -p "  $(echo -e "${CIAN}▸${NC}") $(T t_opcion) > " OP; }
+SUBTOP(){ ui_crumb "$1"; ui_box_top "$1"; }
+PROMPT(){ echo; read -r -p "  $(echo -e "${CIAN}▸${NC}") $(T t_opcion) $(echo -e "${GRIS}›${NC}") " OP; }
 
 cabecera(){
     clear
-    local RAM_TOTAL RAM_USO CPU DISCO ONLINE DIAS_LIC=""
-    RAM_TOTAL=$(free -m | awk '/Mem:/{print $2}')
-    RAM_USO=$(free -m | awk '/Mem:/{printf "%d%% (%dM)", $3*100/$2, $3}')
-    CPU=$(LC_ALL=C top -bn1 2>/dev/null | awk '/Cpu\(s\)/{for(i=1;i<=NF;i++) if($i ~ /^id,?$/){v=$(i-1); sub(/.*,/,"",v); printf "%.1f%%", 100-v; exit}}')
-    [[ -z "$CPU" ]] && CPU="n/a"
-    DISCO=$(df -h / | awk 'NR==2{print $5}')
+    ui_init
+    local os kern up ram_t="" ram_u="" ram_p=0 cpu dsk_p="" dsk_u="" dsk_t="" ONLINE lic lic_txt
+    os=$( (. /etc/os-release 2>/dev/null; echo "${NAME:-Linux} ${VERSION_ID:-}") )
+    kern=$(uname -r)
+    up=$(uptime -p 2>/dev/null); up=${up#up }; [[ -z "$up" ]] && up="n/a"
+    read -r ram_t ram_u < <(free -m 2>/dev/null | awk '/Mem:/{print $2, $3}')
+    ram_t=${ram_t:-0}; ram_u=${ram_u:-0}
+    (( ram_t > 0 )) && ram_p=$(( ram_u * 100 / ram_t ))
+    cpu=$(cpu_pct)
+    read -r dsk_p dsk_u dsk_t < <(df -P -h / 2>/dev/null | awk 'NR==2{gsub("%","",$5); print $5, $3, $2}')
     ONLINE=$(online_total)
+    lic_txt="${LICENSE_OK:--}"
     if [[ -n "${LICENSE_EXP:-}" && "${LICENSE_EXP:-0}" != "0" ]]; then
-        DIAS_LIC=$(( (LICENSE_EXP - $(date +%s)) / 86400 ))
-        [[ $DIAS_LIC -lt 0 ]] && DIAS_LIC=0
-        DIAS_LIC=" (${DIAS_LIC}d)"
+        lic=$(( (LICENSE_EXP - $(date +%s)) / 86400 )); (( lic < 0 )) && lic=0
+        lic_txt="${lic} $(T t_ui_days)"
     fi
     FR_TOP
-    FR_TXT "  ${VERDE}GHOST PANEL${NC}  ${BLANCO}|  $(T t_panel)${NC}"
-    FR_MID
-    FR_TXT "  IP: $(ip_publica)   Host: $(hostname)   Ubuntu $(lsb_release -rs 2>/dev/null)"
-    FR_TXT "  $(T t_ram) ${RAM_USO}/${RAM_TOTAL}M   $(T t_cpu) ${CPU}   $(T t_disco) ${DISCO}   $(T t_online) ${VERDE}${ONLINE}${NC}"
-    FR_TXT "  $(T t_licencia): ${VERDE}${LICENSE_OK:- -}${DIAS_LIC}${NC}   Webmin: $(estado_webmin_min)"
+    FR_TXT " ${MORADO}◆${NC} ${BLANCO}GHOST PANEL${NC}  ${GRIS}-  v${GHOST_VER}${NC}"
+    ui_sec "$(T t_ui_sys)"
+    ui_kv "OS" "${os}  ${GRIS}·${NC}  kernel ${kern}"
+    ui_kv "Uptime" "$up"
+    ui_sec "$(T t_ui_res)"
+    ui_gauge "RAM" "$ram_p" "${ram_u}M / ${ram_t}M"
+    ui_gauge "CPU" "$cpu"
+    ui_gauge "$(T t_disco)" "${dsk_p:-0}" "${dsk_u:-?} / ${dsk_t:-?}"
+    ui_sec "$(T t_ui_ses)"
+    ui_kv "IP" "${CIAN}$(ip_publica)${NC}"
+    ui_kv "Host" "$(hostname)   ${GRIS}Online${NC} ${VERDE}${ONLINE}${NC}"
+    ui_kv "$(T t_ui_user)" "${BLANCO}$(id -un)${NC}   ${GRIS}Lic${NC} ${VERDE}${lic_txt}${NC}"
+    ui_kv "Webmin" "$(estado_webmin_min)"
     FR_BOT
     echo
 }
@@ -2802,17 +2884,16 @@ ghost_bootstrap
 
 while true; do
     cabecera
-    FR_TOP
-    FR_TXT "  ${BLANCO}$(T t_menu_principal)${NC}"
-    FR_MID
+    ui_crumb
+    ui_box_top "$(T t_menu_principal)"
     FR_OPT 1 "$(T t_usuarios)" 2 "$(T t_protocolos)"
     FR_OPT 3 "$(T t_seguridad)" 4 "$(T t_sistema)"
     FR_OPT 5 "$(T t_herramientas)" 6 "$(T t_webmin)"
     FR_OPT 7 "$(T t_backup)" 8 "$(T t_diagnostico)"
-    FR_MID
-    FR_TXT "  $(T t_servidor_id): ${VERDE}$(machine_hash)${NC}   |   $(date '+%d/%m/%Y %H:%M')"
+    FR_TXT ""
     FR_OPT 0 "$(T t_salir)" "" ""
     FR_BOT
+    echo -e "  ${GRIS}$(T t_servidor_id) ${VERDE}$(machine_hash)${GRIS}  ·  $(date '+%d/%m/%Y %H:%M')${NC}"
     PROMPT
     case "$OP" in
         1) menu_usuarios ;;
