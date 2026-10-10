@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  GHOST PANEL v3.0 by Jorge Barrios
+#  GHOST PANEL v3.0.1 by Jorge Barrios
 #  Administracion profesional de VPS (Ubuntu / Debian)
 #  Uso:  sudo bash ghost-panel.sh  |  ghostpanel
 # ============================================================
@@ -21,7 +21,7 @@ if [[ ! -f "$CONF_FILE" ]]; then
 #  GHOST PANEL - Configuracion
 # ============================================================
 # URL de tu Worker de Cloudflare (validacion de licencia)
-LICENSE_URL=https://vps-licencias.jorgebarriosmpya.workers.dev
+LICENSE_URL=
 # URL del script en tu repo (auto-update)
 REPO_RAW=https://raw.githubusercontent.com/pitubarrios/vps-manager/refs/heads/main/ghost-panel.sh
 # Prefijo de las keys de licencia
@@ -52,7 +52,7 @@ PROTECTED_FILE='/etc/ghost-panel.protected'
 LINKS_FILE='/root/vps-links.txt'
 IP_CACHE_FILE='/tmp/vps-ip.cache'
 
-# Lista protegida centralizada (script + cron la leen del mismo archivo)
+# Lista protegida centralizada
 if [[ ! -f "$PROTECTED_FILE" ]]; then
     cat > "$PROTECTED_FILE" <<'PROTEOF'
 root daemon bin sys sync games man lp mail news uucp proxy www-data backup
@@ -63,7 +63,7 @@ PROTEOF
     chmod 644 "$PROTECTED_FILE"
 fi
 
-# Tema activo (colores por tema)
+# Tema activo
 case "$PANEL_THEME" in
     matrix)   ACC="$G"; SEC="$G"; ;;
     dracula)  ACC="$C"; SEC='\033[1;35m'; ;;
@@ -100,7 +100,6 @@ WARN(){ printf '%b[AVISO]%b %s\n' "$Y" "$NC" "$1"; }
 PAUSA(){ printf '\n%b%s%b\n' "$Y" "Presiona ENTER para continuar..." "$NC"; read -r _; }
 
 pkill_user(){
-    # Mata procesos del usuario de forma segura (evita pkill -u "")
     local u="${1:-}"
     [[ -z "$u" ]] && return 0
     [[ "$u" == "root" ]] && return 0
@@ -123,13 +122,20 @@ require_root(){
     [[ $EUID -ne 0 ]] && { printf '%bEjecuta como root o con sudo.%b\n' "$R" "$NC"; exit 1; }
 }
 
+# Devuelve la primera IPv4 valida del sistema
+get_ipv4(){
+    local ip
+    ip=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -m1 -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || true)
+    [[ -z "$ip" ]] && ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    printf '%s' "$ip"
+}
+
 # ---------- VERIFICACION DE DEPENDENCIAS ----------
 check_deps(){
     local missing=() cmd
     for cmd in bash python3 curl wget openssl systemctl; do
         command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
     done
-    # iptables O nftables (uno de los dos)
     if ! command -v iptables >/dev/null 2>&1 && ! command -v nft >/dev/null 2>&1; then
         missing+=("iptables/nft")
     fi
@@ -141,7 +147,6 @@ check_deps(){
     return 0
 }
 
-# ---------- FIREWALL ABSTRACCION (iptables/nft) ----------
 fw_backend(){
     if command -v nft >/dev/null 2>&1 && ! command -v iptables >/dev/null 2>&1; then
         echo nft
@@ -153,7 +158,7 @@ fw_backend(){
 # ============================================================
 #  UI FRAMEWORK v3
 # ============================================================
-BC=()  # breadcrumb stack
+BC=()
 
 push_crumb(){ BC+=("$1"); }
 pop_crumb(){  [[ ${#BC[@]} -gt 0 ]] && unset 'BC[-1]'; }
@@ -170,12 +175,13 @@ hline(){
 
 header(){
     clear_if_tty
-    local ram_t ram_u cpu disk online lic=""
+    local ram_t ram_u cpu disk online lic="" ipv4
     ram_t=$(free -m | awk '/Mem:/{print $2}')
     ram_u=$(free -m | awk '/Mem:/{printf "%d%% (%dM)", $3*100/$2, $3}')
     cpu=$(top -bn1 2>/dev/null | awk '/%Cpu/{printf "%.1f%%", 100-$8}' || echo "n/a")
     disk=$(df -h / | awk 'NR==2{print $5}')
     online=$(who 2>/dev/null | wc -l)
+    ipv4=$(get_ipv4)
 
     if [[ "${LICENSE_EXP:-0}" == "0" ]]; then
         lic="${LICENSE_OK:- -} · ${G}PERMANENTE${NC}"
@@ -188,26 +194,24 @@ header(){
 
     if [[ "$PANEL_COMPACT" == "1" ]]; then
         printf '%b👻 GHOST%b │ %s@%s │ IP %s │ %s\n' \
-            "$G" "$NC" "$(whoami)" "$(hostname)" \
-            "$(hostname -I | awk '{print $1}')" "$(date '+%d/%m %H:%M')"
+            "$G" "$NC" "$(whoami)" "$(hostname)" "$ipv4" "$(date '+%d/%m %H:%M')"
         printf '%b%s%b\n' "$DIM" "$(crumbs)" "$NC"
         hline 56 "$SEC"
         return
     fi
 
     printf '\n'
-    printf '%b╭─%b 👻 %bGHOST PANEL%b %bv3.0%b ─ %b%s%b\n' \
+    printf '%b╭─%b 👻 %bGHOST PANEL%b %bv3.0.1%b ─ %b%s%b\n' \
         "$SEC" "$NC" "$G" "$NC" "$DIM" "$NC" "$DIM" "$(crumbs)" "$NC"
     hline 62 "$SEC"
     printf '%b│%b  🌐  %s  ·  %s  ·  Ubuntu %s\n' \
-        "$SEC" "$NC" \
-        "$(hostname -I | awk '{print $1}')" "$(hostname)" \
+        "$SEC" "$NC" "$ipv4" "$(hostname)" \
         "$(lsb_release -rs 2>/dev/null || echo '?')"
-    printf '%b│%b  💾  RAM %s   ⚡ CPU %s   📀 %s   👥 %s\n' \
-        "$SEC" "$NC" "$ram_u/$ram_t" "$cpu" "$disk" "${G}${online}${NC}"
+    printf '%b│%b  💾  RAM %s   ⚡ CPU %s   📀 %s   👥 %b%s%b\n' \
+        "$SEC" "$NC" "$ram_u/$ram_t" "$cpu" "$disk" "$G" "$online" "$NC"
     printf '%b│%b  🎫  %b   🖥️  Webmin: %s\n' \
         "$SEC" "$NC" "$lic" "$(webmin_status_min)"
-    hline 62 "$SEC"
+    printf '%b╰─%b\n' "$SEC" "$NC"
     printf '\n'
 }
 
@@ -227,7 +231,7 @@ subtop(){
 
 botline(){ hline 62 "$SEC"; printf '\n'; }
 
-opt(){  # opt NUM "texto" [NUM2 "texto2"]
+opt(){
     if [[ $# -ge 4 ]]; then
         printf '   %b[%s]%b %-28s %b[%s]%b %s\n' "$ACC" "$1" "$NC" "$2" "$ACC" "$3" "$NC" "$4"
     else
@@ -474,7 +478,6 @@ PY
 }
 
 xray_sync_all(){
-    # Al instalar Xray, sincroniza todos los usuarios existentes
     [[ -d "$USUARIOS_DIR" ]] || return 0
     [[ -f /usr/local/etc/xray/config.json ]] || return 0
     local u
@@ -509,7 +512,7 @@ crear_usuario(){
 
     OK "Usuario '$usu' creado."
     printf '   IP: %s  Puerto SSH: %s\n' \
-        "$(hostname -I | awk '{print $1}')" \
+        "$(get_ipv4)" \
         "$(grep -i '^Port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -1 || echo 22)"
     vps_log INFO "creado usuario: $usu (dias=$dias max=$maxc)"
     PAUSA
@@ -1004,7 +1007,7 @@ SVCEOF
     systemctl daemon-reload
     systemctl enable --now vps-checkuser 2>/dev/null
     ufw allow "$port/tcp" >/dev/null 2>&1 || true
-    local ip; ip=$(hostname -I | awk '{print $1}')
+    local ip; ip=$(get_ipv4)
     OK "CheckUser instalado."
     printf '   Local:  http://localhost:%s/checkuser.php?user=X&token=%s\n' "$port" "$token"
     printf '   Remoto: http://%s:%s/checkuser.php?user=X&token=%s\n' "$ip" "$port" "$token"
@@ -1012,10 +1015,9 @@ SVCEOF
 }
 
 checkuser_probar(){
-    local p t ip u
+    local p t u
     p=$(awk -F= '/^PORT=/{print $2}' /etc/vps-checkuser.conf 2>/dev/null)
     t=$(awk -F= '/^TOKEN=/{print $2}' /etc/vps-checkuser.conf 2>/dev/null)
-    ip=$(hostname -I | awk '{print $1}')
     read -r -p "   Usuario a consultar: " u
     echo
     curl -s "http://localhost:${p:-8080}/checkuser.php?user=$u&token=$t" && echo || ERR "Sin respuesta."
@@ -1237,10 +1239,9 @@ XEOF
     ufw allow "$xp/tcp" >/dev/null 2>&1 || true
     systemctl enable --now xray 2>/dev/null
     sleep 2
-    # Sincroniza usuarios ya existentes
     xray_sync_all
     systemctl restart xray 2>/dev/null
-    local ip; ip=$(hostname -I | awk '{print $1}')
+    local ip; ip=$(get_ipv4)
     OK "Xray activo en :$xp"
     printf '   %bvless://%s@%s:%s?security=reality&encryption=none&pbk=%s&fp=chrome&sni=%s&flow=xtls-rprx-vision&sid=#Ghost%b\n' \
         "$G" "$uuidv" "$ip" "$xp" "$pub" "$sni" "$NC"
@@ -1275,7 +1276,7 @@ PY
     ufw allow "$wp/tcp" >/dev/null 2>&1 || true
     systemctl restart xray 2>/dev/null
     sleep 1
-    local ip; ip=$(hostname -I | awk '{print $1}')
+    local ip; ip=$(get_ipv4)
     OK "Xray WS activo en :$wp (path $wpath)"
     printf '   %bvless://%s@%s:%s?type=ws&path=%s&security=none#Ghost-WS%b\n' \
         "$G" "$uuidv" "$ip" "$wp" "${wpath//\//%2F}" "$NC"
@@ -1311,7 +1312,7 @@ json.dump(cfg, open(cfgp, "w"), indent=2)
 PY
     ufw allow "$tp/tcp" >/dev/null 2>&1 || true
     systemctl restart xray 2>/dev/null
-    local ip; ip=$(hostname -I | awk '{print $1}')
+    local ip; ip=$(get_ipv4)
     OK "Trojan activo en :$tp"
     printf '   %btrojan://%s@%s:%s?security=tls&sni=%s&allowInsecure=1#Ghost-Trojan%b\n' \
         "$G" "$pwd" "$ip" "$tp" "$sni" "$NC"
@@ -1374,7 +1375,7 @@ HEOF
     ufw allow "$hp/udp" >/dev/null 2>&1 || true
     systemctl enable --now hysteria-server >/dev/null 2>&1
     sleep 1
-    local ip; ip=$(hostname -I | awk '{print $1}')
+    local ip; ip=$(get_ipv4)
     systemctl is-active --quiet hysteria-server 2>/dev/null \
         && { OK "Hysteria2 en :$hp"; printf '   %bhysteria2://%s@%s:%s/?insecure=1#Ghost%b\n' "$G" "$pwd" "$ip" "$hp" "$NC"; } \
         || ERR "No arranco."
@@ -1550,7 +1551,7 @@ SSSVC
     ufw allow "$sp/udp" >/dev/null 2>&1 || true
     sleep 1
     if systemctl is-active --quiet ghost-ss 2>/dev/null; then
-        local ip b64; ip=$(hostname -I | awk '{print $1}')
+        local ip b64; ip=$(get_ipv4)
         b64=$(printf 'aes-256-gcm:%s' "$pw" | base64 -w0)
         OK "Shadowsocks activo :$sp"
         printf '   %bss://%s@%s:%s#Ghost-SS%b\n' "$G" "$b64" "$ip" "$sp" "$NC"
@@ -1587,7 +1588,7 @@ WGEOF
     systemctl enable --now wg-quick@wg0 2>/dev/null
     sleep 1
     if systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
-        ip=$(hostname -I | awk '{print $1}')
+        ip=$(get_ipv4)
         cat > /root/wg-client.conf <<CLIENTEOF
 [Interface]
 PrivateKey = $cpriv
@@ -1814,7 +1815,7 @@ instalar_webmin(){
     systemctl enable --now webmin 2>/dev/null
     sleep 1
     local wp; wp=$(grep -o '^port=[0-9]*' /etc/webmin/miniserv.conf 2>/dev/null | cut -d= -f2 | head -1); wp=${wp:-10000}
-    local ip; ip=$(hostname -I | awk '{print $1}')
+    local ip; ip=$(get_ipv4)
     pgrep -f miniserv >/dev/null 2>&1 \
         && { OK "Webmin activo :$wp"; printf '   https://%s:%s\n' "$ip" "$wp"; } \
         || ERR "Webmin no arranco."
@@ -1971,7 +1972,6 @@ doctor(){
             fail=$((fail+1))
         fi
     done
-    # Servicios
     for svc in ssh sshd vps-checkuser xray ghost-ws ghost-ss badvpn; do
         if systemctl list-unit-files 2>/dev/null | grep -q "^${svc}\.service"; then
             if systemctl is-active --quiet "$svc" 2>/dev/null; then
@@ -1982,7 +1982,6 @@ doctor(){
             fi
         fi
     done
-    # Config
     [[ -n "${LICENSE_URL:-}" ]] && printf '   %b✅%b LICENSE_URL configurado\n' "$G" "$NC" || { printf '   %b❌%b LICENSE_URL vacio\n' "$R" "$NC"; fail=$((fail+1)); }
     [[ -f /etc/cron.d/ghost-panel-vencidos ]] && printf '   %b✅%b Cron de vencidos\n' "$G" "$NC" || printf '   %b⚠️%b  Cron no instalado\n' "$Y" "$NC"
     hline 62 "$SEC"
@@ -2003,7 +2002,7 @@ cli_cmd(){
             esac ;;
         status)
             printf 'IP: %s\nHost: %s\nLicencia: %s\n' \
-                "$(hostname -I | awk '{print $1}')" "$(hostname)" "${LICENSE_OK:- -}"
+                "$(get_ipv4)" "$(hostname)" "${LICENSE_OK:- -}"
             ;;
         doctor) doctor ;;
         *) echo "Ghost Panel - comandos: users | status | doctor"; return 1 ;;
@@ -2097,10 +2096,10 @@ check_deps || exit 1
 if [[ $# -gt 0 ]]; then
     case "$1" in
         users|status|doctor) cli_cmd "$@"; exit $? ;;
-        --version|-v) echo "Ghost Panel v3.0"; exit 0 ;;
+        --version|-v) echo "Ghost Panel v3.0.1"; exit 0 ;;
         --help|-h)
             cat <<HELP
-Ghost Panel v3.0
+Ghost Panel v3.0.1
   ghostpanel                    Menu interactivo
   ghostpanel users list         Listar usuarios
   ghostpanel users create U --dias 30 --max 1 --pass 1234
