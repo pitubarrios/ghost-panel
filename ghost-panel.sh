@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  GHOST PANEL v3.1.2 by Jorge Barrios
+#  GHOST PANEL v3.1.3 by Jorge Barrios
 #  Administracion profesional de VPS (Ubuntu / Debian)
 #  Uso:  sudo bash ghost-panel.sh  |  ghostpanel
 # ============================================================
@@ -9,8 +9,6 @@ set -uo pipefail
 IFS=$'\n\t'
 
 # ---------- LOCALE UTF-8 (critico para ${#s} y padding visual) ----------
-# Sin esto, en Termux con LANG=C las lineas de la UI no se alinean
-# porque ${#s} cuenta bytes en lugar de caracteres multibyte.
 for _loc in C.UTF-8 en_US.UTF-8 es_AR.UTF-8 es_ES.UTF-8 es_MX.UTF-8; do
     if locale -a 2>/dev/null | grep -qx "$_loc"; then
         export LANG="$_loc" LC_ALL="$_loc"
@@ -62,6 +60,7 @@ PANEL_COMPACT="${PANEL_COMPACT:-0}"
 
 KEY_FILE='/etc/vps-manager.key'
 PERM_FILE='/etc/vps-license.permanent'
+LIC_NAME_FILE='/etc/vps-license.name'
 LOG_PANEL='/var/log/ghost-panel.log'
 USUARIOS_DIR='/etc/vps-users'
 LIMITS_DIR='/etc/vps-limits'
@@ -114,8 +113,6 @@ pkill_user(){
 
 user_home(){ getent passwd "$1" 2>/dev/null | cut -d: -f6; }
 
-# machine_hash: ID estable del servidor.
-# Orden: /etc/machine-id -> /etc/hostname -> /var/lib/dbus/machine-id -> ID persistido.
 machine_hash(){
     local src="" cache="" dir=""
     if [[ -r /etc/machine-id && -s /etc/machine-id ]]; then
@@ -125,7 +122,6 @@ machine_hash(){
     elif [[ -r /var/lib/dbus/machine-id && -s /var/lib/dbus/machine-id ]]; then
         src=$(cat /var/lib/dbus/machine-id 2>/dev/null)
     else
-        # Fallback persistente: si nada existe (Termux, contenedores raros)
         for dir in /etc /var/lib "$HOME" /tmp; do
             [[ -n "$dir" && -w "$dir" ]] && { cache="$dir/.vps-machine-id"; break; }
         done
@@ -143,6 +139,26 @@ machine_hash(){
     fi
     [[ -z "$src" ]] && src="fallback-$(uname -n)"
     printf '%s' "$src" | sha256sum | cut -c1-12
+}
+
+# lic_name_get: lee el nombre del titular desde el archivo local persistido.
+# Fallback a LICENSE_OK (runtime) o "—" si no hay nada.
+lic_name_get(){
+    local n=""
+    if [[ -f "$LIC_NAME_FILE" ]]; then
+        n=$(head -1 "$LIC_NAME_FILE" 2>/dev/null)
+    fi
+    [[ -z "$n" ]] && n="${LICENSE_OK:-}"
+    [[ -z "$n" || "$n" == "-" ]] && n="—"
+    printf '%s' "$n"
+}
+
+# lic_name_set: guarda el nombre del titular en disco (persistente entre reinicios).
+lic_name_set(){
+    local n="${1:-}"
+    [[ -z "$n" || "$n" == "-" ]] && return 0
+    printf '%s\n' "$n" > "$LIC_NAME_FILE" 2>/dev/null
+    chmod 600 "$LIC_NAME_FILE" 2>/dev/null || true
 }
 
 require_root(){
@@ -180,7 +196,7 @@ fw_backend(){
 }
 
 # ============================================================
-#  UI FRAMEWORK v3.1.2
+#  UI FRAMEWORK v3.1.3
 # ============================================================
 BC=()
 
@@ -194,8 +210,6 @@ crumbs(){
 
 clear_if_tty(){ [[ -t 1 ]] && clear; }
 
-# vis_width: ancho visual (en celdas de terminal) de una cadena con ANSI.
-# Requiere locale UTF-8 (forzado arriba). Maneja wide-chars tipo emoji/CJK.
 vis_width(){
     local s="$1" w=0 i c cp len
     s=$(printf '%s' "$s" | sed 's/\x1b\[[0-9;]*m//g')
@@ -220,8 +234,6 @@ vis_width(){
     printf '%d' "$w"
 }
 
-# pad_vis: rellena con espacios ASCII hasta 'target' celdas visuales.
-# Usa printf ' ' iterativo (inmune a %*s y a locales C/POSIX).
 pad_vis(){
     local s="$1" target="$2"
     local vw p i
@@ -268,9 +280,6 @@ ui_center(){
     printf ' %b│%b\n' "$C_FRM" "$RS"
 }
 
-# subtop: cabecera de seccion con borde alineado al frame (62 celdas).
-# Calculo: 62 = 2 (╭─) + 1 (sp) + tw + 1 (sp) + fill + 1 (╮)
-#          => fill = 62 - 5 - tw = 57 - tw
 subtop(){
     local title="$1"
     local tw=${#title}
@@ -285,7 +294,6 @@ botline(){ printf '%b╰%s╯%b\n\n' "$C_FRM" "$(ui_line 60 $C_FRM)" "$RS"; }
 
 prompt(){ printf '  %b▸%b %b%s%b %b>%b ' "$C_FRM2" "$RS" "$C_LBL" "${1:-Opcion}" "$RS" "$C_FRM2" "$RS"; }
 
-# Barra visual tipo [████░░░░░░]  20 celdas
 barra(){
     local pct="${1:-0}" ancho="${2:-20}" color="${3:-$C_OK}"
     pct="${pct%\%}"
@@ -305,7 +313,7 @@ barra(){
 # ---------- HEADER ----------
 header(){
     clear_if_tty
-    local ram_total ram_used_mb ram_pct cpu_pct disk_pct online lic="-" ipv4 osver kern uptime mhash
+    local ram_total ram_used_mb ram_pct cpu_pct disk_pct online lic="-" ipv4 osver kern uptime mhash titular titulo
     ram_total=$(free -m | awk '/Mem:/{print $2}')
     ram_used_mb=$(free -m | awk '/Mem:/{print $3}')
     ram_pct=$(free | awk '/Mem:/{printf "%d", $3*100/$2}')
@@ -320,6 +328,7 @@ header(){
     kern=$(uname -r | cut -d- -f1)
     uptime=$(uptime -p 2>/dev/null | sed 's/^up //' || echo "-")
     mhash=$(machine_hash)
+    titular=$(lic_name_get)
 
     if [[ "${LICENSE_EXP:-0}" == "0" ]]; then
         lic="permanente"
@@ -342,11 +351,20 @@ header(){
     cpu_bar=$(barra "$cpu_pct" 20 "$cpu_c")
     disk_bar=$(barra "$disk_pct" 20 "$disk_c")
 
+    # Nombre corto para el titulo (max 18 chars, evita desbordar la linea).
+    local titular_short="$titular"
+    ((${#titular_short} > 18)) && titular_short="${titular_short:0:17}…"
+
     printf '\n'
     ui_top
-    local title
-    title=$(printf '%b◆%b %bGHOST PANEL%b  %b·%b  %bv3.1.2%b' "$C_FRM2" "$RS" "$BD$CW" "$RS" "$C_LBL" "$RS" "$C_DIM" "$RS")
-    ui_row "$title"
+    if [[ "$titular" == "—" ]]; then
+        titulo=$(printf '%b◆%b %bGHOST PANEL%b  %b·%b  %bv3.1.3%b' "$C_FRM2" "$RS" "$BD$CW" "$RS" "$C_LBL" "$RS" "$C_DIM" "$RS")
+    else
+        titulo=$(printf '%b◆%b %bGHOST PANEL%b  %b·%b  %bv3.1.3%b  %b·%b  %b%s%b' \
+            "$C_FRM2" "$RS" "$BD$CW" "$RS" "$C_LBL" "$RS" "$C_DIM" "$RS" \
+            "$C_LBL" "$RS" "$BD$C_ACC" "$titular_short" "$RS")
+    fi
+    ui_row "$titulo"
     ui_mid
     ui_row "$(printf '%bSISTEMA%b' "$C_LBL" "$RS")"
     ui_row "$(printf '  %bOS%b   %s %s %b·%b kernel %s' "$C_LBL" "$RS" "$(lsb_release -is 2>/dev/null || echo Linux)" "$osver" "$C_LBL" "$RS" "$kern")"
@@ -361,6 +379,7 @@ header(){
     ui_row "$(printf '  %bIP%b       %s' "$C_LBL" "$RS" "$(printf '%b%s%b' "$C_ACC" "$ipv4" "$RS")")"
     ui_row "$(printf '  %bHost%b     %s   %bOnline%b  %b%s%b' "$C_LBL" "$RS" "$(hostname)" "$C_LBL" "$RS" "$C_OK" "$online" "$RS")"
     ui_row "$(printf '  %bUsuario%b  %s   %bLic%b  %b%s%b' "$C_LBL" "$RS" "$(whoami)" "$C_LBL" "$RS" "$C_OK" "$lic" "$RS")"
+    ui_row "$(printf '  %bTitular%b  %s' "$C_LBL" "$RS" "$(printf '%b%s%b' "$C_ACC" "$titular" "$RS")")"
     ui_row "$(printf '  %bID%b       %s' "$C_LBL" "$RS" "$(printf '%b%s%b' "$C_FRM2" "$mhash" "$RS")")"
     ui_bot
 
@@ -427,13 +446,14 @@ gate_licencia(){
             printf '%s' "$mhash" > "$PERM_FILE" 2>/dev/null
             chmod 600 "$PERM_FILE" 2>/dev/null
             LICENSE_OK="${LICENSE_NOMBRE:-cliente}"
+            lic_name_set "$LICENSE_OK"
             apply_license_times
-            OK "Licencia valida."
+            OK "Licencia valida. Titular: ${LICENSE_OK}"
             sleep 1
             return 0
         elif [[ $rc -eq 2 ]]; then
             if [[ -n "$perm_hash" && "$perm_hash" == "$mhash" ]]; then
-                LICENSE_OK="offline (permanente local)"
+                LICENSE_OK="$(lic_name_get)"
                 LICENSE_EXP=0
                 WARN "Worker no responde, usando licencia local."
                 return 0
@@ -443,7 +463,7 @@ gate_licencia(){
             ERR "Key rechazada: ${LICENSE_REASON:-invalida}."
             case "${LICENSE_REASON:-}" in
                 already_used_other_machine|revoked|unknown_key)
-                    rm -f "$KEY_FILE" "$PERM_FILE" 2>/dev/null ;;
+                    rm -f "$KEY_FILE" "$PERM_FILE" "$LIC_NAME_FILE" 2>/dev/null ;;
             esac
         fi
     fi
@@ -456,6 +476,7 @@ gate_licencia(){
             printf '%s' "$k" > "$KEY_FILE"; chmod 600 "$KEY_FILE"
             printf '%s' "$mhash" > "$PERM_FILE"; chmod 600 "$PERM_FILE"
             LICENSE_OK="${LICENSE_NOMBRE:-cliente}"
+            lic_name_set "$LICENSE_OK"
             apply_license_times
             OK "Licencia activada PERMANENTEMENTE. Bienvenido, ${LICENSE_OK}."
             sleep 1
@@ -2124,6 +2145,42 @@ cambiar_tema(){
     PAUSA
 }
 
+# lic_info: muestra la info de licencia y permite forzar revalidacion.
+lic_info(){
+    echo; INFO "Informacion de licencia"
+    printf '  %bTitular%b     %s\n' "$C_LBL" "$RS" "$(lic_name_get)"
+    printf '  %bServidor ID%b %s\n' "$C_LBL" "$RS" "$(machine_hash)"
+    if [[ -f "$KEY_FILE" ]]; then
+        printf '  %bKey%b         %s\n' "$C_LBL" "$RS" "$(cat "$KEY_FILE" 2>/dev/null)"
+    else
+        printf '  %bKey%b         (no guardada)\n' "$C_LBL" "$RS"
+    fi
+    if [[ "${LICENSE_EXP:-0}" == "0" ]]; then
+        printf '  %bVence%b       permanente\n' "$C_LBL" "$RS"
+    elif [[ -n "${LICENSE_EXP:-}" ]]; then
+        printf '  %bVence%b       %s\n' "$C_LBL" "$RS" "$(date -d "@$LICENSE_EXP" '+%F' 2>/dev/null || echo '-')"
+    fi
+    echo
+    read -r -p "  Revalidar ahora con el worker? (s/N): " r
+    if [[ "${r,,}" == "s" ]]; then
+        if [[ -f "$KEY_FILE" ]]; then
+            local k rc; k=$(cat "$KEY_FILE")
+            consultar_licencia "$k"; rc=$?
+            if [[ $rc -eq 0 ]]; then
+                LICENSE_OK="${LICENSE_NOMBRE:-cliente}"
+                lic_name_set "$LICENSE_OK"
+                apply_license_times
+                OK "Revalidado. Titular: ${LICENSE_OK}"
+            else
+                ERR "No se pudo revalidar (codigo $rc)."
+            fi
+        else
+            ERR "No hay key guardada."
+        fi
+    fi
+    PAUSA
+}
+
 doctor(){
     echo; INFO "Ghost Panel doctor"
     printf '  %b%s%b\n' "$C_DIM" "$(ui_line 58 $C_DIM)" "$RS"
@@ -2151,6 +2208,7 @@ doctor(){
     done
     [[ -n "${LICENSE_URL:-}" ]] && printf '  %b●%b LICENSE_URL configurado\n' "$C_OK" "$RS" || { printf '  %b○%b LICENSE_URL vacio\n' "$C_ERR" "$RS"; fail=$((fail+1)); }
     [[ -f /etc/cron.d/ghost-panel-vencidos ]] && printf '  %b●%b Cron de vencidos\n' "$C_OK" "$RS" || printf '  %b○%b Cron no instalado\n' "$C_WARN" "$RS"
+    printf '  %bTitular%b: %s\n' "$C_LBL" "$RS" "$(lic_name_get)"
     printf '  %b%s%b\n' "$C_DIM" "$(ui_line 58 $C_DIM)" "$RS"
     printf '  Total: %b%d OK%b, %b%d problemas%b\n' "$C_OK" "$ok" "$RS" "$C_ERR" "$fail" "$RS"
     PAUSA
@@ -2167,11 +2225,12 @@ cli_cmd(){
                 *) echo "Uso: ghostpanel users {list|create|delete} [args]"; return 1 ;;
             esac ;;
         status)
-            printf 'IP: %s\nHost: %s\nID: %s\nLicencia: %s\n' \
-                "$(get_ipv4)" "$(hostname)" "$(machine_hash)" "${LICENSE_OK:- -}"
+            printf 'IP: %s\nHost: %s\nID: %s\nTitular: %s\nLicencia: %s\n' \
+                "$(get_ipv4)" "$(hostname)" "$(machine_hash)" "$(lic_name_get)" "${LICENSE_OK:- -}"
             ;;
+        license|lic) lic_info ;;
         doctor) doctor ;;
-        *) echo "Ghost Panel - comandos: users | status | doctor"; return 1 ;;
+        *) echo "Ghost Panel - comandos: users | status | license | doctor"; return 1 ;;
     esac
 }
 
@@ -2215,6 +2274,7 @@ menu_herramientas(){
         opt 2 "Activar auto-menu"        5 "CheckUser API"
         opt 3 "Quitar auto-menu"         6 "Ver logs"
         opt 7 "Cambiar tema"             8 "Doctor (diagnostico)"
+        opt 9 "Info de licencia"
         ui_row ""
         opt 0 "Volver"
         botline
@@ -2222,7 +2282,7 @@ menu_herramientas(){
         case "$op" in
             1) instalar_comando_global ;; 2) auto_menu ;; 3) quitar_auto_menu ;;
             4) auto_update ;; 5) menu_checkuser ;; 6) ver_logs ;;
-            7) cambiar_tema ;; 8) doctor ;;
+            7) cambiar_tema ;; 8) doctor ;; 9) lic_info ;;
             0) pop_crumb; break ;; *) ERR "Invalida."; sleep 1 ;;
         esac
     done
@@ -2261,16 +2321,17 @@ check_deps || exit 1
 
 if [[ $# -gt 0 ]]; then
     case "$1" in
-        users|status|doctor) cli_cmd "$@"; exit $? ;;
-        --version|-v) echo "Ghost Panel v3.1.2"; exit 0 ;;
+        users|status|license|lic|doctor) cli_cmd "$@"; exit $? ;;
+        --version|-v) echo "Ghost Panel v3.1.3"; exit 0 ;;
         --help|-h)
             cat <<HELP
-Ghost Panel v3.1.2
+Ghost Panel v3.1.3
   ghostpanel                    Menu interactivo
   ghostpanel users list
   ghostpanel users create U --dias 30 --max 1 --pass 1234
   ghostpanel users delete U
   ghostpanel status
+  ghostpanel license            Info y revalidacion de licencia
   ghostpanel doctor
 HELP
             exit 0 ;;
