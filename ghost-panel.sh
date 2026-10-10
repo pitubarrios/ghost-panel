@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  GHOST PANEL v3.1.0 by Jorge Barrios
+#  GHOST PANEL v3.1.1 by Jorge Barrios
 #  Administracion profesional de VPS (Ubuntu / Debian)
 #  Uso:  sudo bash ghost-panel.sh  |  ghostpanel
 # ============================================================
@@ -9,27 +9,25 @@ set -uo pipefail
 IFS=$'\n\t'
 
 # ---------- PALETA ----------
-RS='\033[0m'                    # reset
-BD='\033[1m'                    # bold
-DM='\033[2m'                    # dim
-# Colores
-CR='\033[1;31m'                 # red
-CG='\033[1;32m'                 # green
-CY='\033[1;33m'                 # yellow
-CB='\033[1;34m'                 # blue
-CM='\033[1;35m'                 # magenta
-CC='\033[1;36m'                 # cyan
-CW='\033[1;37m'                 # white
-# 256-color (mas suave)
+RS='\033[0m'
+BD='\033[1m'
+DM='\033[2m'
+CR='\033[1;31m'
+CG='\033[1;32m'
+CY='\033[1;33m'
+CB='\033[1;34m'
+CM='\033[1;35m'
+CC='\033[1;36m'
+CW='\033[1;37m'
 C_DIM='\033[38;5;240m'
-C_LBL='\033[38;5;245m'          # gris para labels
-C_VAL='\033[38;5;255m'          # blanco suave para valores
-C_ACC='\033[38;5;81m'           # cyan claro (acentos)
-C_OK='\033[38;5;77m'            # verde suave
-C_WARN='\033[38;5;214m'         # naranja
-C_ERR='\033[38;5;203m'          # rojo suave
-C_FRM='\033[38;5;61m'           # azul oscuro para marco
-C_FRM2='\033[38;5;99m'          # violeta para acentos de marco
+C_LBL='\033[38;5;245m'
+C_VAL='\033[38;5;255m'
+C_ACC='\033[38;5;81m'
+C_OK='\033[38;5;77m'
+C_WARN='\033[38;5;214m'
+C_ERR='\033[38;5;203m'
+C_FRM='\033[38;5;61m'
+C_FRM2='\033[38;5;99m'
 
 # ---------- CONFIG ----------
 CONF_FILE='/etc/ghost-panel.conf'
@@ -148,10 +146,9 @@ fw_backend(){
 }
 
 # ============================================================
-#  UI FRAMEWORK v3.1
+#  UI FRAMEWORK v3.1.1
 # ============================================================
 BC=()
-W=62
 
 push_crumb(){ BC+=("$1"); }
 pop_crumb(){  [[ ${#BC[@]} -gt 0 ]] && unset 'BC[-1]'; }
@@ -163,20 +160,15 @@ crumbs(){
 
 clear_if_tty(){ [[ -t 1 ]] && clear; }
 
-# Cuenta el ancho visual de una cadena (ignora \033[Xm, cuenta emojis como 2)
 vis_width(){
     local s="$1" w=0 i c
-    # Sacamos los ANSI escapes primero
     s=$(printf '%s' "$s" | sed 's/\x1b\[[0-9;]*m//g')
     local len=${#s}
     for ((i=0; i<len; i++)); do
         c="${s:i:1}"
-        # Codepoint del caracter
         local cp; cp=$(printf '%d' "'$c" 2>/dev/null || echo 0)
         if (( cp >= 0x1F000 && cp <= 0x1FFFF )); then
-            w=$((w+2))   # Emoji ancho 2
-        elif (( cp >= 0x2600 && cp <= 0x27BF )); then
-            w=$((w+1))   # Simbolos ancho 1
+            w=$((w+2))
         else
             w=$((w+1))
         fi
@@ -184,7 +176,6 @@ vis_width(){
     printf '%d' "$w"
 }
 
-# Padding por ancho visual
 pad_vis(){
     local s="$1" target="$2"
     local vw; vw=$(vis_width "$s")
@@ -198,26 +189,22 @@ ui_top(){ printf '%b╭%s╮%b\n' "$C_FRM" "$(ui_line 60 $C_FRM)" "$RS"; }
 ui_mid(){ printf '%b├%s┤%b\n' "$C_FRM" "$(ui_line 60 $C_FRM)" "$RS"; }
 ui_bot(){ printf '%b╰%s╯%b\n' "$C_FRM" "$(ui_line 60 $C_FRM)" "$RS"; }
 
-# Fila del marco — contiene 58 chars visibles
 ui_row(){
     local raw="$1"
     printf '%b│%b %s %b│%b\n' "$C_FRM" "$RS" "$(pad_vis "$raw" 58)" "$C_FRM" "$RS"
 }
 
-# Item de menú (2 columnas)
 opt(){
     if [[ $# -ge 4 ]]; then
         local c1 c2
         c1=$(printf '%b[%b%s%b]%b %s' "$C_LBL" "$C_ACC" "$1" "$C_LBL" "$RS" "$2")
         c2=$(printf '%b[%b%s%b]%b %s' "$C_LBL" "$C_ACC" "$3" "$C_LBL" "$RS" "$4")
-        # Padding columnas: col1 = 27 vis, col2 resto
         ui_row "$(pad_vis "$c1" 27)$c2"
     else
         ui_row "$(printf '%b[%b%s%b]%b %s' "$C_LBL" "$C_ACC" "$1" "$C_LBL" "$RS" "$2")"
     fi
 }
 
-# Fila centrada dentro del marco
 ui_center(){
     local txt="$1"
     local vw; vw=$(vis_width "$txt")
@@ -239,14 +226,36 @@ botline(){ printf '%b╰%s╯%b\n\n' "$C_FRM" "$(ui_line 60 $C_FRM)" "$RS"; }
 
 prompt(){ printf '  %b▸%b %b%s%b %b>%b ' "$C_FRM2" "$RS" "$C_LBL" "${1:-Opcion}" "$RS" "$C_FRM2" "$RS"; }
 
+# Barra visual tipo [████░░░░░░]  20 celdas
+# Acepta enteros o floats ("0.0%"). Normaliza antes de hacer aritmética.
+barra(){
+    local pct="${1:-0}" ancho="${2:-20}" color="${3:-$C_OK}"
+    pct="${pct%\%}"
+    pct=$(printf '%.0f' "$pct" 2>/dev/null) || pct=0
+    case "$pct" in ''|*[!0-9-]*) pct=0 ;; esac
+    ((pct<0)) && pct=0
+    ((pct>100)) && pct=100
+    local llenos=$(( pct * ancho / 100 ))
+    local vacios=$(( ancho - llenos ))
+    local s=""
+    local i
+    for ((i=0;i<llenos;i++)); do s+="█"; done
+    for ((i=0;i<vacios;i++)); do s+="░"; done
+    printf '%b%s%b' "$color" "$s" "$RS"
+}
+
 # ---------- HEADER ----------
 header(){
     clear_if_tty
-    local ram_t ram_u cpu disk online lic="" ipv4 osver kern uptime
-    ram_t=$(free -m | awk '/Mem:/{print $2}')
-    ram_u=$(free -m | awk '/Mem:/{printf "%d%%", $3*100/$2}')
-    cpu=$(top -bn1 2>/dev/null | awk '/%Cpu/{printf "%.1f%%", 100-$8}' || echo "n/a")
-    disk=$(df -h / | awk 'NR==2{print $5}')
+    local ram_total ram_used_mb ram_pct cpu_pct disk_pct online lic="-" ipv4 osver kern uptime
+    ram_total=$(free -m | awk '/Mem:/{print $2}')
+    ram_used_mb=$(free -m | awk '/Mem:/{print $3}')
+    ram_pct=$(free | awk '/Mem:/{printf "%d", $3*100/$2}')
+    [[ -z "$ram_pct" ]] && ram_pct=0
+    cpu_pct=$(top -bn1 2>/dev/null | awk '/%Cpu/{printf "%d", 100-$8}')
+    [[ -z "$cpu_pct" ]] && cpu_pct=0
+    disk_pct=$(df -h / | awk 'NR==2{gsub(/%/,"",$5); print $5}')
+    [[ -z "$disk_pct" ]] && disk_pct=0
     online=$(who 2>/dev/null | wc -l)
     ipv4=$(get_ipv4)
     osver=$(lsb_release -rs 2>/dev/null || echo '?')
@@ -258,40 +267,37 @@ header(){
     elif [[ -n "${LICENSE_EXP:-}" ]]; then
         local d=$(( (LICENSE_EXP - $(date +%s)) / 86400 )); ((d<0)) && d=0
         lic="${d} dias"
-    else
-        lic="-"
     fi
 
-    # Color por carga
     local ram_c="$C_OK"
-    [[ "${ram_u%\%}" -gt 70 ]] && ram_c="$C_WARN"
-    [[ "${ram_u%\%}" -gt 90 ]] && ram_c="$C_ERR"
+    [[ "$ram_pct" -gt 70 ]] && ram_c="$C_WARN"
+    [[ "$ram_pct" -gt 90 ]] && ram_c="$C_ERR"
     local disk_c="$C_OK"
-    [[ "${disk%\%}" -gt 70 ]] && disk_c="$C_WARN"
-    [[ "${disk%\%}" -gt 90 ]] && disk_c="$C_ERR"
+    [[ "$disk_pct" -gt 70 ]] && disk_c="$C_WARN"
+    [[ "$disk_pct" -gt 90 ]] && disk_c="$C_ERR"
+    local cpu_c="$C_OK"
+    [[ "$cpu_pct" -gt 80 ]] && cpu_c="$C_WARN"
+
+    local ram_bar cpu_bar disk_bar
+    ram_bar=$(barra "$ram_pct" 20 "$ram_c")
+    cpu_bar=$(barra "$cpu_pct" 20 "$cpu_c")
+    disk_bar=$(barra "$disk_pct" 20 "$disk_c")
 
     printf '\n'
     ui_top
-    # Título
     local title
-    title=$(printf '%b◆%b %bGHOST PANEL%b  %b·%b  %bv3.1.0%b' "$C_FRM2" "$RS" "$BD$CW" "$RS" "$C_LBL" "$RS" "$C_DIM" "$RS")
+    title=$(printf '%b◆%b %bGHOST PANEL%b  %b·%b  %bv3.1.1%b' "$C_FRM2" "$RS" "$BD$CW" "$RS" "$C_LBL" "$RS" "$C_DIM" "$RS")
     ui_row "$title"
     ui_mid
-    # Sistema
     ui_row "$(printf '%bSISTEMA%b' "$C_LBL" "$RS")"
     ui_row "$(printf '  %bOS%b   %s %s %b·%b kernel %s' "$C_LBL" "$RS" "$(lsb_release -is 2>/dev/null || echo Linux)" "$osver" "$C_LBL" "$RS" "$kern")"
     ui_row "$(printf '  %bUptime%b   %s' "$C_LBL" "$RS" "$uptime")"
     ui_mid
-    # Recursos (con barra visual)
     ui_row "$(printf '%bRECURSOS%b' "$C_LBL" "$RS")"
-    local ram_bar; ram_bar=$(barra "${ram_u%\%}" 20 "$ram_c")
-    local cpu_bar; cpu_bar=$(barra "${cpu%\%}" 20 "$C_OK")
-    local disk_bar; disk_bar=$(barra "${disk%\%}" 20 "$disk_c")
-    ui_row "$(printf '  %bRAM%b    %s  %s  %b%s%b/%sM' "$C_LBL" "$RS" "$ram_bar" "$ram_u" "$C_DIM" "$(( ram_t - $(free -m | awk '/Mem:/{print $7}') ))" "$ram_t" "$RS")"
-    ui_row "$(printf '  %bCPU%b    %s  %s' "$C_LBL" "$RS" "$cpu_bar" "$cpu")"
-    ui_row "$(printf '  %bDisco%b  %s  %s' "$C_LBL" "$RS" "$disk_bar" "$disk")"
+    ui_row "$(printf '  %bRAM%b    %s  %b%s%%%b  %sM / %sM' "$C_LBL" "$RS" "$ram_bar" "$ram_c" "$ram_pct" "$RS" "$ram_used_mb" "$ram_total")"
+    ui_row "$(printf '  %bCPU%b    %s  %b%s%%%b' "$C_LBL" "$RS" "$cpu_bar" "$cpu_c" "$cpu_pct" "$RS")"
+    ui_row "$(printf '  %bDisco%b  %s  %b%s%%%b' "$C_LBL" "$RS" "$disk_bar" "$disk_c" "$disk_pct" "$RS")"
     ui_mid
-    # Red / sesion
     ui_row "$(printf '%bSESION%b' "$C_LBL" "$RS")"
     ui_row "$(printf '  %bIP%b       %s' "$C_LBL" "$RS" "$(printf '%b%s%b' "$C_ACC" "$ipv4" "$RS")")"
     ui_row "$(printf '  %bHost%b     %s   %bOnline%b  %b%s%b' "$C_LBL" "$RS" "$(hostname)" "$C_LBL" "$RS" "$C_OK" "$online" "$RS")"
@@ -302,20 +308,6 @@ header(){
         printf '  %b%s%b\n' "$C_DIM" "$(crumbs)" "$RS"
     fi
     printf '\n'
-}
-
-# Barra visual tipo [████░░░░░░]  20 celdas
-barra(){
-    local pct="$1" ancho="${2:-20}" color="${3:-$C_OK}"
-    ((pct<0)) && pct=0
-    ((pct>100)) && pct=100
-    local llenos=$(( pct * ancho / 100 ))
-    local vacios=$(( ancho - llenos ))
-    local s=""
-    local i
-    for ((i=0;i<llenos;i++)); do s+="█"; done
-    for ((i=0;i<vacios;i++)); do s+="░"; done
-    printf '%b%s%b' "$color" "$s" "$RS"
 }
 
 # ============================================================
@@ -2005,21 +1997,49 @@ quitar_auto_menu(){
 
 auto_update(){
     [[ -z "$REPO_RAW" ]] && { ERR "REPO_RAW sin configurar."; PAUSA; return; }
+
+    local cur_ver new_ver
+    cur_ver=$(grep -m1 -oE 'GHOST PANEL v[0-9.]+' /usr/local/bin/ghostpanel 2>/dev/null | awk '{print $3}')
+    INFO "Version actual: ${cur_ver:-desconocida}"
     INFO "Descargando desde GitHub..."
-    local tmp; tmp=$(mktmp /tmp/ghost.XXXXXX)
-    if wget -q "$REPO_RAW" -O "$tmp" 2>/dev/null; then
-        sed -i 's/\r$//' "$tmp"
-        if bash -n "$tmp" 2>/dev/null; then
-            install -m 755 "$tmp" /usr/local/bin/ghostpanel
-            cp -f "$tmp" "$(readlink -f "$0")" 2>/dev/null || true
-            OK "Actualizado y validado."
-        else
-            ERR "Sintaxis rota. NO se reemplazo."
-        fi
-    else
-        ERR "Sin red o repo caido."
+
+    local tmp; tmp=$(mktemp /tmp/ghost.XXXXXX)
+    if ! wget -q "$REPO_RAW" -O "$tmp" 2>/tmp/wget.err; then
+        ERR "Fallo la descarga:"
+        head -5 /tmp/wget.err 2>/dev/null
+        rm -f "$tmp" /tmp/wget.err
+        PAUSA; return
     fi
+    rm -f /tmp/wget.err
+
+    sed -i 's/\r$//' "$tmp"
+
+    new_ver=$(grep -m1 -oE 'GHOST PANEL v[0-9.]+' "$tmp" 2>/dev/null | awk '{print $3}')
+    INFO "Version descargada: ${new_ver:-desconocida}"
+
+    if [[ "$cur_ver" == "$new_ver" && -n "$cur_ver" ]]; then
+        WARN "Ya tenes la misma version (${cur_ver}). Nada que actualizar."
+        rm -f "$tmp"
+        PAUSA; return
+    fi
+
+    if ! bash -n "$tmp" 2>/tmp/syn.err; then
+        ERR "Sintaxis rota en la version descargada. NO se reemplazo."
+        head -3 /tmp/syn.err 2>/dev/null
+        rm -f "$tmp" /tmp/syn.err
+        PAUSA; return
+    fi
+    rm -f /tmp/syn.err
+
+    local bk="/usr/local/bin/ghostpanel.bak.$(date +%s)"
+    cp -f /usr/local/bin/ghostpanel "$bk" 2>/dev/null && INFO "Backup: $bk"
+
+    install -m 755 "$tmp" /usr/local/bin/ghostpanel
+    cp -f "$tmp" "$(readlink -f "$0")" 2>/dev/null || true
     rm -f "$tmp"
+
+    OK "Actualizado: ${cur_ver:-?} -> ${new_ver:-?}"
+    WARN "Salir y reabrir el panel para ver los cambios."
     PAUSA
 }
 
@@ -2181,10 +2201,10 @@ check_deps || exit 1
 if [[ $# -gt 0 ]]; then
     case "$1" in
         users|status|doctor) cli_cmd "$@"; exit $? ;;
-        --version|-v) echo "Ghost Panel v3.1.0"; exit 0 ;;
+        --version|-v) echo "Ghost Panel v3.1.1"; exit 0 ;;
         --help|-h)
             cat <<HELP
-Ghost Panel v3.1.0
+Ghost Panel v3.1.1
   ghostpanel                    Menu interactivo
   ghostpanel users list
   ghostpanel users create U --dias 30 --max 1 --pass 1234
