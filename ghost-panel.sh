@@ -15,7 +15,7 @@ AZUL='\033[1;34m'; CIAN='\033[1;36m'; BLANCO='\033[1;37m'
 NC='\033[0m'
 NARANJA='\033[38;5;208m'; GRIS='\033[38;5;245m'; MORADO='\033[38;5;141m'
 BORDE="$GRIS"          # color del marco
-GHOST_VER='3.2.2'
+GHOST_VER='3.3.0'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -236,7 +236,7 @@ TXT_ES[t_wsepro]="WS-epro (WS->SSH)"; TXT_EN[t_wsepro]="WS-epro (WS->SSH)"
 TXT_ES[t_shadowsocks]="Shadowsocks"; TXT_EN[t_shadowsocks]="Shadowsocks"
 TXT_ES[t_trojan]="Trojan"; TXT_EN[t_trojan]="Trojan"
 TXT_ES[t_wireguard]="WireGuard"; TXT_EN[t_wireguard]="WireGuard"
-TXT_ES[t_estado_prot]="Estado protocolos"; TXT_EN[t_estado_prot]="Protocols status"
+TXT_ES[t_estado_prot]="Estado y puertos"; TXT_EN[t_estado_prot]="Status & ports"
 TXT_ES[t_quitar]="Quitar protocolo"; TXT_EN[t_quitar]="Remove protocol"
 TXT_ES[t_sub_webmin]="WEBMIN"; TXT_EN[t_sub_webmin]="WEBMIN"
 TXT_ES[t_webmin_inst]="Instalar Webmin"; TXT_EN[t_webmin_inst]="Install Webmin"
@@ -1918,70 +1918,188 @@ SEOF
     PAUSA
 }
 
-estado_protocolos(){
-    echo -e "${CIAN}--- PROTOCOLOS ---${NC}"
-    if command -v xray >/dev/null 2>&1; then
-        local PUERTO; PUERTO=$(grep -o '"port": [0-9]*' /usr/local/etc/xray/config.json 2>/dev/null | head -1 | grep -o '[0-9]*')
-        if pgrep -x xray >/dev/null 2>&1 || systemctl is-active --quiet xray 2>/dev/null; then
-            echo -e " Xray:   ${VERDE}ACTIVO${NC} (puerto ${PUERTO:-?})"
-        else
-            echo -e " Xray:   ${AMARILLO}instalado, detenido${NC}"
-        fi
-    else
-        echo -e " Xray:   ${ROJO}no instalado${NC}"
-    fi
-    if command -v stunnel4 >/dev/null 2>&1 || pgrep -f stunnel >/dev/null 2>&1; then
-        local SPORT; SPORT=$(grep -A1 'ssh-ssl' /etc/stunnel/stunnel.conf 2>/dev/null | grep -o 'accept = [0-9]*' | grep -o '[0-9]*')
-        pgrep -f stunnel >/dev/null 2>&1 \
-            && echo -e " Stunnel (SSL): ${VERDE}ACTIVO${NC} (puerto ${SPORT:-?})" \
-            || echo -e " Stunnel (SSL): ${AMARILLO}instalado, detenido${NC}"
-    else
-        echo -e " Stunnel (SSL): ${ROJO}no instalado${NC}"
-    fi
-    if pgrep -f badvpn-udpgw >/dev/null 2>&1; then
-        echo -e " BadVPN: ${VERDE}ACTIVO${NC} (UDP GW local)"
-    else
-        echo -e " BadVPN: ${ROJO}no instalado${NC}"
-    fi
-    if grep -q '"ws"' /usr/local/etc/xray/config.json 2>/dev/null; then
-        local WSP; WSP=$(grep -B4 '"ws"' /usr/local/etc/xray/config.json 2>/dev/null | grep -o '"port": [0-9]*' | head -1 | grep -o '[0-9]*')
-        echo -e " Xray WS: ${VERDE}ACTIVO${NC} (puerto ${WSP:-?})"
-    else
-        echo -e " Xray WS: ${ROJO}no instalado${NC}"
-    fi
-    if systemctl is-active --quiet vpsjb-ws 2>/dev/null || pgrep -f vpsjb-ws.py >/dev/null 2>&1; then
-        echo -e " WS-epro: ${VERDE}ACTIVO${NC} (WS -> SSH)"
-    else
-        echo -e " WS-epro: ${ROJO}no instalado${NC}"
-    fi
-    if systemctl is-active --quiet vpsjb-ss 2>/dev/null; then
-        echo -e " Shadowsocks: ${VERDE}ACTIVO${NC}"
-    else
-        echo -e " Shadowsocks: ${ROJO}no instalado${NC}"
-    fi
-    if grep -q '"protocol": "trojan"' /usr/local/etc/xray/config.json 2>/dev/null; then
-        echo -e " Trojan: ${VERDE}ACTIVO${NC} (en Xray)"
-    else
-        echo -e " Trojan: ${ROJO}no instalado${NC}"
-    fi
-    if systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
-        echo -e " WireGuard: ${VERDE}ACTIVO${NC}"
-    else
-        echo -e " WireGuard: ${ROJO}no instalado${NC}"
-    fi
-    if pgrep -x cloudflared >/dev/null 2>&1; then
-        echo -e " Tunel CDN: ${VERDE}ACTIVO${NC} ($(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /var/log/ghost-cf-tunnel.log 2>/dev/null | head -1))"
-    else
-        echo -e " Tunel CDN: ${ROJO}inactivo${NC}"
-    fi
-    if command -v openvpn >/dev/null 2>&1; then
-        systemctl is-active --quiet openvpn-server@server 2>/dev/null \
-            && echo -e " OpenVPN: ${VERDE}ACTIVO${NC}" || echo -e " OpenVPN: ${AMARILLO}instalado, detenido${NC}"
-    else
-        echo -e " OpenVPN: ${ROJO}no instalado${NC}"
-    fi
-    PAUSA
+# ============================================================
+#  ESTADO Y PUERTOS: que servicio escucha en que puerto (datos reales de ss)
+# ============================================================
+ss_listen_tabla(){
+    # una linea por socket en escucha: proto puerto proceso pid ambito(P=publico/L=local)
+    ss -tulnp 2>/dev/null | tail -n +2 | awk '
+        { n=split($5,a,":"); port=a[n]; proc="-"; pid="0"
+          scope = ($5 ~ /^(127\.|\[::1\])/) ? "L" : "P"
+          if (match($0,/users:\(\("[^"]+"/)) proc=substr($0,RSTART+9,RLENGTH-10)
+          if (match($0,/pid=[0-9]+/)) pid=substr($0,RSTART+4,RLENGTH-4)
+          print $1, port, proc, pid, scope }' | sort -u
 }
+
+UFW_RULES=""; UFW_ON=0
+ufw_cargar(){
+    UFW_RULES=""; UFW_ON=0
+    command -v ufw >/dev/null 2>&1 || return 0
+    ufw status 2>/dev/null | grep -q '^Status: active' || return 0
+    UFW_ON=1
+    UFW_RULES=$(ufw status 2>/dev/null | awk '/ALLOW/{print $1}')
+}
+ufw_permite(){ # ufw_permite puerto/proto
+    local p="${1%/*}" pr="${1#*/}"
+    grep -qxE "${p}(/${pr})?" <<< "$UFW_RULES"
+}
+
+svc_ports(){
+    # svc_ports TABLA modo patron -> "22/tcp, 443/tcp(local)" ; modo: name (proceso) | cmd (linea de comando)
+    local tab="$1" mode="$2" pat="$3" proto port proc pid scope out=""
+    while read -r proto port proc pid scope; do
+        [[ -n "$port" ]] || continue
+        if [[ "$mode" == name ]]; then
+            [[ "$proc" =~ $pat ]] || continue
+        else
+            [[ -r "/proc/$pid/cmdline" ]] || continue
+            tr '\0' ' ' < "/proc/$pid/cmdline" | grep -qE "$pat" || continue
+        fi
+        if [[ "$scope" == "L" ]]; then out+="${port}/${proto}(local)"$'\n'
+        elif (( UFW_ON )) && ! ufw_permite "${port}/${proto}"; then out+="${port}/${proto}▲"$'\n'
+        else out+="${port}/${proto}"$'\n'; fi
+    done <<< "$tab"
+    printf '%s' "$out" | sort -t/ -k1,1n -k2,2 -u | paste -sd, - | sed 's/,/, /g'
+}
+
+svc_conns(){
+    # conexiones TCP establecidas (sin las de loopback: WS/Stunnel hablan con sshd por 127.0.0.1)
+    local e p tot=0 n
+    for e in ${1//,/ }; do
+        [[ "$e" == */tcp* ]] || continue
+        p="${e%%/*}"
+        n=$(ss -tn state established "( sport = :${p} and not dst 127.0.0.0/8 )" 2>/dev/null | tail -n +2 | wc -l)
+        tot=$((tot+n))
+    done
+    echo "$tot"
+}
+
+svc_row(){
+    # svc_row on|off NOMBRE PUERTOS CONEXIONES   (relleno por caracteres: ▲ ocupa 3 bytes)
+    local dot name="${2:0:18}" ports="${3:-}" conn="${4:-}"
+    if [[ "$1" == on ]]; then dot="${VERDE}●${NC}"; else dot="${ROJO}○${NC}"; ports="detenido"; fi
+    [[ -z "$ports" ]] && ports="-"
+    ports="${ports:0:20}"
+    FR_TXT "  ${dot} ${BLANCO}${name}${NC}$(printf '%*s' $((19 - ${#name})) '')${CIAN}${ports}${NC}$(printf '%*s' $((21 - ${#ports})) '')${GRIS}${conn}${NC}"
+}
+
+svc_check(){
+    # svc_check "Nombre" "prueba-de-instalado" modo patron   (usa TAB / NOINST del llamador)
+    local name="$1" inst="$2" mode="$3" pat="$4" ports conn=""
+    if ! eval "$inst" >/dev/null 2>&1; then NOINST+="${NOINST:+, }$name"; return 0; fi
+    ports=$(svc_ports "$TAB" "$mode" "$pat")
+    if [[ -n "$ports" ]]; then conn=$(svc_conns "$ports"); svc_row on "$name" "$ports" "$conn"
+    else svc_row off "$name"; fi
+}
+
+xray_inbounds_lista(){
+    python3 - <<'XPYEOF' 2>/dev/null
+import json
+try:
+    c = json.load(open("/usr/local/etc/xray/config.json"))
+except Exception:
+    raise SystemExit
+for ib in c.get("inbounds", []):
+    p = ib.get("port"); pr = str(ib.get("protocol", "?")).upper()
+    st = ib.get("streamSettings") or {}
+    net = st.get("network", "tcp"); sec = st.get("security", "none")
+    if ib.get("listen") in ("127.0.0.1", "localhost") and pr in ("DOKODEMO-DOOR", "HTTP", "SOCKS"):
+        continue
+    lab = pr
+    if sec == "reality": lab += " Reality"
+    elif net == "ws": lab += " WS"
+    elif sec == "tls": lab += " TLS"
+    print("%s|%s" % (p, lab))
+XPYEOF
+}
+
+puertos_servicios(){
+    local TAB NOINST="" xl xp xlab wgp conn ipv ufwtxt
+    TAB=$(ss_listen_tabla)
+    ufw_cargar
+    ipv=$(ip_publica)
+    if (( UFW_ON )); then ufwtxt="${VERDE}activo${NC}"; else ufwtxt="${AMARILLO}inactivo${NC}"; fi
+    ui_box_top "ESTADO Y PUERTOS"
+    FR_TXT "  ${GRIS}IP${NC} ${CIAN}${ipv}${NC}   ${GRIS}UFW${NC} ${ufwtxt}"
+    FR_MID
+    FR_TXT "  ${GRIS}  SERVICIO           PUERTO(S)            CONEX${NC}"
+    svc_check "OpenSSH"      "command -v sshd"  name '^sshd$'
+    svc_check "Dropbear"     "command -v dropbear" name '^dropbear$'
+    svc_check "Stunnel SSL"  "command -v stunnel4 || command -v stunnel" name '^stunnel4?$'
+    svc_check "WS-epro"      "[ -f /usr/local/bin/vpsjb-ws.py ]" cmd 'vpsjb-ws\.py'
+    # Xray: una fila por inbound (protocolo + puerto reales de config.json)
+    if command -v xray >/dev/null 2>&1; then
+        xl=$(xray_inbounds_lista)
+        if [[ -n "$xl" ]]; then
+            while IFS='|' read -r xp xlab; do
+                [[ -n "$xp" ]] || continue
+                if grep -q "^tcp ${xp} xray" <<< "$TAB"; then
+                    conn=$(svc_conns "${xp}/tcp")
+                    if (( UFW_ON )) && ! ufw_permite "${xp}/tcp"; then svc_row on "Xray ${xlab}" "${xp}/tcp▲" "$conn"
+                    else svc_row on "Xray ${xlab}" "${xp}/tcp" "$conn"; fi
+                else svc_row off "Xray ${xlab}"; fi
+            done <<< "$xl"
+        else
+            svc_check "Xray" "true" name '^xray$'
+        fi
+    else NOINST+="${NOINST:+, }Xray"; fi
+    svc_check "Hysteria2"    "command -v hysteria" name '^hysteria'
+    svc_check "Shadowsocks"  "systemctl cat vpsjb-ss" name '^ss-server$'
+    svc_check "OpenVPN"      "command -v openvpn" name '^openvpn$'
+    # WireGuard: el puerto lo tiene el kernel (no hay proceso en ss)
+    if command -v wg >/dev/null 2>&1 && [[ -f /etc/wireguard/wg0.conf ]]; then
+        wgp=$(wg show wg0 listen-port 2>/dev/null)
+        if [[ -n "$wgp" ]]; then svc_row on "WireGuard" "${wgp}/udp" ""; else svc_row off "WireGuard"; fi
+    else NOINST+="${NOINST:+, }WireGuard"; fi
+    svc_check "BadVPN UDPGW" "command -v badvpn-udpgw" name '^badvpn'
+    svc_check "CheckUser API" "[ -f /usr/local/bin/vps-checkuser.py ]" cmd 'vps-checkuser\.py'
+    svc_check "Webmin"       "[ -d /etc/webmin ]" cmd 'miniserv'
+    svc_check "Squid"        "command -v squid" name '^squid$'
+    FR_MID
+    FR_TXT "  ${VERDE}●${NC} ${GRIS}escuchando${NC}  ${ROJO}○${NC} ${GRIS}detenido${NC}  ${AMARILLO}▲${NC} ${GRIS}sin regla UFW${NC}"
+    if [[ -n "$NOINST" ]]; then
+        while IFS= read -r xl || [[ -n "$xl" ]]; do FR_TXT "  ${GRIS}${xl}${NC}"; done < <(printf 'No instalados: %s' "$NOINST" | fold -s -w $((UI_W - 4)))
+    fi
+    FR_BOT
+}
+
+puertos_todos(){
+    local TAB proto port proc pid scope amb mark
+    TAB=$(ss_listen_tabla)
+    ufw_cargar
+    ui_box_top "TODOS LOS PUERTOS EN ESCUCHA"
+    FR_TXT "  ${GRIS}PUERTO      PROCESO            AMBITO${NC}"
+    while read -r proto port proc pid scope; do
+        [[ -n "$port" ]] || continue
+        mark=""; amb="publico"
+        if [[ "$scope" == "L" ]]; then amb="local"
+        elif (( UFW_ON )) && ! ufw_permite "${port}/${proto}"; then mark="${AMARILLO} ▲${NC}"; fi
+        FR_TXT "$(printf '  %b%-11s%b %b%-18s%b %b%s%b%b' "$CIAN" "${port}/${proto}" "$NC" "$BLANCO" "${proc:0:18}" "$NC" "$GRIS" "$amb" "$NC" "$mark")"
+    done < <(sort -k2,2n -k1,1 <<< "$TAB")
+    FR_BOT
+}
+
+menu_puertos(){
+    while true; do
+        clear
+        ui_init
+        puertos_servicios
+        echo
+        FR_TOP
+        FR_OPT 1 "Actualizar" 2 "Todos los puertos"
+        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_BOT
+        PROMPT
+        case "$OP" in
+            1) ;;
+            2) clear; ui_init; puertos_todos; PAUSA ;;
+            0) break ;;
+            *) ERR "$(T t_opinv)"; sleep 1 ;;
+        esac
+    done
+}
+
+estado_protocolos(){ menu_puertos; }
 
 # ------------------------------------------------------------
 # TRAFICO POR USUARIO (iptables)
