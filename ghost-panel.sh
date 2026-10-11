@@ -2283,37 +2283,89 @@ instalar_badvpn(){
     if pgrep -f badvpn-udpgw >/dev/null 2>&1; then
         read -r -p "BadVPN ya esta corriendo. Reconfigurar? (s/n): " SN
         [[ "$SN" != "s" ]] && { PAUSA; return; }
+        systemctl disable --now badvpn 2>/dev/null
+        pkill -f badvpn-udpgw 2>/dev/null
+        sleep 1
     fi
+
     echo -e "${CIAN}--- INSTALADOR BADVPN (UDP GW) ---${NC}"
     read -r -p "Puerto UDP GW [7300]: " BP; BP=${BP:-7300}
     [[ "$BP" =~ ^[0-9]+$ && "$BP" -ge 1 && "$BP" -le 65535 ]] || { ERR "Puerto invalido."; PAUSA; return; }
-    INFO "Instalando badvpn (repositorio oficial Ubuntu)..."
-    apt update -y >/dev/null 2>&1
-    apt install -y badvpn >/dev/null 2>&1 || { ERR "No se pudo instalar badvpn (sin red o paquete ausente)."; PAUSA; return; }
+
+    # El paquete "badvpn" NO existe en los repos de Ubuntu 22.04/24.04.
+    # Se compila solo el modulo udpgw desde el codigo fuente oficial.
+    if command -v badvpn-udpgw >/dev/null 2>&1; then
+        INFO "Binario ya presente, reconfigurando servicio..."
+    else
+        INFO "Compilando badvpn-udpgw desde codigo fuente (no existe en apt)..."
+        apt update -y >/dev/null 2>&1
+        apt install -y cmake build-essential gcc g++ make wget >/dev/null 2>&1 \
+            || { ERR "Faltan dependencias de compilacion (cmake, gcc, make...)."; PAUSA; return; }
+
+        local TMPDIR
+        TMPDIR=$(mktemp -d /tmp/badvpn-XXXXXX) || { ERR "No se pudo crear directorio temporal."; PAUSA; return; }
+        (
+            cd "$TMPDIR" || exit 1
+            # Fuente oficial estable 1.999.130
+            if ! wget -q --timeout=25 -O badvpn.tar.gz \
+                "https://github.com/ambrop72/badvpn/archive/refs/tags/1.999.130.tar.gz"; then
+                ERR "No se pudo descargar el codigo fuente (sin red?)."; exit 1
+            fi
+            tar xzf badvpn.tar.gz || { ERR "Error al descomprimir."; exit 1; }
+            cd badvpn-1.999.130 || exit 1
+            mkdir -p build && cd build
+            cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1 >/dev/null 2>&1 \
+                || { ERR "cmake fallo."; exit 1; }
+            make -j"$(nproc 2>/dev/null || echo 2)" >/dev/null 2>&1 \
+                || { ERR "Compilacion fallo."; exit 1; }
+            make install >/dev/null 2>&1 \
+                || { ERR "make install fallo."; exit 1; }
+        )
+        local RC=$?
+        rm -rf "$TMPDIR"
+        if [[ $RC -ne 0 ]]; then
+            PAUSA; return
+        fi
+        # Asegurar que el binario quede accesible
+        if [[ -f /usr/local/bin/badvpn-udpgw ]]; then
+            chmod 755 /usr/local/bin/badvpn-udpgw
+            OK "badvpn-udpgw compilado e instalado en /usr/local/bin/"
+        else
+            ERR "El binario no se genero correctamente."
+            PAUSA; return
+        fi
+    fi
+
+    # Servicio systemd (binario en /usr/local/bin)
     cat > /etc/systemd/system/badvpn.service <<BEOF
 [Unit]
-Description=BadVPN UDP Gateway (VPS-JORGEBARRIOS)
+Description=BadVPN UDP Gateway (Ghost Panel)
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/badvpn-udpgw --listen-addr 127.0.0.1:$BP --max-clients 500
+Type=simple
+ExecStart=/usr/local/bin/badvpn-udpgw --listen-addr 127.0.0.1:${BP} --max-clients 500 --max-connections-for-client 10
 Restart=always
 RestartSec=5
+LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target
 BEOF
+
     systemctl daemon-reload
     systemctl enable --now badvpn 2>/dev/null
     sleep 1
+
     if systemctl is-active --quiet badvpn 2>/dev/null || pgrep -f badvpn-udpgw >/dev/null 2>&1; then
-        OK "BadVPN ACTIVO en 127.0.0.1:$BP"
+        OK "BadVPN ACTIVO en 127.0.0.1:${BP}"
         echo
         echo -e " ${AMARILLO}En la app del cliente (HTTP Injector / eProxy / tu app):${NC}"
-        echo -e "  UDP Gateway: ${VERDE}127.0.0.1:$BP${NC} a traves del tunel SSH/SSL"
+        echo -e "  UDP Gateway: ${VERDE}127.0.0.1:${BP}${NC} a traves del tunel SSH/SSL"
         echo -e "  ${CIAN}Con eso funcionan juegos UDP y llamadas de WhatsApp/Telegram.${NC}"
+        vps_log INFO "badvpn instalado/activado puerto $BP"
     else
-        ERR "BadVPN no levanto. Revisa: journalctl -u badvpn"
+        ERR "BadVPN no levanto. Revisa: journalctl -u badvpn -n 30"
     fi
     PAUSA
 }
@@ -2323,7 +2375,9 @@ quitar_badvpn(){
     rm -f /etc/systemd/system/badvpn.service
     systemctl daemon-reload 2>/dev/null
     pkill -f badvpn-udpgw 2>/dev/null
-    OK "BadVPN detenido y removido."
+    # Eliminar binario compilado (no viene de apt)
+    rm -f /usr/local/bin/badvpn-udpgw /usr/bin/badvpn-udpgw 2>/dev/null
+    OK "BadVPN detenido y removido (servicio + binario)."
     PAUSA
 }
 
