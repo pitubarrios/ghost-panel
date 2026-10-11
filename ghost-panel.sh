@@ -15,7 +15,7 @@ AZUL='\033[1;34m'; CIAN='\033[1;36m'; BLANCO='\033[1;37m'
 NC='\033[0m'
 NARANJA='\033[38;5;208m'; GRIS='\033[38;5;245m'; MORADO='\033[38;5;141m'
 BORDE="$GRIS"          # color del marco
-GHOST_VER='3.2.0'
+GHOST_VER='3.2.2'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -26,6 +26,11 @@ KEY_FILE='/etc/vps-manager.key'
 PREFIJO_KEY='VPSJB1'   # prefijo de marca; tambien acepta keys viejas VPSMGR1
 # URL del script en TU repo (para la opcion de auto-update)
 REPO_RAW='https://raw.githubusercontent.com/pitubarrios/vps-manager/refs/heads/main/ghost-panel.sh'
+VPSMGR_DEST=/usr/local/bin/vpsmgr
+if [[ -r /etc/ghost-panel.conf ]]; then
+    _u=$(awk -F= '/^UPDATE_URL=/{print substr($0,12); exit}' /etc/ghost-panel.conf)
+    [[ "$_u" =~ ^https?://[^[:space:]]+$ ]] && REPO_RAW="$_u"
+fi
 # --- VALIDACION ONLINE (opcional) ---
 # Pone aca la URL de tu Worker de Cloudflare. Vacio = validacion offline (firma local).
 LICENSE_URL='https://vps-licencias.jorgebarriosmpya.workers.dev'
@@ -62,6 +67,24 @@ validar_key(){
     return 0
 }
 
+lic_json_str(){
+    # lic_json_str "$JSON" clave1 clave2 ... -> primer valor string no vacio
+    local json="$1" k v; shift
+    for k in "$@"; do
+        v=$(printf '%s' "$json" | grep -o "\"$k\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -1 \
+            | sed 's/^"[^"]*"[[:space:]]*:[[:space:]]*"//; s/"$//')
+        [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
+    done
+    return 1
+}
+
+lic_guardar_nombre(){
+    # guarda el nombre para mostrarlo tambien en modo gracia (servidor caido)
+    [[ -n "${LICENSE_NOMBRE:-}" ]] || return 0
+    printf '%s' "$LICENSE_NOMBRE" > /etc/vps-license.name 2>/dev/null && chmod 600 /etc/vps-license.name 2>/dev/null
+    return 0
+}
+
 consultar_licencia(){
     # Modo online: pregunta al Worker de Cloudflare.
     # Devuelve: 0 valida / 1 invalida / 2 servidor sin respuesta
@@ -71,7 +94,8 @@ consultar_licencia(){
         --data-urlencode "key=$KEY" --data-urlencode "id=$(machine_hash)" 2>/dev/null)
     [[ -z "$RESP" ]] && return 2
     if echo "$RESP" | grep -q '"valid":[[:space:]]*true'; then
-        LICENSE_NOMBRE=$(echo "$RESP" | grep -o '"name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+        LICENSE_NOMBRE=$(lic_json_str "$RESP" name nombre owner cliente client customer username user)
+        LICENSE_NOMBRE=$(printf '%b' "$LICENSE_NOMBRE" | tr -d '\000-\037' | cut -c1-40)   # decodifica \u00e9 y limpia
         LICENSE_DIAS=$(echo "$RESP" | grep -o '"days_left"[[:space:]]*:[[:space:]]*[0-9]*' | head -1 | grep -o '[0-9]*$')
         return 0
     fi
@@ -100,11 +124,12 @@ gate_licencia(){
         if [[ $RC -eq 0 ]]; then
             date +%s > "$LICENSE_CACHE" 2>/dev/null
             LICENSE_OK="${LICENSE_NOMBRE:-cliente}"
+            lic_guardar_nombre
             [[ -n "${LICENSE_DIAS:-}" ]] && LICENSE_EXP=$(( $(date +%s) + LICENSE_DIAS * 86400 ))
             return 0
         elif [[ $RC -eq 2 ]]; then
             if [[ -f "$LICENSE_CACHE" ]] && (( $(date +%s) - $(cat "$LICENSE_CACHE" 2>/dev/null || echo 0) < GRACE_SECS )); then
-                LICENSE_OK="modo gracia (servidor caido)"
+                LICENSE_OK="$(cat /etc/vps-license.name 2>/dev/null || echo cliente) (modo gracia)"
                 return 0
             fi
             ERR "Servidor de licencias no responde y no hay gracia acumulada."
@@ -117,6 +142,7 @@ gate_licencia(){
             echo "$K" > "$KEY_FILE" 2>/dev/null
             date +%s > "$LICENSE_CACHE" 2>/dev/null
             LICENSE_OK="${LICENSE_NOMBRE:-cliente}"
+            lic_guardar_nombre
             [[ -n "${LICENSE_DIAS:-}" ]] && LICENSE_EXP=$(( $(date +%s) + LICENSE_DIAS * 86400 ))
             OK "Licencia aceptada. Bienvenido, ${LICENSE_OK}."
             sleep 1
@@ -679,10 +705,10 @@ cabecera(){
     cpu=$(cpu_pct)
     read -r dsk_p dsk_u dsk_t < <(df -P -h / 2>/dev/null | awk 'NR==2{gsub("%","",$5); print $5, $3, $2}')
     ONLINE=$(online_total)
-    lic_txt="${LICENSE_OK:--}"
+    lic_txt="${VERDE}${LICENSE_OK:--}${NC}"
     if [[ -n "${LICENSE_EXP:-}" && "${LICENSE_EXP:-0}" != "0" ]]; then
         lic=$(( (LICENSE_EXP - $(date +%s)) / 86400 )); (( lic < 0 )) && lic=0
-        lic_txt="${lic} $(T t_ui_days)"
+        lic_txt="${lic_txt}  ${GRIS}·${NC}  ${AMARILLO}${lic} $(T t_ui_days)${NC}"
     fi
     FR_TOP
     FR_TXT " ${MORADO}◆${NC} ${BLANCO}GHOST PANEL${NC}  ${GRIS}-  v${GHOST_VER}${NC}"
@@ -696,7 +722,8 @@ cabecera(){
     ui_sec "$(T t_ui_ses)"
     ui_kv "IP" "${CIAN}$(ip_publica)${NC}"
     ui_kv "Host" "$(hostname)   ${GRIS}Online${NC} ${VERDE}${ONLINE}${NC}"
-    ui_kv "$(T t_ui_user)" "${BLANCO}$(id -un)${NC}   ${GRIS}Lic${NC} ${VERDE}${lic_txt}${NC}"
+    ui_kv "$(T t_ui_user)" "${BLANCO}$(id -un)${NC}"
+    ui_kv "$(T t_licencia)" "$lic_txt"
     ui_kv "Webmin" "$(estado_webmin_min)"
     FR_BOT
     echo
@@ -1213,8 +1240,8 @@ menu_webmin(){
 # HERRAMIENTAS EXTRA
 # ------------------------------------------------------------
 instalar_comando_global(){
-    local DEST=/usr/local/bin/vpsmgr
-    if cp "$(readlink -f "$0")" "$DEST" 2>/dev/null && chmod +x "$DEST"; then
+    local DEST="$VPSMGR_DEST"
+    if install -m 755 "$(readlink -f "$0")" "$DEST" 2>/dev/null; then
         grep -q "alias vps=" /root/.bashrc 2>/dev/null || echo "alias vps='/usr/local/bin/vpsmgr'" >> /root/.bashrc
         OK "Instalado. Ahora entras desde cualquier lado con: ${VERDE}vpsmgr${NC} (o ${VERDE}vps${NC})"
     else
@@ -1480,22 +1507,87 @@ cambiar_hostname(){
     PAUSA
 }
 
-auto_update(){
-    local SN TMPF
-    [[ -z "$REPO_RAW" ]] && { ERR "REPO_RAW sin configurar."; PAUSA; return; }
-    WARN "Esto REEMPLAZA el script instalado por el del repo: se pierden tus cambios locales."
-    read -r -p "Continuar? (s/n): " SN
-    [[ "$SN" == "s" ]] || { INFO "Cancelado."; PAUSA; return; }
-    INFO "Descargando ultima version desde tu repo..."
-    TMPF=$(mktemp /tmp/vpsmgr.XXXXXX) || { ERR "Sin temporal."; PAUSA; return; }
-    if wget -q "$REPO_RAW" -O "$TMPF" 2>/dev/null && [[ -s "$TMPF" ]] && bash -n "$TMPF"; then
-        install -m 755 "$TMPF" /usr/local/bin/vpsmgr 2>/dev/null || cp "$TMPF" "$(readlink -f "$0")" 2>/dev/null
-        OK "Script actualizado. Volves a entrar con vpsmgr."
-    else
-        ERR "No se pudo actualizar (sin red, repo caido o archivo invalido)."
+ghost_ver_de(){ grep -m1 "^GHOST_VER=" "$1" 2>/dev/null | cut -d"'" -f2; }
+
+ghost_instalar_script(){
+    # ghost_instalar_script ARCHIVO -> valida, compara versiones, respalda, instala y relanza
+    local F="$1" NV CV="$GHOST_VER" DEST="$VPSMGR_DEST" RUN SN BK
+    bash -n "$F" 2>/dev/null || { ERR "El archivo no es un script bash valido."; return 1; }
+    grep -q "GHOST PANEL" "$F" || { ERR "No parece ser GHOST PANEL."; return 1; }
+    NV=$(ghost_ver_de "$F")
+    echo -e "  Instalada: ${AMARILLO}v${CV}${NC}    Nueva: ${VERDE}${NV:+v$NV}${NV:-sin version}${NC}"
+    if [[ -z "$NV" ]]; then
+        WARN "El archivo no declara version: es ANTERIOR al rediseno. Instalarlo pierde la interfaz y los arreglos."
+    elif [[ "$NV" == "$CV" ]]; then
+        INFO "Es la misma version que la instalada."
+    elif [[ "$(printf '%s\n%s\n' "$CV" "$NV" | sort -V | tail -1)" == "$CV" ]]; then
+        WARN "La nueva (v$NV) es MAS VIEJA que la instalada (v$CV)."
     fi
+    read -r -p "  Instalar igual? (s/n): " SN
+    [[ "$SN" == "s" ]] || { INFO "Cancelado."; return 1; }
+    RUN="${GHOST_SELF:-$(readlink -f "$0" 2>/dev/null)}"
+    mkdir -p /root/backups; chmod 700 /root/backups
+    BK="/root/backups/ghost-panel-v${CV}-$(date +%F_%H%M%S).sh"
+    if [[ -n "$RUN" && -f "$RUN" ]]; then cp -a "$RUN" "$BK" 2>/dev/null && INFO "Respaldo: $BK"; fi
+    # install borra y recrea el destino: no corrompe el script que bash esta leyendo
+    install -m 755 "$F" "$DEST" || { ERR "No se pudo escribir $DEST"; return 1; }
+    OK "Instalado en $DEST (v${NV:-?})"
+    if [[ -n "$RUN" && -f "$RUN" && "$RUN" != "$(readlink -f "$DEST")" && -w "$RUN" ]]; then
+        install -m 755 "$F" "$RUN" 2>/dev/null && OK "Tambien actualizado el archivo que estas ejecutando: $RUN"
+    fi
+    vps_log INFO "script actualizado v$CV -> v${NV:-?}"
+    read -r -p "  Reiniciar el panel ahora con la version nueva? (s/n): " SN
+    [[ "$SN" == "s" ]] && exec "$DEST"
+    return 0
+}
+
+auto_update_descargar(){
+    local TMPF URL
+    [[ -n "$REPO_RAW" ]] || { ERR "Fuente sin configurar (opcion 2)."; PAUSA; return; }
+    URL="${REPO_RAW}$([[ "$REPO_RAW" == *\?* ]] && echo '&' || echo '?')cb=$(date +%s)"   # evita cache del CDN
+    TMPF=$(mktemp /tmp/vpsmgr.XXXXXX) || { ERR "Sin temporal."; PAUSA; return; }
+    INFO "Descargando desde: $REPO_RAW"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --max-time 30 -H 'Cache-Control: no-cache' "$URL" -o "$TMPF" 2>/dev/null
+    else
+        wget -q --no-cache -T 30 "$URL" -O "$TMPF" 2>/dev/null
+    fi
+    if [[ -s "$TMPF" ]]; then ghost_instalar_script "$TMPF"
+    else ERR "No se pudo descargar. Revisa la URL (repo publico, enlace raw) y la red."; fi
     rm -f "$TMPF"
     PAUSA
+}
+
+auto_update(){
+    local F U
+    while true; do
+        cabecera
+        SUBTOP "ACTUALIZAR SCRIPT"
+        ui_kv "Version" "v${GHOST_VER}"
+        ui_kv "Fuente" "${REPO_RAW:-sin configurar}"
+        FR_MID
+        FR_OPT 1 "Actualizar desde la fuente" "" ""
+        FR_OPT 2 "Cambiar fuente (URL raw)" "" ""
+        FR_OPT 3 "Instalar desde archivo local" "" ""
+        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_BOT
+        PROMPT
+        case "$OP" in
+            1) auto_update_descargar ;;
+            2) read -r -p "  URL raw de TU repo (https://...): " U
+               if [[ "$U" =~ ^https?://[^[:space:]]+$ ]]; then
+                   touch /etc/ghost-panel.conf; chmod 600 /etc/ghost-panel.conf
+                   sed -i '/^UPDATE_URL=/d' /etc/ghost-panel.conf
+                   echo "UPDATE_URL=$U" >> /etc/ghost-panel.conf
+                   REPO_RAW="$U"; OK "Fuente guardada."
+               else ERR "URL invalida."; fi
+               PAUSA ;;
+            3) read -r -p "  Ruta del archivo .sh: " F
+               if [[ -f "$F" ]]; then ghost_instalar_script "$F"; else ERR "No existe: $F"; fi
+               PAUSA ;;
+            0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
+        esac
+    done
 }
 
 # ------------------------------------------------------------
