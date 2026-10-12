@@ -459,9 +459,10 @@ purgar_usuario(){
     local U="$1"
     pkill -KILL -u "$U" 2>/dev/null
     xray_usuario del "$U" >/dev/null 2>&1
-    rm -f "/etc/vps-limits/$U" "/etc/vps-trafico/$U" "/etc/vps-users/$U"
+    rm -f "/etc/vps-limits/$U" "/etc/vps-trafico/$U" "/etc/vps-users/$U" "/etc/vps-banners/$U"
     if [[ "${2:-}" == "keep" ]]; then userdel "$U" >/dev/null 2>&1
     else userdel -r "$U" >/dev/null 2>&1 || userdel -f "$U" >/dev/null 2>&1; fi
+    banner_rebuild_match 2>/dev/null || true
     ! id "$U" >/dev/null 2>&1
 }
 
@@ -593,6 +594,52 @@ ghost_bootstrap(){
     xray_config_perms
     # Asegurar autenticacion por contraseña (muchas imagenes cloud la dejan en "no")
     sshd_asegurar_password_auth
+    # Auto: CheckUser + banner HTML (para que USER/EXP/DAYS se sustituyan en HTTP Custom)
+    checkuser_auto_activar
+}
+
+checkuser_auto_activar(){
+    # Instala CheckUser en silencio si no existe, publica banner HTML y deja el servicio activo.
+    # Idempotente: si ya esta todo OK, no hace nada visible.
+    local PORT TOKEN need_banner=0
+    if [[ ! -f /etc/vps-checkuser.conf ]]; then
+        PORT=8080
+        TOKEN=$(tr -dc 'a-zA-Z0-9' </dev/urandom 2>/dev/null | head -c 24)
+        [[ -z "$TOKEN" ]] && TOKEN="ghost$(date +%s)"
+        printf 'PORT=%s\nTOKEN=%s\n' "$PORT" "$TOKEN" > /etc/vps-checkuser.conf
+        chmod 600 /etc/vps-checkuser.conf
+        checkuser_escribir_py
+        cat > /etc/systemd/system/vps-checkuser.service <<'SVCEOF'
+[Unit]
+Description=CheckUser API (Ghost Panel)
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/vps-checkuser.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+        systemctl daemon-reload
+        systemctl enable --now vps-checkuser 2>/dev/null
+        # Abrir puerto si ufw esta activo
+        command -v ufw >/dev/null 2>&1 && ufw allow "$PORT/tcp" >/dev/null 2>&1 || true
+        vps_log INFO "CheckUser auto-instalado (puerto $PORT)"
+        need_banner=1
+    else
+        # Asegurar servicio y script actualizados
+        checkuser_escribir_py 2>/dev/null || true
+        systemctl is-active --quiet vps-checkuser 2>/dev/null \
+            || systemctl enable --now vps-checkuser 2>/dev/null || true
+    fi
+    # Publicar banner HTML generico (fallback) si no existe
+    if [[ ! -f /etc/banner-vps ]] || [[ $need_banner -eq 1 ]]; then
+        banner_html_http_custom | BANNER_HC=1 banner_publicar >/dev/null 2>&1 || true
+    fi
+    # Banners personalizados por usuario (nombre + vencimiento + dias, sin app CheckUser)
+    banner_todos_actualizar >/dev/null 2>&1 || true
 }
 
 sshd_asegurar_password_auth(){
@@ -794,10 +841,21 @@ crear_usuario(){
     mkdir -p /etc/vps-limits
     echo "$MAXC" > "/etc/vps-limits/$USU"
     xray_usuario add "$USU"
+    # Banner personalizado con nombre/vencimiento/dias (sin configurar nada en la app)
+    banner_usuario_actualizar "$USU"
+    banner_rebuild_match
+    # Asegurar CheckUser (opcional, por si la app lo usa)
+    checkuser_auto_activar
     vps_log INFO "usuario creado: $USU (${DIAS}d, limite $MAXC)"
     OK "Usuario '$USU' creado. Vence: $EXPISO"
     echo -e "  Usuario: ${VERDE}$USU${NC}   Clave: ${VERDE}$CLAVE${NC}   Limite: $MAXC"
     echo -e "  IP: $(ip_publica)  |  Puerto SSH: $(sshd_puerto_actual)"
+    if [[ -f /etc/vps-checkuser.conf ]]; then
+        local _P _T
+        _P=$(awk -F= '/^PORT=/{print $2}' /etc/vps-checkuser.conf 2>/dev/null)
+        _T=$(awk -F= '/^TOKEN=/{print $2}' /etc/vps-checkuser.conf 2>/dev/null)
+        echo -e "  CheckUser: ${CIAN}http://$(ip_publica):${_P}/checkuser.php?user=$USU&token=${_T}${NC}"
+    fi
     PAUSA
 }
 
@@ -843,6 +901,8 @@ renovar_usuario(){
     if [[ "$ACT" != "never" && "$ACT" > "$BASE" ]]; then BASE="$ACT"; fi
     EXPISO=$(date -d "$BASE +${DIAS} days" +%Y-%m-%d)
     chage -M 99999 -E "$EXPISO" "$USU"
+    banner_usuario_actualizar "$USU"
+    banner_rebuild_match
     vps_log INFO "renovado: $USU hasta $EXPISO"
     OK "'$USU' renovado por ${DIAS} dias (vence: $EXPISO)."
     PAUSA
@@ -1130,6 +1190,90 @@ banner_eliminar(){
     vps_log INFO "banner eliminado"
     OK "Banner eliminado."
     PAUSA
+}
+
+# Banner personalizado por usuario (sin CheckUser en la app).
+# OpenSSH no expande %u en Banner: se usan bloques Match User.
+BANNERS_DIR='/etc/vps-banners'
+
+banner_html_para_usuario(){
+    # banner_html_para_usuario USUARIO -> imprime HTML con datos reales (1 linea)
+    local U="$1" EXPISO D WARN="" EXP_TXT DAYS_TXT
+    EXPISO=$(usuario_fecha_cuenta "$U")
+    if [[ "$EXPISO" == "never" ]]; then
+        EXP_TXT="Sin vencimiento"
+        DAYS_TXT="--"
+    else
+        EXP_TXT="$EXPISO"
+        D=$(dias_hasta "$EXPISO")
+        if [[ "$D" -lt 0 ]]; then
+            DAYS_TXT="0"
+            WARN="Cuenta vencida"
+        else
+            DAYS_TXT="$D"
+            (( D <= 3 )) && WARN="Por vencer: quedan ${D} dias"
+        fi
+    fi
+    # Misma plantilla visual, pero con valores reales (sin tokens USER/EXP/DAYS)
+    printf '%s' "<p style=\"text-align:center;\"><font color=\"#00FFFF\"><b>═══════════════════════</b></font></p><p style=\"text-align:center;\"><font color=\"#00FF7F\"><b>🌐 G H O S T   P A N E L 🌐</b></font></p><p style=\"text-align:center;\"><font color=\"#9E9E9E\"><i>--- CONEXION VIP ESTABLE ---</i></font></p><p style=\"text-align:center;\"><font color=\"#00FFFF\"><b>═══════════════════════</b></font></p><p style=\"text-align:center;\"><font color=\"#FFFFFF\"><b>👤 USUARIO : </b></font><font color=\"#00BFFF\"><b>${U}</b></font></p><p style=\"text-align:center;\"><font color=\"#FFFFFF\"><b>📅 VENCIMIENTO : </b></font><font color=\"#FFD700\"><b>${EXP_TXT}</b></font></p><p style=\"text-align:center;\"><font color=\"#FFFFFF\"><b>⏳ RESTANTES : </b></font><font color=\"#FF8C00\"><b>${DAYS_TXT}</b></font></p><p style=\"text-align:center;\"><font color=\"#555555\">──────────────────────</font></p><p style=\"text-align:center;\"><font color=\"#FF4444\"><b>${WARN}</b></font></p><p style=\"text-align:center;\"><font color=\"#7CFC00\"><i>🚀 Disfruta de la mejor velocidad 🚀</i></font></p><p style=\"text-align:center;\"><font color=\"#00FFFF\"><b>═══════════════════════</b></font></p>"
+}
+
+banner_usuario_actualizar(){
+    # Genera /etc/vps-banners/USUARIO con HTML ya resuelto
+    local U="$1"
+    [[ -z "$U" ]] && return 1
+    mkdir -p "$BANNERS_DIR"
+    chmod 755 "$BANNERS_DIR"
+    banner_html_para_usuario "$U" > "$BANNERS_DIR/$U"
+    chmod 644 "$BANNERS_DIR/$U"
+}
+
+banner_rebuild_match(){
+    # Reescribe al final de sshd_config los Match User con Banner personalizado.
+    # Seguro: valida con sshd -t y restaura backup si falla.
+    local bak="${SSHD_CFG}.ghost-banners.bak" tmp u
+    [[ -f "$SSHD_CFG" ]] || return 1
+    mkdir -p "$BANNERS_DIR"
+    # Quitar bloque anterior del panel
+    if grep -q '# GHOST-BANNERS-INICIO' "$SSHD_CFG" 2>/dev/null; then
+        cp -a "$SSHD_CFG" "$bak"
+        sed -i '/# GHOST-BANNERS-INICIO/,/# GHOST-BANNERS-FIN/d' "$SSHD_CFG"
+    else
+        cp -a "$SSHD_CFG" "$bak"
+    fi
+    {
+        echo
+        echo "# GHOST-BANNERS-INICIO"
+        echo "# Banners personalizados por usuario (generado por Ghost Panel)"
+        for u in "$BANNERS_DIR"/*; do
+            [[ -f "$u" ]] || continue
+            u=$(basename "$u")
+            # solo usuarios reales no protegidos
+            id "$u" >/dev/null 2>&1 || continue
+            usuario_protegido "$u" && continue
+            echo "Match User $u"
+            echo "    Banner $BANNERS_DIR/$u"
+        done
+        echo "# GHOST-BANNERS-FIN"
+    } >> "$SSHD_CFG"
+    if ! sshd -t 2>/dev/null; then
+        cp -a "$bak" "$SSHD_CFG"
+        ERR "sshd_config invalido al aplicar banners; se restauro."
+        return 1
+    fi
+    sshd_recargar 2>/dev/null || true
+    return 0
+}
+
+banner_todos_actualizar(){
+    # Regenera banner de todos los usuarios humanos + Match en sshd
+    local U
+    mkdir -p "$BANNERS_DIR"
+    while read -r U; do
+        usuario_protegido "$U" && continue
+        banner_usuario_actualizar "$U"
+    done < <(awk -F: '$3>=1000 && $1!="nobody"{print $1}' /etc/passwd)
+    banner_rebuild_match
 }
 
 banner_con_checkuser(){
