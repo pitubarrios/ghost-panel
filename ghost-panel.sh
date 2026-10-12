@@ -15,7 +15,7 @@ AZUL='\033[1;34m'; CIAN='\033[1;36m'; BLANCO='\033[1;37m'
 NC='\033[0m'
 NARANJA='\033[38;5;208m'; GRIS='\033[38;5;245m'; MORADO='\033[38;5;141m'
 BORDE="$GRIS"          # color del marco
-GHOST_VER='3.3.0'
+GHOST_VER='3.4.0'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
