@@ -26,7 +26,7 @@ KEY_FILE='/etc/vps-manager.key'
 PREFIJO_KEY='VPSJB1'   # prefijo de marca; tambien acepta keys viejas VPSMGR1
 # URL del script en TU repo (para la opcion de auto-update)
 REPO_RAW='https://raw.githubusercontent.com/pitubarrios/vps-manager/refs/heads/main/ghost-panel.sh'
-VPSMGR_DEST=/usr/local/bin/vpsmgr
+VPSMGR_DEST=/usr/local/bin/ghostpanel
 if [[ -r /etc/ghost-panel.conf ]]; then
     _u=$(awk -F= '/^UPDATE_URL=/{print substr($0,12); exit}' /etc/ghost-panel.conf)
     [[ "$_u" =~ ^https?://[^[:space:]]+$ ]] && REPO_RAW="$_u"
@@ -296,7 +296,7 @@ LOG_PANEL='/var/log/ghost-panel.log'
 LINKS_FILE='/root/vps-links.txt'
 IP_CACHE_FILE='/run/vps-ip.cache'   # /run es de root (en /tmp un usuario SSH podia plantar un symlink)
 USUARIOS_DIR='/etc/vps-users'
-PROTEGIDOS_NOMBRES='root daemon bin sys sync games man lp mail news uucp proxy www-data backup list irc gnats nobody systemd-network systemd-resolve systemd-timesync syslog messagebus _apt uuidd tcpdump sshd landscape pollinate ubuntu debian admin ec2-user cloud-user vpsmgr dnstt'
+PROTEGIDOS_NOMBRES='root daemon bin sys sync games man lp mail news uucp proxy www-data backup list irc gnats nobody systemd-network systemd-resolve systemd-timesync syslog messagebus _apt uuidd tcpdump sshd landscape pollinate ubuntu debian admin ec2-user cloud-user vpsmgr ghostpanel dnstt'
 
 vps_arch(){
     case "$(uname -m)" in
@@ -471,7 +471,7 @@ cron_vencidos_instalar(){
 #!/usr/bin/env bash
 LOG=/var/log/ghost-panel.log
 HOY=$(date +%Y-%m-%d)
-PROTEGIDOS='root daemon bin sys sync games man lp mail news uucp proxy www-data backup list irc gnats nobody systemd-network systemd-resolve systemd-timesync syslog messagebus _apt uuidd tcpdump sshd landscape pollinate ubuntu debian admin ec2-user cloud-user vpsmgr dnstt'
+PROTEGIDOS='root daemon bin sys sync games man lp mail news uucp proxy www-data backup list irc gnats nobody systemd-network systemd-resolve systemd-timesync syslog messagebus _apt uuidd tcpdump sshd landscape pollinate ubuntu debian admin ec2-user cloud-user vpsmgr ghostpanel dnstt'
 log(){ echo "$(date '+%F %T') [CRON] $*" >> "$LOG" 2>/dev/null; }
 awk -F: '$3>=1000 && $1!="nobody"{print $1}' /etc/passwd | while read -r U; do
     echo " $PROTEGIDOS " | grep -q " $U " && continue
@@ -1417,8 +1417,14 @@ menu_webmin(){
 instalar_comando_global(){
     local DEST="$VPSMGR_DEST"
     if install -m 755 "$(readlink -f "$0")" "$DEST" 2>/dev/null; then
-        grep -q "alias vps=" /root/.bashrc 2>/dev/null || echo "alias vps='/usr/local/bin/vpsmgr'" >> /root/.bashrc
-        OK "Instalado. Ahora entras desde cualquier lado con: ${VERDE}vpsmgr${NC} (o ${VERDE}vps${NC})"
+        # Compatibilidad: enlaces antiguos
+        ln -sf "$DEST" /usr/local/bin/vpsmgr 2>/dev/null || true
+        ln -sf "$DEST" /usr/local/bin/vps 2>/dev/null || true
+        # Alias en bashrc
+        grep -q "alias ghostpanel=" /root/.bashrc 2>/dev/null || echo "alias ghostpanel='/usr/local/bin/ghostpanel'" >> /root/.bashrc
+        grep -q "alias vps=" /root/.bashrc 2>/dev/null || echo "alias vps='/usr/local/bin/ghostpanel'" >> /root/.bashrc
+        OK "Instalado. Entra al panel con: ${VERDE}ghostpanel${NC}"
+        INFO "Tambien funcionan: vpsmgr  |  vps"
     else
         ERR "No se pudo instalar en $DEST (permisos?)."
     fi
@@ -1643,7 +1649,7 @@ auto_menu(){
     fi
     cat >> "$HOME/.bashrc" <<'AMEOF'
 # VPS-JB-AUTOMENU-INICIO
-case "$-" in *i*) [ -x /usr/local/bin/vpsmgr ] && /usr/local/bin/vpsmgr ;; esac
+case "$-" in *i*) [ -x /usr/local/bin/ghostpanel ] && /usr/local/bin/ghostpanel ;; esac
 # VPS-JB-AUTOMENU-FIN
 AMEOF
     OK "Auto-menu activo: la proxima vez que root inicie sesion (SSH o consola), el menu abre solo."
@@ -3320,6 +3326,13 @@ quitar_tunel_cdn(){
 seleccionar_idioma
 gate_licencia
 ghost_bootstrap
+# Comando global: ghostpanel (si el script se ejecuta desde otra ruta, lo instala)
+if [[ "$(readlink -f "$0" 2>/dev/null)" != "$(readlink -f "$VPSMGR_DEST" 2>/dev/null)" ]]; then
+    install -m 755 "$(readlink -f "$0")" "$VPSMGR_DEST" 2>/dev/null && {
+        ln -sf "$VPSMGR_DEST" /usr/local/bin/vpsmgr 2>/dev/null || true
+        ln -sf "$VPSMGR_DEST" /usr/local/bin/vps 2>/dev/null || true
+    }
+fi
 
 while true; do
     cabecera
