@@ -591,6 +591,37 @@ ghost_bootstrap(){
     chmod 640 "$LOG_PANEL" 2>/dev/null || true
     [[ -f /etc/cron.d/ghost-panel-vencidos ]] || cron_vencidos_instalar
     xray_config_perms
+    # Asegurar autenticacion por contraseña (muchas imagenes cloud la dejan en "no")
+    sshd_asegurar_password_auth
+}
+
+sshd_asegurar_password_auth(){
+    # Activa PasswordAuthentication + KbdInteractiveAuthentication de forma segura.
+    # Neutraliza tambien cualquier override en /etc/ssh/sshd_config.d/
+    local f changed=0
+    for f in /etc/ssh/sshd_config.d/*.conf; do
+        [[ -f "$f" ]] || continue
+        if grep -qiE '^[[:space:]]*PasswordAuthentication[[:space:]=]+no' "$f" 2>/dev/null         || grep -qiE '^[[:space:]]*KbdInteractiveAuthentication[[:space:]=]+no' "$f" 2>/dev/null; then
+            cp -a "$f" "$f.ghost.bak" 2>/dev/null
+            sed -i -E 's/^([[:space:]]*PasswordAuthentication[[:space:]=]+).*$/\1yes/I' "$f"
+            sed -i -E 's/^([[:space:]]*KbdInteractiveAuthentication[[:space:]=]+).*$/\1yes/I' "$f"
+            changed=1
+        fi
+    done
+    # Directiva global en sshd_config (antes de cualquier Match)
+    local cur
+    cur=$(sshd -T 2>/dev/null | awk '/^passwordauthentication /{print $2}')
+    if [[ "$cur" != "yes" ]]; then
+        sshd_main_set PasswordAuthentication yes && changed=1
+    fi
+    cur=$(sshd -T 2>/dev/null | awk '/^kbdinteractiveauthentication /{print $2}')
+    if [[ "$cur" != "yes" ]]; then
+        sshd_main_set KbdInteractiveAuthentication yes && changed=1
+    fi
+    if [[ $changed -eq 1 ]]; then
+        sshd_recargar 2>/dev/null || true
+        vps_log INFO "PasswordAuthentication activado automaticamente"
+    fi
 }
 
 # ---------- MARCO / DISEÑO DEL PANEL ----------
