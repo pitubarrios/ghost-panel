@@ -15,7 +15,7 @@ AZUL='\033[1;34m'; CIAN='\033[1;36m'; BLANCO='\033[1;37m'
 NC='\033[0m'
 NARANJA='\033[38;5;208m'; GRIS='\033[38;5;245m'; MORADO='\033[38;5;141m'
 BORDE="$GRIS"          # color del marco
-GHOST_VER='3.6.0'
+GHOST_VER='3.6.2'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -35,7 +35,7 @@ fi
 # Pone aca la URL de tu Worker de Cloudflare.
 # Vacio = el panel se niega a arrancar (modo produccion).
 # Para desarrollo local sin Worker: export GHOST_DEV=1 antes de ejecutar.
-LICENSE_URL='https://vps-licencias.jorgebarriosmpya.workers.dev'
+LICENSE_URL=''
 GRACE_SECS=259200                      # 72h de gracia si el servidor no responde
 LICENSE_CACHE='/etc/vps-license.cache'
 # REPO_RAW: cuando tengas tu GitHub, cambia la URL de abajo o usa
@@ -288,6 +288,7 @@ TXT_ES[t_ad_inst]="Instalar AdGuard Home"; TXT_EN[t_ad_inst]="Install AdGuard Ho
 TXT_ES[t_ad_estado]="Estado / panel web"; TXT_EN[t_ad_estado]="Status / web UI"
 TXT_ES[t_ad_quitar]="Quitar AdGuard"; TXT_EN[t_ad_quitar]="Remove AdGuard"
 TXT_ES[t_ad_listas]="Actualizar listas"; TXT_EN[t_ad_listas]="Update filter lists"
+TXT_ES[t_ui_compact]="UI compacta on/off"; TXT_EN[t_ui_compact]="Compact UI on/off"
 TXT_ES[t_dropbear]="Dropbear"; TXT_EN[t_dropbear]="Dropbear"
 TXT_ES[t_udp_custom]="UDP Custom"; TXT_EN[t_udp_custom]="UDP Custom"
 TXT_ES[t_slowdns]="SlowDNS (dnstt)"; TXT_EN[t_slowdns]="SlowDNS (dnstt)"
@@ -330,19 +331,63 @@ vps_log(){
     echo "$(date '+%F %T') [$NIV] $*" >> "$LOG_PANEL" 2>/dev/null || true
 }
 
+# IP de la interfaz por la que sale a Internet (la de la VM/VPS real).
+ip_local(){
+    local ip
+    # 1) src de la ruta por defecto (mas fiable en VM y VPS)
+    ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')
+    # 2) primera IPv4 no loopback de hostname -I
+    if [[ -z "$ip" || "$ip" == "127.0.0.1" ]]; then
+        ip=$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $1!="127.0.0.1"{print; exit}')
+    fi
+    # 3) ip addr
+    if [[ -z "$ip" ]]; then
+        ip=$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+    fi
+    printf '%s' "${ip:-127.0.0.1}"
+}
+
+# IP publica vista desde Internet (puede diferir en NAT/VM local).
+ip_publica_detect(){
+    local ip
+    ip=$(curl -4 -fsS --max-time 3 https://ifconfig.me 2>/dev/null       || curl -4 -fsS --max-time 3 https://api.ipify.org 2>/dev/null       || curl -4 -fsS --max-time 3 https://icanhazip.com 2>/dev/null)
+    ip=$(printf '%s' "$ip" | tr -d '[:space:]')
+    printf '%s' "$ip"
+}
+
+# Para mostrar en panel y URLs de acceso:
+# - Prioriza la IP local de la maquina (la que sirve en VM / LAN / interfaz principal).
+# - Si hay publica distinta, se puede consultar con ip_publica_detect.
+# Cache corta de la IP de acceso (local).
 ip_publica(){
     local ip ahora mtime=0
     ahora=$(date +%s)
     if [[ -f "$IP_CACHE_FILE" ]]; then
         mtime=$(stat -c %Y "$IP_CACHE_FILE" 2>/dev/null || echo 0)
-        if (( ahora - mtime < 3600 )); then
+        # cache 5 min (antes 1h; en VM la IP puede cambiar al reiniciar red)
+        if (( ahora - mtime < 300 )); then
             cat "$IP_CACHE_FILE"
             return 0
         fi
     fi
-    ip=$(curl -4 -fsS --max-time 3 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
+    ip=$(ip_local)
+    # Si la local es privada y hay publica, preferimos local para "acceder a ESTA maquina".
+    # La publica se muestra aparte cuando hace falta (Webmin, enlaces).
     printf '%s' "$ip" > "$IP_CACHE_FILE" 2>/dev/null
     printf '%s' "$ip"
+}
+
+# Texto de acceso para servicios web (Webmin, etc.): local + publica si difiere.
+ip_urls_acceso(){
+    # ip_urls_acceso PUERTO [esquema=https]
+    local port="$1" scheme="${2:-https}" loc pub
+    loc=$(ip_local)
+    pub=$(ip_publica_detect)
+    echo -e " Acceso (esta maquina): ${VERDE}${scheme}://${loc}:${port}${NC}"
+    if [[ -n "$pub" && "$pub" != "$loc" ]]; then
+        echo -e " Acceso (IP publica):   ${CIAN}${scheme}://${pub}:${port}${NC}"
+        echo -e " ${GRIS}En VM/NAT usa la de esta maquina; la publica solo si hay port-forward.${NC}"
+    fi
 }
 
 guardar_enlace(){
@@ -918,15 +963,19 @@ FILA(){
 }
 
 SUBTOP(){ ui_crumb "$1"; ui_box_top "$1"; }
-PROMPT(){ echo; read -r -p "  $(echo -e "${CIAN}▸${NC}") $(T t_opcion) $(echo -e "${GRIS}›${NC}") " OP; }
+PROMPT(){ echo; read -r -p "  $(echo -e "${CIAN}›${NC}") " OP; }
 
 cabecera(){
     clear
     ui_init
-    local os kern up ram_t="" ram_u="" ram_p=0 cpu dsk_p="" dsk_u="" dsk_t="" ONLINE lic lic_txt
+    local os kern up ram_t="" ram_u="" ram_p=0 cpu dsk_p="" dsk_u="" dsk_t="" ONLINE lic lic_txt compact=0
+    [[ -f /etc/vps-manager.ui ]] && grep -qx 'compact' /etc/vps-manager.ui 2>/dev/null && compact=1
     os=$( (. /etc/os-release 2>/dev/null; echo "${NAME:-Linux} ${VERSION_ID:-}") )
     kern=$(uname -r)
-    up=$(uptime -p 2>/dev/null); up=${up#up }; [[ -z "$up" ]] && up="n/a"
+    up=$(uptime -p 2>/dev/null); up=${up#up }
+    # acortar uptime: "2 hours 15 minutes" -> "2h 15m"
+    up=$(printf '%s' "$up" | sed -e 's/ hours\?/h/g' -e 's/ minutes\?/m/g' -e 's/ days\?/d/g' -e 's/ seconds\?/s/g' -e 's/,//g')
+    [[ -z "$up" ]] && up="n/a"
     read -r ram_t ram_u < <(free -m 2>/dev/null | awk '/Mem:/{print $2, $3}')
     ram_t=${ram_t:-0}; ram_u=${ram_u:-0}
     (( ram_t > 0 )) && ram_p=$(( ram_u * 100 / ram_t ))
@@ -936,53 +985,77 @@ cabecera(){
     lic_txt="${VERDE}${LICENSE_OK:--}${NC}"
     if [[ -n "${LICENSE_EXP:-}" && "${LICENSE_EXP:-0}" != "0" ]]; then
         lic=$(( (LICENSE_EXP - $(date +%s)) / 86400 )); (( lic < 0 )) && lic=0
-        lic_txt="${lic_txt}  ${GRIS}·${NC}  ${AMARILLO}${lic} $(T t_ui_days)${NC}"
+        if (( lic <= 7 )); then
+            lic_txt="${lic_txt}  ${GRIS}·${NC}  ${AMARILLO}${lic}d${NC}"
+        else
+            lic_txt="${lic_txt}  ${GRIS}·${NC}  ${GRIS}${lic}d${NC}"
+        fi
     fi
     FR_TOP
-    FR_TXT " ${MORADO}◆${NC} ${BLANCO}GHOST PANEL${NC}  ${GRIS}-  v${GHOST_VER}${NC}"
-    ui_sec "$(T t_ui_sys)"
-    ui_kv "OS" "${os}  ${GRIS}·${NC}  kernel ${kern}"
-    ui_kv "Uptime" "$up"
-    ui_sec "$(T t_ui_res)"
-    ui_gauge "RAM" "$ram_p" "${ram_u}M / ${ram_t}M"
-    ui_gauge "CPU" "$cpu"
-    ui_gauge "$(T t_disco)" "${dsk_p:-0}" "${dsk_u:-?} / ${dsk_t:-?}"
-    ui_sec "$(T t_ui_ses)"
-    ui_kv "IP" "${CIAN}$(ip_publica)${NC}"
-    ui_kv "Host" "$(hostname)   ${GRIS}Online${NC} ${VERDE}${ONLINE}${NC}"
-    ui_kv "$(T t_ui_user)" "${BLANCO}$(id -un)${NC}"
-    ui_kv "$(T t_licencia)" "$lic_txt"
-    ui_kv "Webmin" "$(estado_webmin_min)"
-    ui_kv "Servicios" "$(estado_servicios_min)"
+    # Titulo: producto a la izquierda, usuario@host a la derecha (mismo renglón lógico)
+    FR_TXT " ${MORADO}◆${NC} ${BLANCO}GHOST PANEL${NC}  ${GRIS}v${GHOST_VER}${NC}   ${GRIS}$(id -un)@$(hostname)${NC}"
+    if [[ $compact -eq 1 ]]; then
+        # Modo compacto: IP + online + lic + gauges cortos + servicios
+        FR_TXT " ${CIAN}$(ip_local)${NC}  ${GRIS}online${NC} ${VERDE}${ONLINE}${NC}  ${GRIS}lic${NC} $lic_txt"
+        ui_gauge "RAM" "$ram_p" "${ram_u}/${ram_t}M"
+        ui_gauge "CPU" "$cpu"
+        ui_gauge "Disk" "${dsk_p:-0}" "${dsk_u:-?}/${dsk_t:-?}"
+        FR_TXT " $(estado_servicios_min)"
+    else
+        ui_sec "$(T t_ui_sys)"
+        FR_TXT "  ${GRIS}OS${NC}  ${os}  ${GRIS}·${NC}  ${kern}  ${GRIS}·${NC}  ${up}"
+        ui_sec "$(T t_ui_res)"
+        ui_gauge "RAM" "$ram_p" "${ram_u}M / ${ram_t}M"
+        ui_gauge "CPU" "$cpu"
+        ui_gauge "$(T t_disco)" "${dsk_p:-0}" "${dsk_u:-?} / ${dsk_t:-?}"
+        ui_sec "$(T t_ui_ses)"
+        local _loc _pub
+        _loc=$(ip_local)
+        _pub=$(ip_publica_detect 2>/dev/null)
+        if [[ -n "$_pub" && "$_pub" != "$_loc" ]]; then
+            FR_TXT "  ${GRIS}IP${NC}  ${CIAN}${_loc}${NC}  ${GRIS}pub${NC} ${_pub}  ${GRIS}online${NC} ${VERDE}${ONLINE}${NC}  ${GRIS}lic${NC} $lic_txt"
+        else
+            FR_TXT "  ${GRIS}IP${NC}  ${CIAN}${_loc}${NC}   ${GRIS}online${NC} ${VERDE}${ONLINE}${NC}   ${GRIS}lic${NC} $lic_txt"
+        fi
+        # Webmin solo si esta instalado (si no, no ensucia la cabecera)
+        local wm
+        wm=$(estado_webmin_min)
+        [[ -n "$wm" ]] && FR_TXT "  ${GRIS}Webmin${NC}  $wm"
+        FR_TXT "  $(estado_servicios_min)"
+    fi
     FR_BOT
     echo
 }
 
-
+# Estado de servicio: [ON] verde / [--] gris (compatible con cualquier terminal/fuente)
+svc_on(){ printf '%b' "${VERDE}[ON]${NC}"; }
+svc_off(){ printf '%b' "${GRIS}[--]${NC}"; }
 svc_dot(){
-    # svc_dot "prueba" -> ● o ○ coloreado
-    if eval "$1" >/dev/null 2>&1; then printf '%b' "${VERDE}●${NC}"; else printf '%b' "${GRIS}○${NC}"; fi
+    if eval "$1" >/dev/null 2>&1; then svc_on; else svc_off; fi
 }
 
 estado_servicios_min(){
-    # Una linea compacta para la cabecera
     local s=""
-    s+="SSH $(svc_dot 'pgrep -x sshd')"
-    s+="  Xray $(svc_dot 'pgrep -x xray')"
-    s+="  WG $(svc_dot 'systemctl is-active --quiet wg-quick@wg0')"
-    s+="  AG $(svc_dot 'adguard_activo 2>/dev/null || systemctl is-active --quiet AdGuardHome')"
-    s+="  ST $(svc_dot 'pgrep -f stunnel')"
-    s+="  CU $(svc_dot 'systemctl is-active --quiet vps-checkuser')"
+    s+="SSH$(svc_dot 'pgrep -x sshd')"
+    s+=" Xray$(svc_dot 'pgrep -x xray')"
+    s+=" WG$(svc_dot 'systemctl is-active --quiet wg-quick@wg0')"
+    s+=" AG$(svc_dot 'adguard_activo 2>/dev/null || systemctl is-active --quiet AdGuardHome')"
+    s+=" ST$(svc_dot 'pgrep -f stunnel')"
+    s+=" CU$(svc_dot 'systemctl is-active --quiet vps-checkuser')"
     printf '%s' "$s"
 }
 
-
 estado_webmin_min(){
-    if dpkg -l webmin >/dev/null 2>&1; then
-        if pgrep -f miniserv >/dev/null 2>&1; then echo -e "${VERDE}ACTIVO :10000${NC}"
-        else echo -e "${AMARILLO}INSTALADO (detenido)${NC}"; fi
+    # Vacio si no esta instalado (la cabecera no lo muestra).
+    # Rojo solo si esta instalado y caido.
+    if ! dpkg -l webmin >/dev/null 2>&1; then
+        printf ''
+        return 0
+    fi
+    if pgrep -f miniserv >/dev/null 2>&1; then
+        printf '%b' "${VERDE}ACTIVO :10000${NC}"
     else
-        echo -e "${ROJO}NO INSTALADO${NC}"
+        printf '%b' "${ROJO}DETENIDO${NC}"
     fi
 }
 
@@ -1544,11 +1617,12 @@ instalar_webmin(){
         ERR "Webmin quedo detenido. Proba con la opcion 2 (Estado / reiniciar) del menu."
     fi
     echo
-    local IP; IP=$(ip_publica)
     OK "Webmin instalado."
-    echo -e " Acceso  : ${VERDE}https://${IP}:10000${NC}"
+    ip_urls_acceso 10000 https
     echo -e " Usuario : ${VERDE}root${NC} (o cualquier usuario con sudo)"
-    echo -e " ${AMARILLO}Nota: si es una VM remota, acepta el aviso de certificado autofirmado.${NC}"
+    echo -e " ${AMARILLO}Nota: acepta el aviso de certificado autofirmado en el navegador.${NC}"
+    # invalidar cache de IP por si la red de la VM recien levanto
+    rm -f "$IP_CACHE_FILE" 2>/dev/null
     PAUSA
 }
 
@@ -3321,6 +3395,7 @@ menu_herramientas(){
         FR_OPT 1 "$(T t_global)" 4 "$(T t_autoupdate)"
         FR_OPT 2 "$(T t_automenu_on)" 5 "$(T t_checkuser)"
         FR_OPT 3 "$(T t_automenu_off)" 6 "$(T t_idioma)"
+        FR_OPT 7 "$(T t_ui_compact)" "" ""
         FR_OPT 0 "$(T t_volver)" "" ""
         FR_BOT
         PROMPT
@@ -3328,6 +3403,14 @@ menu_herramientas(){
             1) instalar_comando_global ;; 2) auto_menu ;; 3) quitar_auto_menu ;;
             4) auto_update ;; 5) menu_checkuser ;;
             6) rm -f /etc/vps-manager.lang; seleccionar_idioma; OK "Idioma: $IDIOMA / Language: $IDIOMA"; PAUSA ;;
+            7) if [[ -f /etc/vps-manager.ui ]] && grep -qx compact /etc/vps-manager.ui 2>/dev/null; then
+                   rm -f /etc/vps-manager.ui
+                   OK "UI normal (cabecera completa)."
+               else
+                   echo compact > /etc/vps-manager.ui
+                   OK "UI compacta activada (ideal para celular)."
+               fi
+               PAUSA ;;
             0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
         esac
     done
@@ -3770,12 +3853,10 @@ while true; do
     FR_OPT 1 "$(T t_usuarios)" 2 "$(T t_protocolos)"
     FR_OPT 3 "$(T t_seguridad)" 4 "$(T t_sistema)"
     FR_OPT 5 "$(T t_herramientas)" 6 "$(T t_webmin)"
-    FR_OPT 7 "$(T t_backup)" 8 "$(T t_diagnostico)"
-    FR_OPT 9 "$(T t_adblock)" "" ""
-    FR_TXT ""
-    FR_OPT 0 "$(T t_salir)" "" ""
+    FR_OPT 7 "$(T t_backup)" 8 "$(T t_adblock)"
+    FR_OPT 9 "$(T t_diagnostico)" 0 "$(T t_salir)"
     FR_BOT
-    echo -e "  ${GRIS}$(T t_servidor_id) ${VERDE}$(machine_hash)${GRIS}  ·  $(date '+%d/%m/%Y %H:%M')${NC}"
+    echo -e "  ${GRIS}$(machine_hash)  ·  $(date '+%d/%m %H:%M')${NC}"
     PROMPT
     case "$OP" in
         1) menu_usuarios ;;
@@ -3785,8 +3866,8 @@ while true; do
         5) menu_herramientas ;;
         6) menu_webmin ;;
         7) menu_backup ;;
-        8) diagnostico ;;
-        9) menu_adblock ;;
+        8) menu_adblock ;;
+        9) diagnostico ;;
         0) echo -e "${VERDE}Hasta luego!${NC}"; exit 0 ;;
         *) ERR "$(T t_opinv)"; sleep 1 ;;
     esac
