@@ -35,7 +35,7 @@ fi
 # Pone aca la URL de tu Worker de Cloudflare.
 # Vacio = el panel se niega a arrancar (modo produccion).
 # Para desarrollo local sin Worker: export GHOST_DEV=1 antes de ejecutar.
-LICENSE_URL=''
+LICENSE_URL='https://vps-licencias.jorgebarriosmpya.workers.dev'
 GRACE_SECS=259200                      # 72h de gracia si el servidor no responde
 LICENSE_CACHE='/etc/vps-license.cache'
 # REPO_RAW: cuando tengas tu GitHub, cambia la URL de abajo o usa
