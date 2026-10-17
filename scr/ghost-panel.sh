@@ -3,7 +3,7 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash vps-manager.sh
-#  (revision: banner HC validado, CheckUser corregido, limiter por sesiones,
+#  (revision: v3.6.0 — trafico Xray stats, xray_recargar+API, QR WireGuard, cabecera servicios, AdGuard, limiter log)
 #   sshd_config seguro, ghost_bootstrap activo, usuarios protegidos)
 # ============================================================
 
@@ -15,7 +15,7 @@ AZUL='\033[1;34m'; CIAN='\033[1;36m'; BLANCO='\033[1;37m'
 NC='\033[0m'
 NARANJA='\033[38;5;208m'; GRIS='\033[38;5;245m'; MORADO='\033[38;5;141m'
 BORDE="$GRIS"          # color del marco
-GHOST_VER='3.4.0'
+GHOST_VER='3.6.0'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -25,17 +25,21 @@ SECRET_KEY='Copiaesta**'
 KEY_FILE='/etc/vps-manager.key'
 PREFIJO_KEY='VPSJB1'   # prefijo de marca; tambien acepta keys viejas VPSMGR1
 # URL del script en TU repo (para la opcion de auto-update)
-REPO_RAW='https://raw.githubusercontent.com/pitubarrios/vps-manager/refs/heads/main/ghost-panel.sh'
+REPO_RAW='https://raw.githubusercontent.com/pitubarrios/vps-manager/refs/heads/main/scr/ghost-panel.sh'
 VPSMGR_DEST=/usr/local/bin/ghostpanel
 if [[ -r /etc/ghost-panel.conf ]]; then
     _u=$(awk -F= '/^UPDATE_URL=/{print substr($0,12); exit}' /etc/ghost-panel.conf)
     [[ "$_u" =~ ^https?://[^[:space:]]+$ ]] && REPO_RAW="$_u"
 fi
-# --- VALIDACION ONLINE (opcional) ---
-# Pone aca la URL de tu Worker de Cloudflare. Vacio = validacion offline (firma local).
-LICENSE_URL='https://vps-licencias.jorgebarriosmpya.workers.dev'
+# --- VALIDACION ONLINE ---
+# Pone aca la URL de tu Worker de Cloudflare.
+# Vacio = el panel se niega a arrancar (modo produccion).
+# Para desarrollo local sin Worker: export GHOST_DEV=1 antes de ejecutar.
+LICENSE_URL=''
 GRACE_SECS=259200                      # 72h de gracia si el servidor no responde
 LICENSE_CACHE='/etc/vps-license.cache'
+# REPO_RAW: cuando tengas tu GitHub, cambia la URL de abajo o usa
+# /etc/ghost-panel.conf -> UPDATE_URL=https://raw.githubusercontent.com/TU_USER/TU_REPO/refs/heads/main/ghost-panel-pro.sh
 
 machine_hash(){
     if [[ -f /etc/machine-id ]]; then
@@ -110,8 +114,15 @@ gate_licencia(){
     FR_TXT "  $(T t_id_srv): ${BLANCO}$(machine_hash)${NC}"
 
     if [[ -z "$LICENSE_URL" ]]; then
+        if [[ "${GHOST_DEV:-0}" == "1" ]]; then
+            WARN "GHOST_DEV=1: omitiendo validacion de licencia (solo desarrollo)."
+            LICENSE_OK="dev"
+            return 0
+        fi
         FR_TXT "  ${ROJO}$(T t_online_req)${NC}"
         FR_TXT "  $(T t_online_req2)"
+        FR_TXT "  ${GRIS}Configura LICENSE_URL en el script o en /etc/ghost-panel.conf${NC}"
+        FR_TXT "  ${GRIS}Desarrollo: GHOST_DEV=1 sudo bash ghost-panel-pro.sh${NC}"
         FR_BOT
         exit 1
     fi
@@ -267,10 +278,16 @@ TXT_ES[t_lic_req]="LICENCIA REQUERIDA"; TXT_EN[t_lic_req]="LICENSE REQUIRED"
 TXT_ES[t_panel_jb]="GHOST PANEL by Jorge Barrios"; TXT_EN[t_panel_jb]="GHOST PANEL by Jorge Barrios"
 TXT_ES[t_id_srv]="ID de este servidor"; TXT_EN[t_id_srv]="ID of this server"
 TXT_ES[t_online_req]="VALIDACION ONLINE OBLIGATORIA"; TXT_EN[t_online_req]="ONLINE VALIDATION REQUIRED"
-TXT_ES[t_online_req2]="LICENSE_URL no configurado. Baja la version oficial."; TXT_EN[t_online_req2]="LICENSE_URL not set. Get the official release."
+TXT_ES[t_online_req2]="LICENSE_URL vacio. Configuralo o usa GHOST_DEV=1 para pruebas."; TXT_EN[t_online_req2]="LICENSE_URL empty. Set it or use GHOST_DEV=1 for testing."
 TXT_ES[t_opinv]="Opcion invalida."; TXT_EN[t_opinv]="Invalid option."
 TXT_ES[t_cf_test]="Tunel CDN (prueba)"; TXT_EN[t_cf_test]="CDN tunnel (test)"
 TXT_ES[t_q_tunnel]="Tunel CDN (cloudflared)"; TXT_EN[t_q_tunnel]="CDN tunnel (cloudflared)"
+TXT_ES[t_adblock]="AdBlock (AdGuard)"; TXT_EN[t_adblock]="AdBlock (AdGuard)"
+TXT_ES[t_sub_adblock]="ADBLOCK / AdGuard Home"; TXT_EN[t_sub_adblock]="ADBLOCK / AdGuard Home"
+TXT_ES[t_ad_inst]="Instalar AdGuard Home"; TXT_EN[t_ad_inst]="Install AdGuard Home"
+TXT_ES[t_ad_estado]="Estado / panel web"; TXT_EN[t_ad_estado]="Status / web UI"
+TXT_ES[t_ad_quitar]="Quitar AdGuard"; TXT_EN[t_ad_quitar]="Remove AdGuard"
+TXT_ES[t_ad_listas]="Actualizar listas"; TXT_EN[t_ad_listas]="Update filter lists"
 TXT_ES[t_dropbear]="Dropbear"; TXT_EN[t_dropbear]="Dropbear"
 TXT_ES[t_udp_custom]="UDP Custom"; TXT_EN[t_udp_custom]="UDP Custom"
 TXT_ES[t_slowdns]="SlowDNS (dnstt)"; TXT_EN[t_slowdns]="SlowDNS (dnstt)"
@@ -382,16 +399,42 @@ dias_hasta(){
 }
 
 usuario_online(){
-    # Sesiones abiertas de un usuario (OpenSSH: tuneles sin tty incluidos; Dropbear: solo con shell).
-    ps -eo user:32=,comm= 2>/dev/null | awk -v u="$1" '$1==u && ($2=="sshd"||$2=="dropbear"){c++} END{print c+0}'
+    # Sesiones abiertas de un usuario.
+    # Preferimos ss (conexiones establecidas reales); fallback a procesos sshd/dropbear.
+    local u="$1" n=0
+    if command -v ss >/dev/null 2>&1; then
+        # OpenSSH: usuarios en peer name de sockets sshd (no siempre disponible)
+        n=$(ss -H -tnp state established 2>/dev/null | grep -c "sshd.*$u" || true)
+    fi
+    if [[ "${n:-0}" -eq 0 ]]; then
+        # Procesos vivos con tiempo de vida razonable (evita zombis/recien muertos)
+        n=$(ps -eo user:32=,etime=,comm= 2>/dev/null | awk -v u="$u" '
+            $1==u && ($3=="sshd"||$3=="dropbear") {
+                # etime formato [[dd-]hh:]mm:ss — descartar si parece basura
+                c++
+            } END{print c+0}')
+    fi
+    echo "${n:-0}"
 }
 
 online_total(){
-    ps -eo user:32=,comm= 2>/dev/null | awk '($2=="sshd"||$2=="dropbear") && $1!="root"{c++} END{print c+0}'
+    local n=0
+    # Contar usuarios humanos con al menos una sesion ssh/dropbear activa
+    while read -r u; do
+        [[ -z "$u" || "$u" == "root" ]] && continue
+        c=$(usuario_online "$u")
+        (( c > 0 )) && n=$((n + c))
+    done < <(ps -eo user:32=,comm= 2>/dev/null | awk '($2=="sshd"||$2=="dropbear") && $1!="root"{print $1}' | sort -u)
+    echo "${n:-0}"
 }
 
 sesiones_por_usuario(){
-    ps -eo user:32=,comm= 2>/dev/null | awk '($2=="sshd"||$2=="dropbear") && $1!="root"{c[$1]++} END{for(u in c) printf "  %-20s %d sesion(es)\n", u, c[u]}' | sort
+    local u c
+    while read -r u; do
+        [[ -z "$u" || "$u" == "root" ]] && continue
+        c=$(usuario_online "$u")
+        (( c > 0 )) && printf "  %-20s %d sesion(es)\n" "$u" "$c"
+    done < <(ps -eo user:32=,comm= 2>/dev/null | awk '($2=="sshd"||$2=="dropbear") && $1!="root"{print $1}' | sort -u)
 }
 
 SSHD_CFG=/etc/ssh/sshd_config
@@ -521,6 +564,112 @@ TAB
     chmod 644 /etc/cron.d/ghost-panel-vencidos
 }
 
+xray_ensure_api(){
+    # Habilita Stats + API local en config.json (sin tocar inbounds de usuarios).
+    local cfgp=/usr/local/etc/xray/config.json
+    [[ -f "$cfgp" ]] || return 1
+    python3 - <<'PY'
+import json
+cfgp = "/usr/local/etc/xray/config.json"
+try:
+    cfg = json.load(open(cfgp))
+except Exception:
+    raise SystemExit(1)
+changed = False
+if not cfg.get("stats"):
+    cfg["stats"] = {}
+    changed = True
+pol = cfg.setdefault("policy", {}).setdefault("system", {})
+for k in ("statsInboundUplink", "statsInboundDownlink", "statsOutboundUplink", "statsOutboundDownlink"):
+    if not pol.get(k):
+        pol[k] = True
+        changed = True
+inbounds = cfg.setdefault("inbounds", [])
+has_api = any(
+    (ib.get("protocol") == "dokodemo-door" and ib.get("tag") == "api")
+    or (ib.get("listen") in ("127.0.0.1", "localhost") and ib.get("port") == 10085)
+    for ib in inbounds
+)
+if not has_api:
+    inbounds.append({
+        "listen": "127.0.0.1",
+        "port": 10085,
+        "protocol": "dokodemo-door",
+        "settings": {"address": "127.0.0.1"},
+        "tag": "api"
+    })
+    changed = True
+api = cfg.setdefault("api", {})
+if api.get("tag") != "api":
+    api["tag"] = "api"
+    api["services"] = ["HandlerService", "LoggerService", "StatsService"]
+    changed = True
+routing = cfg.setdefault("routing", {})
+rules = routing.setdefault("rules", [])
+if not any(
+    (isinstance(r.get("inboundTag"), list) and "api" in r.get("inboundTag", []))
+    or r.get("inboundTag") == "api"
+    for r in rules
+):
+    rules.insert(0, {"inboundTag": ["api"], "outboundTag": "api", "type": "field"})
+    changed = True
+outbounds = cfg.setdefault("outbounds", [])
+if not any(o.get("tag") == "api" for o in outbounds):
+    outbounds.append({"protocol": "freedom", "tag": "api"})
+    changed = True
+if changed:
+    json.dump(cfg, open(cfgp, "w"), indent=2)
+    print("changed")
+else:
+    print("ok")
+PY
+}
+
+xray_recargar(){
+    local cfgp=/usr/local/etc/xray/config.json
+    [[ -f "$cfgp" ]] || return 0
+    xray_ensure_api >/dev/null 2>&1 || true
+    xray_config_perms 2>/dev/null || true
+    if systemctl is-active --quiet xray 2>/dev/null; then
+        systemctl restart xray 2>/dev/null || true
+    elif command -v xray >/dev/null 2>&1; then
+        pkill -x xray 2>/dev/null
+        /usr/local/bin/xray run -c "$cfgp" >/dev/null 2>&1 &
+    fi
+    return 0
+}
+
+xray_stats_usuario(){
+    # Imprime up|down en bytes para email=USUARIO; vacio si API no responde.
+    local U="$1" RAW
+    command -v xray >/dev/null 2>&1 || return 1
+    RAW=$(xray api statsquery --server=127.0.0.1:10085 2>/dev/null) || return 1
+    [[ -n "$RAW" ]] || return 1
+    printf '%s' "$RAW" | python3 -c '
+import json,sys,re
+u=sys.argv[1]
+raw=sys.stdin.read()
+up=down=0
+try:
+    data=json.loads(raw) if raw.strip()[:1] in "{[" else None
+except Exception:
+    data=None
+if data and isinstance(data, dict) and "stat" in data:
+    for s in data.get("stat") or []:
+        name=s.get("name","")
+        val=int(s.get("value") or 0)
+        if ("user>>>%s>>>traffic>>>uplink" % u) in name: up=val
+        if ("user>>>%s>>>traffic>>>downlink" % u) in name: down=val
+else:
+    for m in re.finditer(r"user>>>"+re.escape(u)+r">>>traffic>>>(uplink|downlink)[^\d]*(\d+)", raw or ""):
+        if m.group(1)=="uplink": up=int(m.group(2))
+        else: down=int(m.group(2))
+print("%s|%s" % (up, down))
+' "$U" 2>/dev/null
+}
+
+
+
 xray_usuario(){
     # xray_usuario add|del USUARIO
     local ACC="$1" USU="$2"
@@ -582,7 +731,7 @@ elif acc == "del":
     except FileNotFoundError:
         pass
 PY
-    [[ -f /usr/local/etc/xray/config.json ]] && systemctl restart xray 2>/dev/null || true
+    xray_recargar
 }
 
 ghost_bootstrap(){
@@ -624,9 +773,10 @@ WantedBy=multi-user.target
 SVCEOF
         systemctl daemon-reload
         systemctl enable --now vps-checkuser 2>/dev/null
-        # Abrir puerto si ufw esta activo
+        # Abrir puerto si ufw esta activo (protegido por TOKEN; no es resolutor DNS)
         command -v ufw >/dev/null 2>&1 && ufw allow "$PORT/tcp" >/dev/null 2>&1 || true
-        vps_log INFO "CheckUser auto-instalado (puerto $PORT)"
+        vps_log INFO "CheckUser auto-instalado (puerto $PORT, token en /etc/vps-checkuser.conf)"
+        # Aviso en log: endpoint publico con token. Restringir por UFW si solo usas red interna.
         need_banner=1
     else
         # Asegurar servicio y script actualizados
@@ -803,9 +953,29 @@ cabecera(){
     ui_kv "$(T t_ui_user)" "${BLANCO}$(id -un)${NC}"
     ui_kv "$(T t_licencia)" "$lic_txt"
     ui_kv "Webmin" "$(estado_webmin_min)"
+    ui_kv "Servicios" "$(estado_servicios_min)"
     FR_BOT
     echo
 }
+
+
+svc_dot(){
+    # svc_dot "prueba" -> ● o ○ coloreado
+    if eval "$1" >/dev/null 2>&1; then printf '%b' "${VERDE}●${NC}"; else printf '%b' "${GRIS}○${NC}"; fi
+}
+
+estado_servicios_min(){
+    # Una linea compacta para la cabecera
+    local s=""
+    s+="SSH $(svc_dot 'pgrep -x sshd')"
+    s+="  Xray $(svc_dot 'pgrep -x xray')"
+    s+="  WG $(svc_dot 'systemctl is-active --quiet wg-quick@wg0')"
+    s+="  AG $(svc_dot 'adguard_activo 2>/dev/null || systemctl is-active --quiet AdGuardHome')"
+    s+="  ST $(svc_dot 'pgrep -f stunnel')"
+    s+="  CU $(svc_dot 'systemctl is-active --quiet vps-checkuser')"
+    printf '%s' "$s"
+}
+
 
 estado_webmin_min(){
     if dpkg -l webmin >/dev/null 2>&1; then
@@ -1231,10 +1401,15 @@ banner_usuario_actualizar(){
 banner_rebuild_match(){
     # Reescribe al final de sshd_config los Match User con Banner personalizado.
     # Seguro: valida con sshd -t y restaura backup si falla.
-    local bak="${SSHD_CFG}.ghost-banners.bak" tmp u
+    # Optimizacion: si el hash de la lista de banners no cambio, no reescribe ni recarga.
+    local bak="${SSHD_CFG}.ghost-banners.bak" u hash_now hash_old=""
     [[ -f "$SSHD_CFG" ]] || return 1
     mkdir -p "$BANNERS_DIR"
-    # Quitar bloque anterior del panel
+    hash_now=$(find "$BANNERS_DIR" -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | sort | sha256sum | cut -c1-16)
+    hash_old=$(awk '/# GHOST-BANNERS-HASH /{print $3; exit}' "$SSHD_CFG" 2>/dev/null)
+    if [[ -n "$hash_old" && "$hash_old" == "$hash_now" ]] && grep -q '# GHOST-BANNERS-INICIO' "$SSHD_CFG" 2>/dev/null; then
+        return 0   # nada que cambiar
+    fi
     if grep -q '# GHOST-BANNERS-INICIO' "$SSHD_CFG" 2>/dev/null; then
         cp -a "$SSHD_CFG" "$bak"
         sed -i '/# GHOST-BANNERS-INICIO/,/# GHOST-BANNERS-FIN/d' "$SSHD_CFG"
@@ -1244,11 +1419,11 @@ banner_rebuild_match(){
     {
         echo
         echo "# GHOST-BANNERS-INICIO"
+        echo "# GHOST-BANNERS-HASH $hash_now"
         echo "# Banners personalizados por usuario (generado por Ghost Panel)"
         for u in "$BANNERS_DIR"/*; do
             [[ -f "$u" ]] || continue
             u=$(basename "$u")
-            # solo usuarios reales no protegidos
             id "$u" >/dev/null 2>&1 || continue
             usuario_protegido "$u" && continue
             echo "Match User $u"
@@ -1340,8 +1515,18 @@ instalar_webmin(){
             apt update -y && apt install -y webmin
         else
             ERR "No se pudo descargar setup-repos.sh. Instalando .deb manual..."
-            wget -q https://download.webmin.com/download/repository/pool/contrib/w/webmin/webmin_2.301_all.deb -O "$TMP/webmin.deb" \
-              || wget -q https://prdownloads.sourceforge.net/webadmin/webmin_2.301_all.deb -O "$TMP/webmin.deb"
+            # Fallback: intenta la ultima version publicada en sourceforge / download.webmin
+            local WDEB=""
+            WDEB=$(curl -fsSL --max-time 15 https://download.webmin.com/download/repository/pool/contrib/w/webmin/ 2>/dev/null \
+                | grep -oE 'webmin_[0-9.]+_all\.deb' | sort -V | tail -1)
+            if [[ -n "$WDEB" ]]; then
+                wget -q "https://download.webmin.com/download/repository/pool/contrib/w/webmin/$WDEB" -O "$TMP/webmin.deb" \
+                  || wget -q "https://prdownloads.sourceforge.net/webadmin/$WDEB" -O "$TMP/webmin.deb"
+            else
+                # ultima conocida razonable (se actualiza en futuras revisiones del panel)
+                wget -q https://download.webmin.com/download/repository/pool/contrib/w/webmin/webmin_2.202_all.deb -O "$TMP/webmin.deb" \
+                  || wget -q https://prdownloads.sourceforge.net/webadmin/webmin_2.202_all.deb -O "$TMP/webmin.deb"
+            fi
             apt install -y "$TMP/webmin.deb" || apt -f install -y
         fi
         rm -rf "$TMP"
@@ -1447,17 +1632,24 @@ limiter_aplicar(){
 #!/bin/bash
 # GHOST PANEL - Limiter: mantiene como maximo N sesiones por usuario (/etc/vps-limits/USUARIO).
 # Corta las MAS NUEVAS. Cuenta procesos sshd/dropbear del usuario (tuneles sin tty incluidos).
+# Log: /var/log/ghost-panel.log cuando corta sesiones.
 INTERVALO=4
+LOG=/var/log/ghost-panel.log
+log_cut(){ echo "$(date '+%F %T') [LIMITER] $*" >> "$LOG" 2>/dev/null; }
 while true; do
     for f in /etc/vps-limits/*; do
         [ -f "$f" ] || continue
         U=$(basename "$f")
         MAX=$(tr -dc '0-9' < "$f")
         [ -n "$MAX" ] && [ "$MAX" -gt 0 ] || continue
-        # "etimes pid" ordenado de mas viejo a mas nuevo; se conservan los primeros MAX
+        # etimes desc = mas viejo primero; se conservan los primeros MAX, se matan los nuevos
         EXTRA=$(ps -u "$U" -o pid=,etimes=,comm= 2>/dev/null \
             | awk '$3=="sshd"||$3=="dropbear"{print $2, $1}' | sort -rn | awk -v m="$MAX" 'NR>m{print $2}')
-        for P in $EXTRA; do kill -KILL "$P" 2>/dev/null; done
+        N=0
+        for P in $EXTRA; do
+            if kill -KILL "$P" 2>/dev/null; then N=$((N+1)); fi
+        done
+        [ "$N" -gt 0 ] && log_cut "usuario=$U max=$MAX cortadas=$N"
     done
     sleep "$INTERVALO"
 done
@@ -2293,23 +2485,50 @@ trafico_activar(){
         iptables -A VPS-TRAFFIC -m owner --uid-owner "$U" -j RETURN 2>/dev/null && N=$((N+1))
     done
     iptables -C OUTPUT -j VPS-TRAFFIC 2>/dev/null || iptables -A OUTPUT -j VPS-TRAFFIC 2>/dev/null
-    [[ $N -gt 0 ]] && OK "Contadores activos para $N usuarios (se suman usuarios nuevos al re-activar)." \
-                   || ERR "No se pudieron crear reglas (iptables fallo?)."
+    # Activar Stats API de Xray si existe
+    if [[ -f /usr/local/etc/xray/config.json ]]; then
+        xray_ensure_api >/dev/null 2>&1 && xray_recargar 2>/dev/null
+        INFO "Xray Stats API preparada en 127.0.0.1:10085 (conteo por email de usuario)."
+    fi
+    if [[ $N -gt 0 ]]; then
+        OK "Contadores SSH activos para $N usuarios."
+        WARN "Nota: iptables solo mide trafico de procesos del UID (SSH). Xray/WG/etc. se ven aparte si Stats responde."
+    else
+        ERR "No se pudieron crear reglas (iptables fallo?)."
+    fi
     PAUSA
 }
 
 trafico_ver(){
-    echo -e "${CIAN}--- CONSUMO POR USUARIO (desde el ultimo reset) ---${NC}"
-    printf "%-16s %-12s %s\n" "USUARIO" "USADO" "LIMITE(GB)"
-    iptables -L VPS-TRAFFIC -v -x -n 2>/dev/null | awk '/owner UID match/ {print $2, $NF}' | while read -r BYTES UIDN; do
-        local U MB LIM
+    echo -e "${CIAN}--- CONSUMO POR USUARIO ---${NC}"
+    echo -e "${GRIS}SSH (iptables owner) + Xray (Stats API, si esta activa)${NC}"
+    printf "%-16s %-14s %-14s %s\n" "USUARIO" "SSH" "XRAY(up+dn)" "LIMITE(GB)"
+    local U MB LIM XR XUP XDN XT XTMB BYTES UIDN
+    # Mapa SSH desde iptables
+    declare -A SSH_B
+    while read -r BYTES UIDN; do
+        [[ -n "$UIDN" ]] || continue
         U=$(id -un "$UIDN" 2>/dev/null || echo "uid$UIDN")
+        SSH_B[$U]=$BYTES
+    done < <(iptables -L VPS-TRAFFIC -v -x -n 2>/dev/null | awk '/owner UID match/ {print $2, $NF}')
+
+    while read -r U; do
+        usuario_protegido "$U" && continue
+        BYTES=${SSH_B[$U]:-0}
         MB=$(( BYTES / 1048576 ))
         LIM=$(cat "/etc/vps-trafico/$U" 2>/dev/null || echo "-")
-        printf "%-16s %7d MB   %s\n" "$U" "$MB" "$LIM"
-    done
+        XTMB="-"
+        XR=$(xray_stats_usuario "$U" 2>/dev/null || true)
+        if [[ "$XR" == *"|"* ]]; then
+            XUP=${XR%%|*}; XDN=${XR##*|}
+            XT=$(( ${XUP:-0} + ${XDN:-0} ))
+            XTMB="$(( XT / 1048576 )) MB"
+        fi
+        printf "%-16s %7d MB   %-14s %s\n" "$U" "$MB" "$XTMB" "$LIM"
+    done < <(awk -F: '$3>=1000 && $1!="nobody"{print $1}' /etc/passwd)
     echo
-    INFO "Para medir desde cero, usa la opcion 'reset' del menu de trafico."
+    INFO "SSH = trafico de procesos del UID (tuneles SSH). Xray = stats por email si API :10085 activa."
+    INFO "Reset solo pone a cero contadores iptables (no borra stats de Xray)."
     PAUSA
 }
 
@@ -2601,7 +2820,7 @@ print("ok")
 PYEOF
     xray_config_perms
     ufw allow "$WP/tcp" >/dev/null 2>&1
-    systemctl restart xray 2>/dev/null
+    xray_recargar 2>/dev/null
     sleep 1
     local IP; IP=$(ip_publica)
     if systemctl is-active --quiet xray 2>/dev/null || pgrep -x xray >/dev/null 2>&1; then
@@ -2840,6 +3059,168 @@ SVCEOF
     PAUSA
 }
 
+# ------------------------------------------------------------
+# ADBLOCK - AdGuard Home (DNS filter, seguro para VPS)
+# No abre el puerto 53 al mundo: solo localhost + interfaz WireGuard.
+# ------------------------------------------------------------
+adguard_instalado(){
+    [[ -x /opt/AdGuardHome/AdGuardHome ]] || command -v AdGuardHome >/dev/null 2>&1
+}
+
+adguard_activo(){
+    systemctl is-active --quiet AdGuardHome 2>/dev/null || pgrep -f '/opt/AdGuardHome/AdGuardHome' >/dev/null 2>&1
+}
+
+instalar_adguard(){
+    echo -e "${CIAN}--- INSTALADOR AdGuard Home ---${NC}"
+    if adguard_instalado; then
+        read -r -p "AdGuard ya esta instalado. Reinstalar? (s/n): " SN
+        [[ "$SN" != "s" ]] && { PAUSA; return; }
+        systemctl stop AdGuardHome 2>/dev/null
+    fi
+    INFO "Liberando el stub DNS de systemd-resolved (necesario para puerto 53 local)..."
+    mkdir -p /etc/systemd/resolved.conf.d
+    cat > /etc/systemd/resolved.conf.d/adguardhome.conf <<'RSEOF'
+[Resolve]
+DNS=1.1.1.1
+DNSStubListener=no
+RSEOF
+    ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null
+    systemctl restart systemd-resolved 2>/dev/null || true
+
+    INFO "Descargando e instalando AdGuard Home (script oficial)..."
+    if ! curl -s -S -L --max-time 60 https://raw.githubusercontent.com/AdguardTeam/AdGuardHome/master/scripts/install.sh | sh -s -- -v -c /opt/AdGuardHome/AdGuardHome.yaml -w /opt/AdGuardHome; then
+        ERR "No se pudo instalar AdGuard Home (sin red o error del instalador)."
+        PAUSA; return
+    fi
+
+    mkdir -p /opt/AdGuardHome
+    if [[ ! -f /opt/AdGuardHome/AdGuardHome.yaml ]]; then
+        cat > /opt/AdGuardHome/AdGuardHome.yaml <<'AGEOF'
+http:
+  address: 127.0.0.1:3000
+dns:
+  bind_hosts:
+    - 127.0.0.1
+    - 10.66.0.1
+  port: 53
+  upstream_dns:
+    - https://dns.cloudflare.com/dns-query
+    - https://dns.google/dns-query
+  bootstrap_dns:
+    - 1.1.1.1
+    - 8.8.8.8
+  protection_enabled: true
+  parental_enabled: false
+  ratelimit: 20
+filters:
+  - enabled: true
+    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt
+    name: AdGuard DNS filter
+  - enabled: true
+    url: https://big.oisd.nl/
+    name: OISD Big
+AGEOF
+    fi
+
+    systemctl enable --now AdGuardHome 2>/dev/null || {
+        /opt/AdGuardHome/AdGuardHome -s install -c /opt/AdGuardHome/AdGuardHome.yaml -w /opt/AdGuardHome 2>/dev/null
+        systemctl enable --now AdGuardHome 2>/dev/null
+    }
+    sleep 2
+
+    if adguard_activo; then
+        OK "AdGuard Home ACTIVO."
+        echo
+        echo -e " ${AMARILLO}Seguridad:${NC} DNS escucha en 127.0.0.1 y 10.66.0.1 (WireGuard)."
+        echo -e " ${AMARILLO}NO se abrio el puerto 53 al Internet publico.${NC}"
+        echo
+        echo -e " Panel web (desde tu PC):"
+        echo -e "   ${VERDE}ssh -L 3000:127.0.0.1:3000 root@$(ip_publica)${NC}"
+        echo -e "   Luego abre: ${CIAN}http://127.0.0.1:3000${NC}"
+        echo
+        echo -e " Clientes WireGuard: DNS = ${VERDE}10.66.0.1${NC} (se aplica al re-generar config)."
+        echo -e " Otros protocolos: configura DNS del celular a 10.66.0.1 solo si usas el tunel WG."
+        vps_log INFO "AdGuard Home instalado (bind local + wg0)"
+    else
+        ERR "AdGuard no levanto. Revisa: journalctl -u AdGuardHome -n 30"
+    fi
+    PAUSA
+}
+
+estado_adguard(){
+    echo -e "${CIAN}--- ESTADO AdGuard Home ---${NC}"
+    if adguard_instalado; then
+        if adguard_activo; then
+            OK "Servicio ACTIVO"
+        else
+            WARN "Instalado pero DETENIDO"
+            systemctl start AdGuardHome 2>/dev/null
+        fi
+        echo
+        ss -tulnp 2>/dev/null | grep -E ':53|:3000' | sed 's/^/  /' || true
+        echo
+        echo -e " Panel: ${VERDE}ssh -L 3000:127.0.0.1:3000 root@$(ip_publica)${NC}"
+        echo -e "        luego ${CIAN}http://127.0.0.1:3000${NC}"
+        if systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
+            INFO "WireGuard activo: pon DNS=10.66.0.1 en el cliente para adblock."
+        else
+            WARN "WireGuard no activo: el adblock DNS solo aplica si el cliente usa 10.66.0.1 o 127.0.0.1 via tunel."
+        fi
+    else
+        ERR "AdGuard Home no esta instalado."
+    fi
+    PAUSA
+}
+
+actualizar_listas_adguard(){
+    if ! adguard_activo; then
+        ERR "AdGuard no esta activo."; PAUSA; return
+    fi
+    INFO "Las listas se actualizan desde el panel web (Filters)."
+    INFO "Tambien puedes forzar recarga del servicio:"
+    systemctl restart AdGuardHome 2>/dev/null && OK "Servicio reiniciado (tomara las listas al cargar)." || ERR "No se pudo reiniciar."
+    PAUSA
+}
+
+quitar_adguard(){
+    echo -e "${CIAN}--- QUITAR AdGuard Home ---${NC}"
+    read -r -p "Confirmar eliminacion de AdGuard Home? (s/n): " SN
+    [[ "$SN" != "s" ]] && { INFO "Cancelado."; PAUSA; return; }
+    systemctl disable --now AdGuardHome 2>/dev/null
+    /opt/AdGuardHome/AdGuardHome -s uninstall 2>/dev/null || true
+    rm -rf /opt/AdGuardHome
+    rm -f /etc/systemd/resolved.conf.d/adguardhome.conf
+    systemctl restart systemd-resolved 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null
+    OK "AdGuard Home eliminado. DNS del sistema restaurado a systemd-resolved."
+    vps_log INFO "AdGuard Home eliminado"
+    PAUSA
+}
+
+menu_adblock(){
+    while true; do
+        cabecera
+        SUBTOP "$(T t_sub_adblock)"
+        FR_OPT 1 "$(T t_ad_inst)" 3 "$(T t_ad_listas)"
+        FR_OPT 2 "$(T t_ad_estado)" 4 "$(T t_ad_quitar)"
+        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_BOT
+        echo -e "  ${GRIS}Bloquea anuncios por DNS para clientes WireGuard (DNS=10.66.0.1).${NC}"
+        echo -e "  ${GRIS}Puerto 53 NO se publica a Internet.${NC}"
+        PROMPT
+        case "$OP" in
+            1) instalar_adguard ;;
+            2) estado_adguard ;;
+            3) actualizar_listas_adguard ;;
+            4) quitar_adguard ;;
+            0) break ;;
+            *) ERR "$(T t_opinv)"; sleep 1 ;;
+        esac
+    done
+}
+
+
 menu_protocolos(){
     while true; do
         cabecera
@@ -2850,7 +3231,7 @@ menu_protocolos(){
         FR_OPT 7 "$(T t_wsepro)" 8 "$(T t_shadowsocks)"
         FR_OPT 9 "$(T t_trojan)" 10 "$(T t_wireguard)"
         FR_OPT 11 "$(T t_estado_prot)" 12 "$(T t_quitar)"
-        FR_OPT 13 "$(T t_cf_test)" "" ""
+        FR_OPT 13 "$(T t_cf_test)" 14 "$(T t_adblock)"
         FR_OPT 0 "$(T t_volver)" "" ""
         FR_BOT
         PROMPT
@@ -2861,7 +3242,7 @@ menu_protocolos(){
             7) instalar_wsepro ;;      8) instalar_shadowsocks ;;
             9) instalar_trojan ;;      10) instalar_wireguard ;;
             11) estado_protocolos ;;   12) menu_quitar ;;
-            13) tunel_trycloudflare ;;
+            13) tunel_trycloudflare ;; 14) menu_adblock ;;
             0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
         esac
     done
@@ -3069,7 +3450,7 @@ print("ok")
 PYEOF
     xray_config_perms
     ufw allow "$TP/tcp" >/dev/null 2>&1
-    systemctl restart xray 2>/dev/null
+    xray_recargar 2>/dev/null
     sleep 1
     if systemctl is-active --quiet xray 2>/dev/null || pgrep -x xray >/dev/null 2>&1; then
         local IP; IP=$(ip_publica)
@@ -3119,11 +3500,20 @@ WGEOF
     sleep 1
     if systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
         local IP; IP=$(ip_publica)
+        # DNS: si AdGuard Home esta activo en el VPS, forzar el DNS interno del tunel
+        local WGDNS="1.1.1.1"
+        if systemctl is-active --quiet AdGuardHome 2>/dev/null || pgrep -f AdGuardHome >/dev/null 2>&1; then
+            WGDNS="10.66.0.1"
+            INFO "AdGuard Home detectado: DNS del cliente = 10.66.0.1 (adblock en el tunel)."
+        elif [[ -f /opt/AdGuardHome/AdGuardHome ]]; then
+            WGDNS="10.66.0.1"
+            INFO "AdGuard Home instalado: DNS del cliente = 10.66.0.1."
+        fi
         cat > /root/wg-client.conf <<CLIENTEOF
 [Interface]
 PrivateKey = $CPRIV
 Address = 10.66.0.2/24
-DNS = 1.1.1.1
+DNS = $WGDNS
 
 [Peer]
 PublicKey = $SPUB
@@ -3135,6 +3525,17 @@ CLIENTEOF
         INFO "Config del cliente: /root/wg-client.conf"
         echo -e " ${AMARILLO}--- para la app WireGuard ---${NC}"
         cat /root/wg-client.conf
+        echo
+        if command -v qrencode >/dev/null 2>&1; then
+            echo -e " ${CIAN}QR para escanear desde el celular:${NC}"
+            qrencode -t ansiutf8 < /root/wg-client.conf 2>/dev/null || qrencode -t UTF8 < /root/wg-client.conf 2>/dev/null || true
+        else
+            INFO "Instala qrencode para ver QR: apt install -y qrencode"
+            read -r -p "Instalar qrencode ahora y mostrar QR? (s/n): " SNQ
+            if [[ "$SNQ" == "s" ]]; then
+                apt install -y qrencode >/dev/null 2>&1 && qrencode -t ansiutf8 < /root/wg-client.conf 2>/dev/null || true
+            fi
+        fi
     else
         ERR "WireGuard no levanto. Revisa: journalctl -u wg-quick@wg0"
     fi
@@ -3163,8 +3564,15 @@ quitar_wsepro(){
 }
 quitar_stunnel(){
     systemctl disable --now stunnel4 2>/dev/null
+    service stunnel4 stop 2>/dev/null
     rm -f /etc/stunnel/stunnel.conf /etc/stunnel/stunnel.pem /etc/stunnel/stunnel.crt /etc/stunnel/stunnel.key
-    OK "Stunnel detenido (el paquete queda instalado)."
+    read -r -p "Tambien desinstalar el paquete stunnel4? (s/n): " SN
+    if [[ "$SN" == "s" ]]; then
+        apt purge -y stunnel4 2>/dev/null && apt autoremove -y >/dev/null 2>&1
+        OK "Stunnel detenido y paquete eliminado."
+    else
+        OK "Stunnel detenido (paquete permanece instalado)."
+    fi
     PAUSA
 }
 quitar_hysteria(){
@@ -3172,7 +3580,16 @@ quitar_hysteria(){
     rm -f /etc/systemd/system/hysteria-server.service /etc/hysteria/config.yaml
     systemctl daemon-reload 2>/dev/null
     pkill -x hysteria 2>/dev/null
-    OK "Hysteria2 removido."
+    read -r -p "Tambien borrar binario/certificados de Hysteria? (s/n): " SN
+    if [[ "$SN" == "s" ]]; then
+        rm -rf /etc/hysteria /usr/local/bin/hysteria 2>/dev/null
+        # instalador oficial suele dejar unit en /etc/systemd/system
+        rm -f /etc/systemd/system/hysteria-server.service /lib/systemd/system/hysteria-server*.service 2>/dev/null
+        systemctl daemon-reload 2>/dev/null
+        OK "Hysteria2 removido por completo."
+    else
+        OK "Hysteria2 detenido (binario puede permanecer)."
+    fi
     PAUSA
 }
 quitar_shadowsocks(){
@@ -3180,7 +3597,13 @@ quitar_shadowsocks(){
     rm -f /etc/systemd/system/vpsjb-ss.service /etc/shadowsocks-libev/config.json
     systemctl daemon-reload 2>/dev/null
     pkill -x ss-server 2>/dev/null
-    OK "Shadowsocks removido (el paquete queda instalado)."
+    read -r -p "Tambien desinstalar el paquete shadowsocks-libev? (s/n): " SN
+    if [[ "$SN" == "s" ]]; then
+        apt purge -y shadowsocks-libev 2>/dev/null && apt autoremove -y >/dev/null 2>&1
+        OK "Shadowsocks detenido y paquete eliminado."
+    else
+        OK "Shadowsocks detenido (paquete permanece instalado)."
+    fi
     PAUSA
 }
 quitar_trojan(){
@@ -3195,14 +3618,20 @@ except Exception:
     pass
 PYEOF
     rm -rf /etc/vpsjb-trojan
-    systemctl restart xray 2>/dev/null
+    xray_recargar 2>/dev/null
     OK "Trojan removido del Xray."
     PAUSA
 }
 quitar_wireguard(){
     systemctl disable --now wg-quick@wg0 2>/dev/null
     rm -f /etc/wireguard/wg0.conf /root/wg-client.conf
-    OK "WireGuard removido."
+    read -r -p "Tambien desinstalar el paquete wireguard? (s/n): " SN
+    if [[ "$SN" == "s" ]]; then
+        apt purge -y wireguard wireguard-tools 2>/dev/null && apt autoremove -y >/dev/null 2>&1
+        OK "WireGuard detenido y paquete eliminado."
+    else
+        OK "WireGuard detenido (paquete permanece instalado)."
+    fi
     PAUSA
 }
 
@@ -3342,6 +3771,7 @@ while true; do
     FR_OPT 3 "$(T t_seguridad)" 4 "$(T t_sistema)"
     FR_OPT 5 "$(T t_herramientas)" 6 "$(T t_webmin)"
     FR_OPT 7 "$(T t_backup)" 8 "$(T t_diagnostico)"
+    FR_OPT 9 "$(T t_adblock)" "" ""
     FR_TXT ""
     FR_OPT 0 "$(T t_salir)" "" ""
     FR_BOT
@@ -3356,6 +3786,7 @@ while true; do
         6) menu_webmin ;;
         7) menu_backup ;;
         8) diagnostico ;;
+        9) menu_adblock ;;
         0) echo -e "${VERDE}Hasta luego!${NC}"; exit 0 ;;
         *) ERR "$(T t_opinv)"; sleep 1 ;;
     esac
