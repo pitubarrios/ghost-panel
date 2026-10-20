@@ -2,12 +2,13 @@
 # ============================================================
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
-#  Uso:  sudo bash vps-manager.sh
-#  (revision: v3.6.0 — trafico Xray stats, xray_recargar+API, QR WireGuard, cabecera servicios, AdGuard, limiter log)
-#   sshd_config seguro, ghost_bootstrap activo, usuarios protegidos)
+#  Uso:  sudo bash ghost-panel.sh   |   ghostpanel
+#  (revision: v3.7.0 — sin SECRET_KEY offline, conf unificada,
+#   auto-update endurecido, LICENSE_URL desde conf, pipefail)
 # ============================================================
 
-set -u
+# -e NO: menu interactivo con comandos que fallan a proposito (apt, ss, etc.)
+set -uo pipefail
 if locale -a 2>/dev/null | grep -qiE '^c\.utf-?8$'; then export LC_ALL=C.UTF-8; fi
 
 ROJO='\033[1;31m'; VERDE='\033[1;32m'; AMARILLO='\033[1;33m'
@@ -15,31 +16,46 @@ AZUL='\033[1;34m'; CIAN='\033[1;36m'; BLANCO='\033[1;37m'
 NC='\033[0m'
 NARANJA='\033[38;5;208m'; GRIS='\033[38;5;245m'; MORADO='\033[38;5;141m'
 BORDE="$GRIS"          # color del marco
-GHOST_VER='3.6.2'
+GHOST_VER='3.7.0'
 
-# --- LICENCIA / KEY -------------------------------------------
-# Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
-# real vive en el servidor de licencias, no aca: SECRET_KEY es legacy
-# (el modo offline esta deshabilitado; ya no se usa para validar).
-SECRET_KEY='Copiaesta**'
+# --- LICENCIA / UPDATE (sin secretos en el cliente) ------------
+# Validacion ONLINE obligatoria via Worker Cloudflare.
+# El enforcement real vive en el servidor de licencias.
+# NO hay SECRET_KEY offline: firmar keys en el cliente era inseguro.
 KEY_FILE='/etc/vps-manager.key'
 PREFIJO_KEY='VPSJB1'   # prefijo de marca; tambien acepta keys viejas VPSMGR1
-# URL del script en TU repo (para la opcion de auto-update)
-REPO_RAW='https://raw.githubusercontent.com/pitubarrios/vps-manager/refs/heads/main/scr/ghost-panel.sh'
+CONF_FILE='/etc/ghost-panel.conf'
+# URL del script en GitHub (auto-update). Sobreescribible con UPDATE_URL en conf.
+REPO_RAW='https://raw.githubusercontent.com/pitubarrios/ghost-panel/refs/heads/main/scr/ghost-panel.sh'
 VPSMGR_DEST=/usr/local/bin/ghostpanel
-if [[ -r /etc/ghost-panel.conf ]]; then
-    _u=$(awk -F= '/^UPDATE_URL=/{print substr($0,12); exit}' /etc/ghost-panel.conf)
-    [[ "$_u" =~ ^https?://[^[:space:]]+$ ]] && REPO_RAW="$_u"
-fi
-# --- VALIDACION ONLINE ---
-# Pone aca la URL de tu Worker de Cloudflare.
-# Vacio = el panel se niega a arrancar (modo produccion).
-# Para desarrollo local sin Worker: export GHOST_DEV=1 antes de ejecutar.
+# LICENSE_URL: Worker de Cloudflare. Vacio = no arranca (salvo GHOST_DEV=1).
+# Preferir /etc/ghost-panel.conf -> LICENSE_URL=... para no reeditar el script.
 LICENSE_URL='https://vps-licencias.jorgebarriosmpya.workers.dev'
 GRACE_SECS=259200                      # 72h de gracia si el servidor no responde
 LICENSE_CACHE='/etc/vps-license.cache'
-# REPO_RAW: cuando tengas tu GitHub, cambia la URL de abajo o usa
-# /etc/ghost-panel.conf -> UPDATE_URL=https://raw.githubusercontent.com/TU_USER/TU_REPO/refs/heads/main/ghost-panel-pro.sh
+
+# Carga conf local (UPDATE_URL + LICENSE_URL) sin exponer secretos en el .sh
+ghost_cargar_conf(){
+    [[ -r "$CONF_FILE" ]] || return 0
+    local _u _l
+    _u=$(awk -F= '/^UPDATE_URL=/{print substr($0,12); exit}' "$CONF_FILE" 2>/dev/null || true)
+    [[ "$_u" =~ ^https?://[^[:space:]]+$ ]] && REPO_RAW="$_u"
+    _l=$(awk -F= '/^LICENSE_URL=/{print substr($0,13); exit}' "$CONF_FILE" 2>/dev/null || true)
+    [[ "$_l" =~ ^https?://[^[:space:]]+$ ]] && LICENSE_URL="$_l"
+}
+ghost_cargar_conf
+
+ghost_conf_set(){
+    # ghost_conf_set CLAVE VALOR -> escribe/actualiza en CONF_FILE (chmod 600)
+    local k="$1" v="$2"
+    touch "$CONF_FILE" 2>/dev/null || return 1
+    chmod 600 "$CONF_FILE" 2>/dev/null || true
+    if grep -qE "^${k}=" "$CONF_FILE" 2>/dev/null; then
+        sed -i "s|^${k}=.*|${k}=${v}|" "$CONF_FILE"
+    else
+        printf '%s=%s\n' "$k" "$v" >> "$CONF_FILE"
+    fi
+}
 
 machine_hash(){
     if [[ -f /etc/machine-id ]]; then
@@ -49,27 +65,8 @@ machine_hash(){
     fi
 }
 
-validar_key(){
-    # Uso: validar_key "$KEY"  -> 0 valida / 1 invalida
-    local KEY BODY B64 SIG SIGC PAYLOAD NOMBRE EXP MACH
-    KEY=$(echo "$1" | tr -d '[:space:]')
-    case "$KEY" in ${PREFIJO_KEY}-*|VPSMGR1-*) ;; *) return 1 ;; esac
-    BODY=${KEY#*-}
-    SIG=${BODY##*-}
-    B64=${BODY%-*}
-    [[ -n "$B64" && -n "$SIG" && "$B64" != "$SIG" ]] || return 1
-    SIGC=$(printf '%s' "$B64" | openssl dgst -sha256 -hmac "$SECRET_KEY" 2>/dev/null | awk '{print $NF}' | cut -c1-16 | tr 'a-f' 'A-F')
-    [[ "$SIGC" == "$SIG" ]] || return 1
-    PAYLOAD=$(printf '%s' "$B64" | base64 -d 2>/dev/null) || return 1
-    NOMBRE=${PAYLOAD%%|*}; PAYLOAD=${PAYLOAD#*|}
-    EXP=${PAYLOAD%%|*};  MACH=${PAYLOAD#*|}
-    [[ -n "$NOMBRE" && -n "$EXP" ]] || return 1
-    [[ "$EXP" != "0" && "$(date +%s)" -gt "$EXP" ]] && return 1
-    if [[ -n "$MACH" && "$MACH" != "$(machine_hash)" ]]; then return 1; fi
-    KEY_NOMBRE="$NOMBRE"
-    KEY_EXP="$EXP"
-    return 0
-}
+# validar_key offline eliminada en v3.7.0 (SECRET_KEY en cliente era inseguro).
+# Solo se valida online via consultar_licencia() -> Worker Cloudflare.
 
 lic_json_str(){
     # lic_json_str "$JSON" clave1 clave2 ... -> primer valor string no vacio
@@ -92,18 +89,25 @@ lic_guardar_nombre(){
 consultar_licencia(){
     # Modo online: pregunta al Worker de Cloudflare.
     # Devuelve: 0 valida / 1 invalida / 2 servidor sin respuesta
-    local KEY="$1" RESP
+    local KEY="$1" RESP HC
     [[ -z "$LICENSE_URL" ]] && return 2
-    RESP=$(curl -G -fsS --max-time 10 -A "Mozilla/5.0" "$LICENSE_URL" \
-        --data-urlencode "key=$KEY" --data-urlencode "id=$(machine_hash)" 2>/dev/null)
-    [[ -z "$RESP" ]] && return 2
-    if echo "$RESP" | grep -q '"valid":[[:space:]]*true'; then
+    RESP=$(curl -G -sS --max-time 12 -A "GhostPanel/${GHOST_VER}" "$LICENSE_URL" \
+        --data-urlencode "key=$KEY" --data-urlencode "id=$(machine_hash)" \
+        -w '\n%{http_code}' 2>/dev/null) || return 2
+    HC=$(printf '%s' "$RESP" | tail -n1)
+    RESP=$(printf '%s' "$RESP" | sed '$d')
+    [[ -z "$RESP" || ! "$HC" =~ ^2[0-9][0-9]$ ]] && return 2
+    if printf '%s' "$RESP" | grep -q '"valid"[[:space:]]*:[[:space:]]*true'; then
         LICENSE_NOMBRE=$(lic_json_str "$RESP" name nombre owner cliente client customer username user)
-        LICENSE_NOMBRE=$(printf '%b' "$LICENSE_NOMBRE" | tr -d '\000-\037' | cut -c1-40)   # decodifica \u00e9 y limpia
-        LICENSE_DIAS=$(echo "$RESP" | grep -o '"days_left"[[:space:]]*:[[:space:]]*[0-9]*' | head -1 | grep -o '[0-9]*$')
+        LICENSE_NOMBRE=$(printf '%b' "${LICENSE_NOMBRE:-}" | tr -d '\000-\037' | cut -c1-40)
+        LICENSE_DIAS=$(printf '%s' "$RESP" | grep -o '"days_left"[[:space:]]*:[[:space:]]*[0-9]*' | head -1 | grep -o '[0-9]*$' || true)
         return 0
     fi
-    return 1
+    # respuesta JSON clara de rechazo
+    if printf '%s' "$RESP" | grep -q '"valid"[[:space:]]*:[[:space:]]*false'; then
+        return 1
+    fi
+    return 2
 }
 
 gate_licencia(){
@@ -113,6 +117,9 @@ gate_licencia(){
     FR_MID
     FR_TXT "  $(T t_id_srv): ${BLANCO}$(machine_hash)${NC}"
 
+    # Recarga conf por si se edito LICENSE_URL fuera del script
+    ghost_cargar_conf 2>/dev/null || true
+
     if [[ -z "$LICENSE_URL" ]]; then
         if [[ "${GHOST_DEV:-0}" == "1" ]]; then
             WARN "GHOST_DEV=1: omitiendo validacion de licencia (solo desarrollo)."
@@ -121,8 +128,10 @@ gate_licencia(){
         fi
         FR_TXT "  ${ROJO}$(T t_online_req)${NC}"
         FR_TXT "  $(T t_online_req2)"
-        FR_TXT "  ${GRIS}Configura LICENSE_URL en el script o en /etc/ghost-panel.conf${NC}"
-        FR_TXT "  ${GRIS}Desarrollo: GHOST_DEV=1 sudo bash ghost-panel-pro.sh${NC}"
+        FR_TXT "  ${GRIS}Edita $CONF_FILE y agrega:${NC}"
+        FR_TXT "  ${BLANCO}LICENSE_URL=https://tu-worker.ejemplo.workers.dev${NC}"
+        FR_TXT "  ${GRIS}O: Herramientas -> Auto-update -> opcion 4 (tras GHOST_DEV=1)${NC}"
+        FR_TXT "  ${GRIS}Desarrollo: GHOST_DEV=1 sudo bash $0${NC}"
         FR_BOT
         exit 1
     fi
@@ -288,7 +297,6 @@ TXT_ES[t_ad_inst]="Instalar AdGuard Home"; TXT_EN[t_ad_inst]="Install AdGuard Ho
 TXT_ES[t_ad_estado]="Estado / panel web"; TXT_EN[t_ad_estado]="Status / web UI"
 TXT_ES[t_ad_quitar]="Quitar AdGuard"; TXT_EN[t_ad_quitar]="Remove AdGuard"
 TXT_ES[t_ad_listas]="Actualizar listas"; TXT_EN[t_ad_listas]="Update filter lists"
-TXT_ES[t_ui_compact]="UI compacta on/off"; TXT_EN[t_ui_compact]="Compact UI on/off"
 TXT_ES[t_dropbear]="Dropbear"; TXT_EN[t_dropbear]="Dropbear"
 TXT_ES[t_udp_custom]="UDP Custom"; TXT_EN[t_udp_custom]="UDP Custom"
 TXT_ES[t_slowdns]="SlowDNS (dnstt)"; TXT_EN[t_slowdns]="SlowDNS (dnstt)"
@@ -331,63 +339,19 @@ vps_log(){
     echo "$(date '+%F %T') [$NIV] $*" >> "$LOG_PANEL" 2>/dev/null || true
 }
 
-# IP de la interfaz por la que sale a Internet (la de la VM/VPS real).
-ip_local(){
-    local ip
-    # 1) src de la ruta por defecto (mas fiable en VM y VPS)
-    ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')
-    # 2) primera IPv4 no loopback de hostname -I
-    if [[ -z "$ip" || "$ip" == "127.0.0.1" ]]; then
-        ip=$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $1!="127.0.0.1"{print; exit}')
-    fi
-    # 3) ip addr
-    if [[ -z "$ip" ]]; then
-        ip=$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
-    fi
-    printf '%s' "${ip:-127.0.0.1}"
-}
-
-# IP publica vista desde Internet (puede diferir en NAT/VM local).
-ip_publica_detect(){
-    local ip
-    ip=$(curl -4 -fsS --max-time 3 https://ifconfig.me 2>/dev/null       || curl -4 -fsS --max-time 3 https://api.ipify.org 2>/dev/null       || curl -4 -fsS --max-time 3 https://icanhazip.com 2>/dev/null)
-    ip=$(printf '%s' "$ip" | tr -d '[:space:]')
-    printf '%s' "$ip"
-}
-
-# Para mostrar en panel y URLs de acceso:
-# - Prioriza la IP local de la maquina (la que sirve en VM / LAN / interfaz principal).
-# - Si hay publica distinta, se puede consultar con ip_publica_detect.
-# Cache corta de la IP de acceso (local).
 ip_publica(){
     local ip ahora mtime=0
     ahora=$(date +%s)
     if [[ -f "$IP_CACHE_FILE" ]]; then
         mtime=$(stat -c %Y "$IP_CACHE_FILE" 2>/dev/null || echo 0)
-        # cache 5 min (antes 1h; en VM la IP puede cambiar al reiniciar red)
-        if (( ahora - mtime < 300 )); then
+        if (( ahora - mtime < 3600 )); then
             cat "$IP_CACHE_FILE"
             return 0
         fi
     fi
-    ip=$(ip_local)
-    # Si la local es privada y hay publica, preferimos local para "acceder a ESTA maquina".
-    # La publica se muestra aparte cuando hace falta (Webmin, enlaces).
+    ip=$(curl -4 -fsS --max-time 3 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
     printf '%s' "$ip" > "$IP_CACHE_FILE" 2>/dev/null
     printf '%s' "$ip"
-}
-
-# Texto de acceso para servicios web (Webmin, etc.): local + publica si difiere.
-ip_urls_acceso(){
-    # ip_urls_acceso PUERTO [esquema=https]
-    local port="$1" scheme="${2:-https}" loc pub
-    loc=$(ip_local)
-    pub=$(ip_publica_detect)
-    echo -e " Acceso (esta maquina): ${VERDE}${scheme}://${loc}:${port}${NC}"
-    if [[ -n "$pub" && "$pub" != "$loc" ]]; then
-        echo -e " Acceso (IP publica):   ${CIAN}${scheme}://${pub}:${port}${NC}"
-        echo -e " ${GRIS}En VM/NAT usa la de esta maquina; la publica solo si hay port-forward.${NC}"
-    fi
 }
 
 guardar_enlace(){
@@ -963,19 +927,15 @@ FILA(){
 }
 
 SUBTOP(){ ui_crumb "$1"; ui_box_top "$1"; }
-PROMPT(){ echo; read -r -p "  $(echo -e "${CIAN}›${NC}") " OP; }
+PROMPT(){ echo; read -r -p "  $(echo -e "${CIAN}▸${NC}") $(T t_opcion) $(echo -e "${GRIS}›${NC}") " OP; }
 
 cabecera(){
     clear
     ui_init
-    local os kern up ram_t="" ram_u="" ram_p=0 cpu dsk_p="" dsk_u="" dsk_t="" ONLINE lic lic_txt compact=0
-    [[ -f /etc/vps-manager.ui ]] && grep -qx 'compact' /etc/vps-manager.ui 2>/dev/null && compact=1
+    local os kern up ram_t="" ram_u="" ram_p=0 cpu dsk_p="" dsk_u="" dsk_t="" ONLINE lic lic_txt
     os=$( (. /etc/os-release 2>/dev/null; echo "${NAME:-Linux} ${VERSION_ID:-}") )
     kern=$(uname -r)
-    up=$(uptime -p 2>/dev/null); up=${up#up }
-    # acortar uptime: "2 hours 15 minutes" -> "2h 15m"
-    up=$(printf '%s' "$up" | sed -e 's/ hours\?/h/g' -e 's/ minutes\?/m/g' -e 's/ days\?/d/g' -e 's/ seconds\?/s/g' -e 's/,//g')
-    [[ -z "$up" ]] && up="n/a"
+    up=$(uptime -p 2>/dev/null); up=${up#up }; [[ -z "$up" ]] && up="n/a"
     read -r ram_t ram_u < <(free -m 2>/dev/null | awk '/Mem:/{print $2, $3}')
     ram_t=${ram_t:-0}; ram_u=${ram_u:-0}
     (( ram_t > 0 )) && ram_p=$(( ram_u * 100 / ram_t ))
@@ -985,77 +945,53 @@ cabecera(){
     lic_txt="${VERDE}${LICENSE_OK:--}${NC}"
     if [[ -n "${LICENSE_EXP:-}" && "${LICENSE_EXP:-0}" != "0" ]]; then
         lic=$(( (LICENSE_EXP - $(date +%s)) / 86400 )); (( lic < 0 )) && lic=0
-        if (( lic <= 7 )); then
-            lic_txt="${lic_txt}  ${GRIS}·${NC}  ${AMARILLO}${lic}d${NC}"
-        else
-            lic_txt="${lic_txt}  ${GRIS}·${NC}  ${GRIS}${lic}d${NC}"
-        fi
+        lic_txt="${lic_txt}  ${GRIS}·${NC}  ${AMARILLO}${lic} $(T t_ui_days)${NC}"
     fi
     FR_TOP
-    # Titulo: producto a la izquierda, usuario@host a la derecha (mismo renglón lógico)
-    FR_TXT " ${MORADO}◆${NC} ${BLANCO}GHOST PANEL${NC}  ${GRIS}v${GHOST_VER}${NC}   ${GRIS}$(id -un)@$(hostname)${NC}"
-    if [[ $compact -eq 1 ]]; then
-        # Modo compacto: IP + online + lic + gauges cortos + servicios
-        FR_TXT " ${CIAN}$(ip_local)${NC}  ${GRIS}online${NC} ${VERDE}${ONLINE}${NC}  ${GRIS}lic${NC} $lic_txt"
-        ui_gauge "RAM" "$ram_p" "${ram_u}/${ram_t}M"
-        ui_gauge "CPU" "$cpu"
-        ui_gauge "Disk" "${dsk_p:-0}" "${dsk_u:-?}/${dsk_t:-?}"
-        FR_TXT " $(estado_servicios_min)"
-    else
-        ui_sec "$(T t_ui_sys)"
-        FR_TXT "  ${GRIS}OS${NC}  ${os}  ${GRIS}·${NC}  ${kern}  ${GRIS}·${NC}  ${up}"
-        ui_sec "$(T t_ui_res)"
-        ui_gauge "RAM" "$ram_p" "${ram_u}M / ${ram_t}M"
-        ui_gauge "CPU" "$cpu"
-        ui_gauge "$(T t_disco)" "${dsk_p:-0}" "${dsk_u:-?} / ${dsk_t:-?}"
-        ui_sec "$(T t_ui_ses)"
-        local _loc _pub
-        _loc=$(ip_local)
-        _pub=$(ip_publica_detect 2>/dev/null)
-        if [[ -n "$_pub" && "$_pub" != "$_loc" ]]; then
-            FR_TXT "  ${GRIS}IP${NC}  ${CIAN}${_loc}${NC}  ${GRIS}pub${NC} ${_pub}  ${GRIS}online${NC} ${VERDE}${ONLINE}${NC}  ${GRIS}lic${NC} $lic_txt"
-        else
-            FR_TXT "  ${GRIS}IP${NC}  ${CIAN}${_loc}${NC}   ${GRIS}online${NC} ${VERDE}${ONLINE}${NC}   ${GRIS}lic${NC} $lic_txt"
-        fi
-        # Webmin solo si esta instalado (si no, no ensucia la cabecera)
-        local wm
-        wm=$(estado_webmin_min)
-        [[ -n "$wm" ]] && FR_TXT "  ${GRIS}Webmin${NC}  $wm"
-        FR_TXT "  $(estado_servicios_min)"
-    fi
+    FR_TXT " ${MORADO}◆${NC} ${BLANCO}GHOST PANEL${NC}  ${GRIS}-  v${GHOST_VER}${NC}"
+    ui_sec "$(T t_ui_sys)"
+    ui_kv "OS" "${os}  ${GRIS}·${NC}  kernel ${kern}"
+    ui_kv "Uptime" "$up"
+    ui_sec "$(T t_ui_res)"
+    ui_gauge "RAM" "$ram_p" "${ram_u}M / ${ram_t}M"
+    ui_gauge "CPU" "$cpu"
+    ui_gauge "$(T t_disco)" "${dsk_p:-0}" "${dsk_u:-?} / ${dsk_t:-?}"
+    ui_sec "$(T t_ui_ses)"
+    ui_kv "IP" "${CIAN}$(ip_publica)${NC}"
+    ui_kv "Host" "$(hostname)   ${GRIS}Online${NC} ${VERDE}${ONLINE}${NC}"
+    ui_kv "$(T t_ui_user)" "${BLANCO}$(id -un)${NC}"
+    ui_kv "$(T t_licencia)" "$lic_txt"
+    ui_kv "Webmin" "$(estado_webmin_min)"
+    ui_kv "Servicios" "$(estado_servicios_min)"
     FR_BOT
     echo
 }
 
-# Estado de servicio: [ON] verde / [--] gris (compatible con cualquier terminal/fuente)
-svc_on(){ printf '%b' "${VERDE}[ON]${NC}"; }
-svc_off(){ printf '%b' "${GRIS}[--]${NC}"; }
+
 svc_dot(){
-    if eval "$1" >/dev/null 2>&1; then svc_on; else svc_off; fi
+    # svc_dot "prueba" -> ● o ○ coloreado
+    if eval "$1" >/dev/null 2>&1; then printf '%b' "${VERDE}●${NC}"; else printf '%b' "${GRIS}○${NC}"; fi
 }
 
 estado_servicios_min(){
+    # Una linea compacta para la cabecera
     local s=""
-    s+="SSH$(svc_dot 'pgrep -x sshd')"
-    s+=" Xray$(svc_dot 'pgrep -x xray')"
-    s+=" WG$(svc_dot 'systemctl is-active --quiet wg-quick@wg0')"
-    s+=" AG$(svc_dot 'adguard_activo 2>/dev/null || systemctl is-active --quiet AdGuardHome')"
-    s+=" ST$(svc_dot 'pgrep -f stunnel')"
-    s+=" CU$(svc_dot 'systemctl is-active --quiet vps-checkuser')"
+    s+="SSH $(svc_dot 'pgrep -x sshd')"
+    s+="  Xray $(svc_dot 'pgrep -x xray')"
+    s+="  WG $(svc_dot 'systemctl is-active --quiet wg-quick@wg0')"
+    s+="  AG $(svc_dot 'adguard_activo 2>/dev/null || systemctl is-active --quiet AdGuardHome')"
+    s+="  ST $(svc_dot 'pgrep -f stunnel')"
+    s+="  CU $(svc_dot 'systemctl is-active --quiet vps-checkuser')"
     printf '%s' "$s"
 }
 
+
 estado_webmin_min(){
-    # Vacio si no esta instalado (la cabecera no lo muestra).
-    # Rojo solo si esta instalado y caido.
-    if ! dpkg -l webmin >/dev/null 2>&1; then
-        printf ''
-        return 0
-    fi
-    if pgrep -f miniserv >/dev/null 2>&1; then
-        printf '%b' "${VERDE}ACTIVO :10000${NC}"
+    if dpkg -l webmin >/dev/null 2>&1; then
+        if pgrep -f miniserv >/dev/null 2>&1; then echo -e "${VERDE}ACTIVO :10000${NC}"
+        else echo -e "${AMARILLO}INSTALADO (detenido)${NC}"; fi
     else
-        printf '%b' "${ROJO}DETENIDO${NC}"
+        echo -e "${ROJO}NO INSTALADO${NC}"
     fi
 }
 
@@ -1617,12 +1553,11 @@ instalar_webmin(){
         ERR "Webmin quedo detenido. Proba con la opcion 2 (Estado / reiniciar) del menu."
     fi
     echo
+    local IP; IP=$(ip_publica)
     OK "Webmin instalado."
-    ip_urls_acceso 10000 https
+    echo -e " Acceso  : ${VERDE}https://${IP}:10000${NC}"
     echo -e " Usuario : ${VERDE}root${NC} (o cualquier usuario con sudo)"
-    echo -e " ${AMARILLO}Nota: acepta el aviso de certificado autofirmado en el navegador.${NC}"
-    # invalidar cache de IP por si la red de la VM recien levanto
-    rm -f "$IP_CACHE_FILE" 2>/dev/null
+    echo -e " ${AMARILLO}Nota: si es una VM remota, acepta el aviso de certificado autofirmado.${NC}"
     PAUSA
 }
 
@@ -1931,6 +1866,8 @@ quitar_auto_menu(){
 diagnostico(){
     echo -e "${CIAN}--- DIAGNOSTICO DEL SERVIDOR ---${NC}"
     local RAM_P DISCO_P LOAD ADV=0
+    echo -e " Panel: ${BLANCO}v${GHOST_VER}${NC}   Update: ${GRIS}${REPO_RAW:0:60}${NC}"
+    echo -e " Licencia URL: ${GRIS}${LICENSE_URL:-no configurada}${NC}"
     RAM_P=$(free | awk '/Mem/{printf "%d", $3*100/$2}')
     DISCO_P=$(df -h / | awk 'NR==2{gsub(/%/,"",$5); print $5}')
     LOAD=$(cut -d' ' -f1 /proc/loadavg)
@@ -1956,15 +1893,32 @@ cambiar_hostname(){
 
 ghost_ver_de(){ grep -m1 "^GHOST_VER=" "$1" 2>/dev/null | cut -d"'" -f2; }
 
+ghost_script_valido(){
+    # ghost_script_valido ARCHIVO -> 0 si parece GHOST PANEL usable
+    local F="$1" SZ
+    [[ -f "$F" && -s "$F" ]] || return 1
+    SZ=$(wc -c < "$F" 2>/dev/null || echo 0)
+    (( SZ > 5000 )) || return 1
+    bash -n "$F" 2>/dev/null || return 1
+    grep -q "GHOST PANEL" "$F" 2>/dev/null || return 1
+    grep -q "^GHOST_VER=" "$F" 2>/dev/null || return 1
+    # evita HTML de error 404 de GitHub/CDN
+    head -c 200 "$F" 2>/dev/null | grep -qiE '<!DOCTYPE|<html|Not Found|404' && return 1
+    return 0
+}
+
 ghost_instalar_script(){
     # ghost_instalar_script ARCHIVO -> valida, compara versiones, respalda, instala y relanza
+    # NO toca: key de licencia, conf, usuarios, banners, xray config.
     local F="$1" NV CV="$GHOST_VER" DEST="$VPSMGR_DEST" RUN SN BK
-    bash -n "$F" 2>/dev/null || { ERR "El archivo no es un script bash valido."; return 1; }
-    grep -q "GHOST PANEL" "$F" || { ERR "No parece ser GHOST PANEL."; return 1; }
+    if ! ghost_script_valido "$F"; then
+        ERR "El archivo no es un GHOST PANEL valido (sintaxis, firma o descarga corrupta/HTML)."
+        return 1
+    fi
     NV=$(ghost_ver_de "$F")
     echo -e "  Instalada: ${AMARILLO}v${CV}${NC}    Nueva: ${VERDE}${NV:+v$NV}${NV:-sin version}${NC}"
     if [[ -z "$NV" ]]; then
-        WARN "El archivo no declara version: es ANTERIOR al rediseno. Instalarlo pierde la interfaz y los arreglos."
+        WARN "El archivo no declara version: puede ser anterior al rediseno."
     elif [[ "$NV" == "$CV" ]]; then
         INFO "Es la misma version que la instalada."
     elif [[ "$(printf '%s\n%s\n' "$CV" "$NV" | sort -V | tail -1)" == "$CV" ]]; then
@@ -1972,50 +1926,73 @@ ghost_instalar_script(){
     fi
     read -r -p "  Instalar igual? (s/n): " SN
     [[ "$SN" == "s" ]] || { INFO "Cancelado."; return 1; }
-    RUN="${GHOST_SELF:-$(readlink -f "$0" 2>/dev/null)}"
+    RUN="${GHOST_SELF:-$(readlink -f "$0" 2>/dev/null || true)}"
     mkdir -p /root/backups; chmod 700 /root/backups
     BK="/root/backups/ghost-panel-v${CV}-$(date +%F_%H%M%S).sh"
-    if [[ -n "$RUN" && -f "$RUN" ]]; then cp -a "$RUN" "$BK" 2>/dev/null && INFO "Respaldo: $BK"; fi
-    # install borra y recrea el destino: no corrompe el script que bash esta leyendo
+    if [[ -n "$RUN" && -f "$RUN" ]]; then
+        cp -a "$RUN" "$BK" 2>/dev/null && INFO "Respaldo: $BK"
+    elif [[ -f "$DEST" ]]; then
+        cp -a "$DEST" "$BK" 2>/dev/null && INFO "Respaldo: $BK"
+    fi
+    # install recrea el destino: no corrompe el script que bash esta leyendo
     install -m 755 "$F" "$DEST" || { ERR "No se pudo escribir $DEST"; return 1; }
+    ln -sf "$DEST" /usr/local/bin/vpsmgr 2>/dev/null || true
+    ln -sf "$DEST" /usr/local/bin/vps 2>/dev/null || true
     OK "Instalado en $DEST (v${NV:-?})"
-    if [[ -n "$RUN" && -f "$RUN" && "$RUN" != "$(readlink -f "$DEST")" && -w "$RUN" ]]; then
-        install -m 755 "$F" "$RUN" 2>/dev/null && OK "Tambien actualizado el archivo que estas ejecutando: $RUN"
+    if [[ -n "$RUN" && -f "$RUN" && "$RUN" != "$(readlink -f "$DEST" 2>/dev/null)" && -w "$RUN" ]]; then
+        install -m 755 "$F" "$RUN" 2>/dev/null && OK "Tambien actualizado el archivo en ejecucion: $RUN"
     fi
     vps_log INFO "script actualizado v$CV -> v${NV:-?}"
+    INFO "Se preservan: licencia, conf, usuarios, Xray, banners y limites."
     read -r -p "  Reiniciar el panel ahora con la version nueva? (s/n): " SN
     [[ "$SN" == "s" ]] && exec "$DEST"
     return 0
 }
 
 auto_update_descargar(){
-    local TMPF URL
-    [[ -n "$REPO_RAW" ]] || { ERR "Fuente sin configurar (opcion 2)."; PAUSA; return; }
-    URL="${REPO_RAW}$([[ "$REPO_RAW" == *\?* ]] && echo '&' || echo '?')cb=$(date +%s)"   # evita cache del CDN
+    local TMPF URL RC
+    [[ -n "${REPO_RAW:-}" ]] || { ERR "Fuente sin configurar (opcion 2)."; PAUSA; return; }
+    URL="${REPO_RAW}$([[ "$REPO_RAW" == *\?* ]] && echo '&' || echo '?')cb=$(date +%s)"
     TMPF=$(mktemp /tmp/vpsmgr.XXXXXX) || { ERR "Sin temporal."; PAUSA; return; }
     INFO "Descargando desde: $REPO_RAW"
+    RC=1
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL --max-time 30 -H 'Cache-Control: no-cache' "$URL" -o "$TMPF" 2>/dev/null
+        curl -fsSL --max-time 45 -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+            -A "GhostPanel/${GHOST_VER}" "$URL" -o "$TMPF" && RC=0
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q --no-cache -T 45 -O "$TMPF" "$URL" && RC=0
     else
-        wget -q --no-cache -T 30 "$URL" -O "$TMPF" 2>/dev/null
+        ERR "Se necesita curl o wget."
+        rm -f "$TMPF"
+        PAUSA
+        return
     fi
-    if [[ -s "$TMPF" ]]; then ghost_instalar_script "$TMPF"
-    else ERR "No se pudo descargar. Revisa la URL (repo publico, enlace raw) y la red."; fi
+    if [[ $RC -eq 0 ]] && ghost_script_valido "$TMPF"; then
+        ghost_instalar_script "$TMPF"
+    else
+        ERR "No se pudo descargar un script valido. Revisa la URL (repo publico, enlace raw) y la red."
+        if [[ -s "$TMPF" ]]; then
+            INFO "Primeras lineas del archivo recibido:"
+            head -n 5 "$TMPF" 2>/dev/null | sed 's/^/  /'
+        fi
+    fi
     rm -f "$TMPF"
     PAUSA
 }
 
 auto_update(){
-    local F U
+    local F U L
     while true; do
         cabecera
         SUBTOP "ACTUALIZAR SCRIPT"
         ui_kv "Version" "v${GHOST_VER}"
         ui_kv "Fuente" "${REPO_RAW:-sin configurar}"
+        ui_kv "Licencia URL" "${LICENSE_URL:-sin configurar}"
         FR_MID
         FR_OPT 1 "Actualizar desde la fuente" "" ""
         FR_OPT 2 "Cambiar fuente (URL raw)" "" ""
         FR_OPT 3 "Instalar desde archivo local" "" ""
+        FR_OPT 4 "Configurar LICENSE_URL (Worker)" "" ""
         FR_OPT 0 "$(T t_volver)" "" ""
         FR_BOT
         PROMPT
@@ -2023,14 +2000,20 @@ auto_update(){
             1) auto_update_descargar ;;
             2) read -r -p "  URL raw de TU repo (https://...): " U
                if [[ "$U" =~ ^https?://[^[:space:]]+$ ]]; then
-                   touch /etc/ghost-panel.conf; chmod 600 /etc/ghost-panel.conf
-                   sed -i '/^UPDATE_URL=/d' /etc/ghost-panel.conf
-                   echo "UPDATE_URL=$U" >> /etc/ghost-panel.conf
-                   REPO_RAW="$U"; OK "Fuente guardada."
+                   ghost_conf_set UPDATE_URL "$U"
+                   REPO_RAW="$U"
+                   OK "Fuente guardada en $CONF_FILE"
                else ERR "URL invalida."; fi
                PAUSA ;;
             3) read -r -p "  Ruta del archivo .sh: " F
                if [[ -f "$F" ]]; then ghost_instalar_script "$F"; else ERR "No existe: $F"; fi
+               PAUSA ;;
+            4) read -r -p "  URL del Worker de licencias (https://...): " L
+               if [[ "$L" =~ ^https?://[^[:space:]]+$ ]]; then
+                   ghost_conf_set LICENSE_URL "$L"
+                   LICENSE_URL="$L"
+                   OK "LICENSE_URL guardada en $CONF_FILE"
+               else ERR "URL invalida."; fi
                PAUSA ;;
             0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
         esac
@@ -3395,7 +3378,6 @@ menu_herramientas(){
         FR_OPT 1 "$(T t_global)" 4 "$(T t_autoupdate)"
         FR_OPT 2 "$(T t_automenu_on)" 5 "$(T t_checkuser)"
         FR_OPT 3 "$(T t_automenu_off)" 6 "$(T t_idioma)"
-        FR_OPT 7 "$(T t_ui_compact)" "" ""
         FR_OPT 0 "$(T t_volver)" "" ""
         FR_BOT
         PROMPT
@@ -3403,14 +3385,6 @@ menu_herramientas(){
             1) instalar_comando_global ;; 2) auto_menu ;; 3) quitar_auto_menu ;;
             4) auto_update ;; 5) menu_checkuser ;;
             6) rm -f /etc/vps-manager.lang; seleccionar_idioma; OK "Idioma: $IDIOMA / Language: $IDIOMA"; PAUSA ;;
-            7) if [[ -f /etc/vps-manager.ui ]] && grep -qx compact /etc/vps-manager.ui 2>/dev/null; then
-                   rm -f /etc/vps-manager.ui
-                   OK "UI normal (cabecera completa)."
-               else
-                   echo compact > /etc/vps-manager.ui
-                   OK "UI compacta activada (ideal para celular)."
-               fi
-               PAUSA ;;
             0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
         esac
     done
@@ -3853,10 +3827,12 @@ while true; do
     FR_OPT 1 "$(T t_usuarios)" 2 "$(T t_protocolos)"
     FR_OPT 3 "$(T t_seguridad)" 4 "$(T t_sistema)"
     FR_OPT 5 "$(T t_herramientas)" 6 "$(T t_webmin)"
-    FR_OPT 7 "$(T t_backup)" 8 "$(T t_adblock)"
-    FR_OPT 9 "$(T t_diagnostico)" 0 "$(T t_salir)"
+    FR_OPT 7 "$(T t_backup)" 8 "$(T t_diagnostico)"
+    FR_OPT 9 "$(T t_adblock)" "" ""
+    FR_TXT ""
+    FR_OPT 0 "$(T t_salir)" "" ""
     FR_BOT
-    echo -e "  ${GRIS}$(machine_hash)  ·  $(date '+%d/%m %H:%M')${NC}"
+    echo -e "  ${GRIS}$(T t_servidor_id) ${VERDE}$(machine_hash)${GRIS}  ·  $(date '+%d/%m/%Y %H:%M')${NC}"
     PROMPT
     case "$OP" in
         1) menu_usuarios ;;
@@ -3866,8 +3842,8 @@ while true; do
         5) menu_herramientas ;;
         6) menu_webmin ;;
         7) menu_backup ;;
-        8) menu_adblock ;;
-        9) diagnostico ;;
+        8) diagnostico ;;
+        9) menu_adblock ;;
         0) echo -e "${VERDE}Hasta luego!${NC}"; exit 0 ;;
         *) ERR "$(T t_opinv)"; sleep 1 ;;
     esac
