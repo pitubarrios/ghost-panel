@@ -3,11 +3,15 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 3.7.0
+#  Version: 3.7.1
+#  Cambios 3.7.1:
+#    - AdGuard: bind 10.66.0.1 solo si la IP esta asignada (evita crash al arrancar)
+#    - AdGuard: auto-reparacion en Estado (libera :53, reescribe yaml, re-registra unit)
+#    - AdGuard: al activar WireGuard, re-bind a 10.66.0.1 y reinicia el servicio
+#    - AdGuard: panel web solo en 127.0.0.1:3000; preserva users del wizard
 #  Cambios 3.7.0:
 #    - Puerto ocupado: avisa y permite elegir otro (todos los protocolos)
 #    - AdGuard Home: flags oficiales del install.sh + fallback manual
-#    - AdGuard: no bindea 10.66.0.1 sin WireGuard; espera activo + journal
 #  (sshd_config seguro, ghost_bootstrap, usuarios protegidos)
 # ============================================================
 
@@ -19,7 +23,7 @@ AZUL='\033[1;34m'; CIAN='\033[1;36m'; BLANCO='\033[1;37m'
 NC='\033[0m'
 NARANJA='\033[38;5;208m'; GRIS='\033[38;5;245m'; MORADO='\033[38;5;141m'
 BORDE="$GRIS"          # color del marco
-GHOST_VER='3.7.0'
+GHOST_VER='3.7.1'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -3166,18 +3170,39 @@ adguard_esperar_activo(){
     return 1
 }
 
+adguard_ip_disponible(){
+    # true solo si la IP esta asignada a alguna interfaz (no basta con que exista wg0.conf)
+    local ip="$1"
+    ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -qx "$ip"
+}
+
 adguard_escribir_config(){
-    # DNS solo en interfaces que existen: 127.0.0.1 siempre; 10.66.0.1 si hay wg0.
-    # Bind a 10.66.0.1 sin WireGuard hace fallar el arranque.
+    # DNS solo en IPs que EXISTEN ahora: 127.0.0.1 siempre; 10.66.0.1 solo si WireGuard
+    # tiene esa direccion activa. Bind a 10.66.0.1 sin la IP asignada tumba el servicio
+    # (cannot assign requested address) y systemctl lo deja en failed/stopped.
     local CFG="${1:-/opt/AdGuardHome/AdGuardHome.yaml}" hosts
     hosts='    - 127.0.0.1'
-    if ip -o link show wg0 >/dev/null 2>&1 || [[ -f /etc/wireguard/wg0.conf ]]; then
+    if adguard_ip_disponible "10.66.0.1"; then
         hosts+=$'\n    - 10.66.0.1'
     fi
     mkdir -p "$(dirname "$CFG")"
+    # Preservar usuario/password del panel web si ya se configuro el wizard
+    local USERS_BLOCK=""
+    if [[ -f "$CFG" ]] && grep -q '^users:' "$CFG" 2>/dev/null; then
+        USERS_BLOCK=$(awk '
+            /^users:/{p=1}
+            p{
+                if (/^[a-zA-Z]/ && !/^users:/ && !/^[[:space:]]/){exit}
+                print
+            }
+        ' "$CFG")
+    fi
     cat > "$CFG" <<AGEOF
+# Generado por Ghost Panel — no bindear IPs inexistentes
+schema_version: 28
 http:
   address: 127.0.0.1:3000
+  session_ttl: 720h
 dns:
   bind_hosts:
 ${hosts}
@@ -3191,6 +3216,7 @@ ${hosts}
   protection_enabled: true
   parental_enabled: false
   ratelimit: 20
+  cache_size: 4194304
 filters:
   - enabled: true
     url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt
@@ -3199,7 +3225,45 @@ filters:
     url: https://big.oisd.nl/
     name: OISD Big
 AGEOF
+    if [[ -n "$USERS_BLOCK" ]]; then
+        printf '\n%s\n' "$USERS_BLOCK" >> "$CFG"
+    fi
     chmod 644 "$CFG"
+}
+
+adguard_liberar_53(){
+    mkdir -p /etc/systemd/resolved.conf.d
+    cat > /etc/systemd/resolved.conf.d/adguardhome.conf <<'RSEOF'
+[Resolve]
+DNS=1.1.1.1
+DNSStubListener=no
+RSEOF
+    # Preferir resolv de systemd-resolved (sin stub en :53)
+    if [[ -f /run/systemd/resolve/resolv.conf ]]; then
+        ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null || true
+    fi
+    systemctl restart systemd-resolved 2>/dev/null || true
+    sleep 1
+}
+
+adguard_arreglar_y_arrancar(){
+    # Reescribe config segura, libera :53 y arranca. Usado por instalar y por estado.
+    local AGH="/opt/AdGuardHome/AdGuardHome" CFG="/opt/AdGuardHome/AdGuardHome.yaml"
+    [[ -x "$AGH" ]] || return 1
+    adguard_liberar_53
+    adguard_escribir_config "$CFG"
+    # Asegurar unit con -c/-w correctos
+    if systemctl list-unit-files AdGuardHome.service >/dev/null 2>&1 \
+        || systemctl cat AdGuardHome >/dev/null 2>&1; then
+        systemctl stop AdGuardHome 2>/dev/null || "$AGH" -s stop 2>/dev/null || true
+        "$AGH" -s uninstall 2>/dev/null || true
+    fi
+    "$AGH" -s install -c "$CFG" -w /opt/AdGuardHome 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable AdGuardHome 2>/dev/null || true
+    systemctl reset-failed AdGuardHome 2>/dev/null || true
+    systemctl restart AdGuardHome 2>/dev/null || "$AGH" -s start -c "$CFG" -w /opt/AdGuardHome 2>/dev/null || true
+    adguard_esperar_activo 20
 }
 
 instalar_adguard(){
@@ -3217,15 +3281,7 @@ instalar_adguard(){
     fi
 
     INFO "Liberando puerto 53 (stub de systemd-resolved)..."
-    mkdir -p /etc/systemd/resolved.conf.d
-    cat > /etc/systemd/resolved.conf.d/adguardhome.conf <<'RSEOF'
-[Resolve]
-DNS=1.1.1.1
-DNSStubListener=no
-RSEOF
-    ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null || true
-    systemctl restart systemd-resolved 2>/dev/null || true
-    sleep 1
+    adguard_liberar_53
     if ss -uln 2>/dev/null | awk 'NR>1{n=split($4,a,":"); if(a[n]==53){found=1}} END{exit found?0:1}'; then
         WARN "UDP 53 sigue en uso: $(ss -ulnp 2>/dev/null | awk 'NR>1{n=split($5,a,":"); if(a[n]==53){print; exit}}')"
     fi
@@ -3269,30 +3325,17 @@ RSEOF
     fi
     [[ -x "$AGH" ]] || { ERR "No existe $AGH"; PAUSA; return; }
 
-    # Config segura (sin bind a 10.66.0.1 si no hay wg0 — eso tumba el servicio)
-    adguard_escribir_config "$CFG"
-
-    # Si el instalador oficial ya dejo el servicio, solo reiniciar con nuestra config.
-    # Evita uninstall+install que a veces deja el unit a medias.
-    if systemctl list-unit-files AdGuardHome.service >/dev/null 2>&1 \
-        || systemctl cat AdGuardHome >/dev/null 2>&1; then
-        systemctl stop AdGuardHome 2>/dev/null || "$AGH" -s stop 2>/dev/null || true
-        # Asegurar unit con -c/-w correctos
-        "$AGH" -s uninstall 2>/dev/null || true
-        "$AGH" -s install -c "$CFG" -w /opt/AdGuardHome 2>/dev/null \
-            || { ERR "No se pudo registrar el servicio."; journalctl -u AdGuardHome -n 15 --no-pager 2>/dev/null; PAUSA; return; }
-    else
-        "$AGH" -s install -c "$CFG" -w /opt/AdGuardHome 2>/dev/null \
-            || { ERR "No se pudo registrar el servicio."; PAUSA; return; }
+    # Config segura + unit + arranque (sin bind a IP inexistente)
+    if ! adguard_arreglar_y_arrancar; then
+        ERR "No se pudo registrar/arrancar AdGuard Home."
+        journalctl -u AdGuardHome -n 20 --no-pager 2>/dev/null | sed 's/^/  /' || true
+        PAUSA; return
     fi
-    systemctl daemon-reload 2>/dev/null || true
-    systemctl enable AdGuardHome 2>/dev/null || true
-    systemctl restart AdGuardHome 2>/dev/null || "$AGH" -s start 2>/dev/null || true
 
-    if adguard_esperar_activo 20; then
+    if adguard_activo; then
         OK "AdGuard Home ACTIVO."
         echo
-        echo -e " ${AMARILLO}Seguridad:${NC} DNS en 127.0.0.1$([ -f /etc/wireguard/wg0.conf ] && echo ' y 10.66.0.1 (WG)' || echo ' (agrega 10.66.0.1 al instalar WireGuard)')."
+        echo -e " ${AMARILLO}Seguridad:${NC} DNS en 127.0.0.1$(adguard_ip_disponible 10.66.0.1 && echo ' y 10.66.0.1 (WG activo)' || echo ' (10.66.0.1 se agrega cuando WireGuard este UP)')."
         echo -e " ${AMARILLO}NO se abrio el puerto 53 a Internet.${NC}"
         echo
         echo -e " Panel web (desde tu PC):"
@@ -3325,18 +3368,30 @@ estado_adguard(){
         if adguard_activo; then
             OK "Servicio ACTIVO"
         else
-            WARN "Instalado pero DETENIDO"
-            systemctl start AdGuardHome 2>/dev/null
+            WARN "Instalado pero DETENIDO — intentando reparar y arrancar..."
+            # Causa tipica: bind a 10.66.0.1 sin WireGuard UP, o systemd-resolved en :53
+            if adguard_arreglar_y_arrancar; then
+                OK "Servicio ACTIVO tras reparacion"
+            else
+                ERR "No arranco. Ultimas lineas del journal:"
+                journalctl -u AdGuardHome -n 25 --no-pager 2>/dev/null | sed 's/^/  /' || true
+                if ss -uln 2>/dev/null | awk 'NR>1{n=split($4,a,":"); if(a[n]==53){found=1}} END{exit found?0:1}'; then
+                    ERR "UDP 53 ocupado: $(ss -ulnp 2>/dev/null | awk 'NR>1{n=split($5,a,":"); if(a[n]==53){print; exit}}')"
+                fi
+                if grep -q '10\.66\.0\.1' /opt/AdGuardHome/AdGuardHome.yaml 2>/dev/null && ! adguard_ip_disponible 10.66.0.1; then
+                    ERR "La config pide bind a 10.66.0.1 pero esa IP no esta asignada (WireGuard apagado)."
+                fi
+            fi
         fi
         echo
         ss -tulnp 2>/dev/null | grep -E ':53|:3000' | sed 's/^/  /' || true
         echo
         echo -e " Panel: ${VERDE}ssh -L 3000:127.0.0.1:3000 root@$(ip_publica)${NC}"
         echo -e "        luego ${CIAN}http://127.0.0.1:3000${NC}"
-        if systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
-            INFO "WireGuard activo: pon DNS=10.66.0.1 en el cliente para adblock."
+        if adguard_ip_disponible 10.66.0.1; then
+            INFO "WireGuard UP: clientes deben usar DNS=10.66.0.1 para adblock."
         else
-            WARN "WireGuard no activo: el adblock DNS solo aplica si el cliente usa 10.66.0.1 o 127.0.0.1 via tunel."
+            WARN "WireGuard no UP: AdGuard solo escucha en 127.0.0.1:53 (seguro). Al levantar WG, entra a Estado otra vez para re-bind."
         fi
     else
         ERR "AdGuard Home no esta instalado."
@@ -3690,6 +3745,12 @@ AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 CLIENTEOF
         OK "WireGuard ACTIVO (puerto UDP $WP)"
+        # Si AdGuard esta instalado, reescribir config para bindear 10.66.0.1 ahora que la IP existe
+        if adguard_instalado 2>/dev/null; then
+            INFO "Actualizando AdGuard Home para escuchar en 10.66.0.1 (adblock en el tunel)..."
+            adguard_escribir_config /opt/AdGuardHome/AdGuardHome.yaml 2>/dev/null || true
+            systemctl restart AdGuardHome 2>/dev/null || true
+        fi
         INFO "Config del cliente: /root/wg-client.conf"
         echo -e " ${AMARILLO}--- para la app WireGuard ---${NC}"
         cat /root/wg-client.conf
