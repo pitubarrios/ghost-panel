@@ -2,13 +2,12 @@
 # ============================================================
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
-#  Uso:  sudo bash ghost-panel.sh   |   ghostpanel
-#  (revision: v3.7.0 — sin SECRET_KEY offline, conf unificada,
-#   auto-update endurecido, LICENSE_URL desde conf, pipefail)
+#  Uso:  sudo bash vps-manager.sh
+#  (revision: v3.6.2 — fix instalador AdGuard Home flags oficiales + fallback manual)
+#   sshd_config seguro, ghost_bootstrap activo, usuarios protegidos)
 # ============================================================
 
-# -e NO: menu interactivo con comandos que fallan a proposito (apt, ss, etc.)
-set -uo pipefail
+set -u
 if locale -a 2>/dev/null | grep -qiE '^c\.utf-?8$'; then export LC_ALL=C.UTF-8; fi
 
 ROJO='\033[1;31m'; VERDE='\033[1;32m'; AMARILLO='\033[1;33m'
@@ -16,46 +15,31 @@ AZUL='\033[1;34m'; CIAN='\033[1;36m'; BLANCO='\033[1;37m'
 NC='\033[0m'
 NARANJA='\033[38;5;208m'; GRIS='\033[38;5;245m'; MORADO='\033[38;5;141m'
 BORDE="$GRIS"          # color del marco
-GHOST_VER='3.7.0'
+GHOST_VER='3.6.2'
 
-# --- LICENCIA / UPDATE (sin secretos en el cliente) ------------
-# Validacion ONLINE obligatoria via Worker Cloudflare.
-# El enforcement real vive en el servidor de licencias.
-# NO hay SECRET_KEY offline: firmar keys en el cliente era inseguro.
+# --- LICENCIA / KEY -------------------------------------------
+# Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
+# real vive en el servidor de licencias, no aca: SECRET_KEY es legacy
+# (el modo offline esta deshabilitado; ya no se usa para validar).
+SECRET_KEY='Copiaesta**'
 KEY_FILE='/etc/vps-manager.key'
 PREFIJO_KEY='VPSJB1'   # prefijo de marca; tambien acepta keys viejas VPSMGR1
-CONF_FILE='/etc/ghost-panel.conf'
-# URL del script en GitHub (auto-update). Sobreescribible con UPDATE_URL en conf.
-REPO_RAW='https://raw.githubusercontent.com/pitubarrios/ghost-panel/refs/heads/main/scr/ghost-panel.sh'
+# URL del script en TU repo (para la opcion de auto-update)
+REPO_RAW='https://raw.githubusercontent.com/pitubarrios/vps-manager/refs/heads/main/scr/ghost-panel.sh'
 VPSMGR_DEST=/usr/local/bin/ghostpanel
-# LICENSE_URL: Worker de Cloudflare. Vacio = no arranca (salvo GHOST_DEV=1).
-# Preferir /etc/ghost-panel.conf -> LICENSE_URL=... para no reeditar el script.
+if [[ -r /etc/ghost-panel.conf ]]; then
+    _u=$(awk -F= '/^UPDATE_URL=/{print substr($0,12); exit}' /etc/ghost-panel.conf)
+    [[ "$_u" =~ ^https?://[^[:space:]]+$ ]] && REPO_RAW="$_u"
+fi
+# --- VALIDACION ONLINE ---
+# Pone aca la URL de tu Worker de Cloudflare.
+# Vacio = el panel se niega a arrancar (modo produccion).
+# Para desarrollo local sin Worker: export GHOST_DEV=1 antes de ejecutar.
 LICENSE_URL='https://vps-licencias.jorgebarriosmpya.workers.dev'
 GRACE_SECS=259200                      # 72h de gracia si el servidor no responde
 LICENSE_CACHE='/etc/vps-license.cache'
-
-# Carga conf local (UPDATE_URL + LICENSE_URL) sin exponer secretos en el .sh
-ghost_cargar_conf(){
-    [[ -r "$CONF_FILE" ]] || return 0
-    local _u _l
-    _u=$(awk -F= '/^UPDATE_URL=/{print substr($0,12); exit}' "$CONF_FILE" 2>/dev/null || true)
-    [[ "$_u" =~ ^https?://[^[:space:]]+$ ]] && REPO_RAW="$_u"
-    _l=$(awk -F= '/^LICENSE_URL=/{print substr($0,13); exit}' "$CONF_FILE" 2>/dev/null || true)
-    [[ "$_l" =~ ^https?://[^[:space:]]+$ ]] && LICENSE_URL="$_l"
-}
-ghost_cargar_conf
-
-ghost_conf_set(){
-    # ghost_conf_set CLAVE VALOR -> escribe/actualiza en CONF_FILE (chmod 600)
-    local k="$1" v="$2"
-    touch "$CONF_FILE" 2>/dev/null || return 1
-    chmod 600 "$CONF_FILE" 2>/dev/null || true
-    if grep -qE "^${k}=" "$CONF_FILE" 2>/dev/null; then
-        sed -i "s|^${k}=.*|${k}=${v}|" "$CONF_FILE"
-    else
-        printf '%s=%s\n' "$k" "$v" >> "$CONF_FILE"
-    fi
-}
+# REPO_RAW: cuando tengas tu GitHub, cambia la URL de abajo o usa
+# /etc/ghost-panel.conf -> UPDATE_URL=https://raw.githubusercontent.com/TU_USER/TU_REPO/refs/heads/main/ghost-panel-pro.sh
 
 machine_hash(){
     if [[ -f /etc/machine-id ]]; then
@@ -65,8 +49,27 @@ machine_hash(){
     fi
 }
 
-# validar_key offline eliminada en v3.7.0 (SECRET_KEY en cliente era inseguro).
-# Solo se valida online via consultar_licencia() -> Worker Cloudflare.
+validar_key(){
+    # Uso: validar_key "$KEY"  -> 0 valida / 1 invalida
+    local KEY BODY B64 SIG SIGC PAYLOAD NOMBRE EXP MACH
+    KEY=$(echo "$1" | tr -d '[:space:]')
+    case "$KEY" in ${PREFIJO_KEY}-*|VPSMGR1-*) ;; *) return 1 ;; esac
+    BODY=${KEY#*-}
+    SIG=${BODY##*-}
+    B64=${BODY%-*}
+    [[ -n "$B64" && -n "$SIG" && "$B64" != "$SIG" ]] || return 1
+    SIGC=$(printf '%s' "$B64" | openssl dgst -sha256 -hmac "$SECRET_KEY" 2>/dev/null | awk '{print $NF}' | cut -c1-16 | tr 'a-f' 'A-F')
+    [[ "$SIGC" == "$SIG" ]] || return 1
+    PAYLOAD=$(printf '%s' "$B64" | base64 -d 2>/dev/null) || return 1
+    NOMBRE=${PAYLOAD%%|*}; PAYLOAD=${PAYLOAD#*|}
+    EXP=${PAYLOAD%%|*};  MACH=${PAYLOAD#*|}
+    [[ -n "$NOMBRE" && -n "$EXP" ]] || return 1
+    [[ "$EXP" != "0" && "$(date +%s)" -gt "$EXP" ]] && return 1
+    if [[ -n "$MACH" && "$MACH" != "$(machine_hash)" ]]; then return 1; fi
+    KEY_NOMBRE="$NOMBRE"
+    KEY_EXP="$EXP"
+    return 0
+}
 
 lic_json_str(){
     # lic_json_str "$JSON" clave1 clave2 ... -> primer valor string no vacio
@@ -89,25 +92,18 @@ lic_guardar_nombre(){
 consultar_licencia(){
     # Modo online: pregunta al Worker de Cloudflare.
     # Devuelve: 0 valida / 1 invalida / 2 servidor sin respuesta
-    local KEY="$1" RESP HC
+    local KEY="$1" RESP
     [[ -z "$LICENSE_URL" ]] && return 2
-    RESP=$(curl -G -sS --max-time 12 -A "GhostPanel/${GHOST_VER}" "$LICENSE_URL" \
-        --data-urlencode "key=$KEY" --data-urlencode "id=$(machine_hash)" \
-        -w '\n%{http_code}' 2>/dev/null) || return 2
-    HC=$(printf '%s' "$RESP" | tail -n1)
-    RESP=$(printf '%s' "$RESP" | sed '$d')
-    [[ -z "$RESP" || ! "$HC" =~ ^2[0-9][0-9]$ ]] && return 2
-    if printf '%s' "$RESP" | grep -q '"valid"[[:space:]]*:[[:space:]]*true'; then
+    RESP=$(curl -G -fsS --max-time 10 -A "Mozilla/5.0" "$LICENSE_URL" \
+        --data-urlencode "key=$KEY" --data-urlencode "id=$(machine_hash)" 2>/dev/null)
+    [[ -z "$RESP" ]] && return 2
+    if echo "$RESP" | grep -q '"valid":[[:space:]]*true'; then
         LICENSE_NOMBRE=$(lic_json_str "$RESP" name nombre owner cliente client customer username user)
-        LICENSE_NOMBRE=$(printf '%b' "${LICENSE_NOMBRE:-}" | tr -d '\000-\037' | cut -c1-40)
-        LICENSE_DIAS=$(printf '%s' "$RESP" | grep -o '"days_left"[[:space:]]*:[[:space:]]*[0-9]*' | head -1 | grep -o '[0-9]*$' || true)
+        LICENSE_NOMBRE=$(printf '%b' "$LICENSE_NOMBRE" | tr -d '\000-\037' | cut -c1-40)   # decodifica \u00e9 y limpia
+        LICENSE_DIAS=$(echo "$RESP" | grep -o '"days_left"[[:space:]]*:[[:space:]]*[0-9]*' | head -1 | grep -o '[0-9]*$')
         return 0
     fi
-    # respuesta JSON clara de rechazo
-    if printf '%s' "$RESP" | grep -q '"valid"[[:space:]]*:[[:space:]]*false'; then
-        return 1
-    fi
-    return 2
+    return 1
 }
 
 gate_licencia(){
@@ -117,9 +113,6 @@ gate_licencia(){
     FR_MID
     FR_TXT "  $(T t_id_srv): ${BLANCO}$(machine_hash)${NC}"
 
-    # Recarga conf por si se edito LICENSE_URL fuera del script
-    ghost_cargar_conf 2>/dev/null || true
-
     if [[ -z "$LICENSE_URL" ]]; then
         if [[ "${GHOST_DEV:-0}" == "1" ]]; then
             WARN "GHOST_DEV=1: omitiendo validacion de licencia (solo desarrollo)."
@@ -128,10 +121,8 @@ gate_licencia(){
         fi
         FR_TXT "  ${ROJO}$(T t_online_req)${NC}"
         FR_TXT "  $(T t_online_req2)"
-        FR_TXT "  ${GRIS}Edita $CONF_FILE y agrega:${NC}"
-        FR_TXT "  ${BLANCO}LICENSE_URL=https://tu-worker.ejemplo.workers.dev${NC}"
-        FR_TXT "  ${GRIS}O: Herramientas -> Auto-update -> opcion 4 (tras GHOST_DEV=1)${NC}"
-        FR_TXT "  ${GRIS}Desarrollo: GHOST_DEV=1 sudo bash $0${NC}"
+        FR_TXT "  ${GRIS}Configura LICENSE_URL en el script o en /etc/ghost-panel.conf${NC}"
+        FR_TXT "  ${GRIS}Desarrollo: GHOST_DEV=1 sudo bash ghost-panel-pro.sh${NC}"
         FR_BOT
         exit 1
     fi
@@ -454,6 +445,91 @@ sshd_puerto_actual(){
     [[ -z "$p" ]] && p=$(awk 'tolower($1)=="port"{print $2; exit}' "$SSHD_CFG" 2>/dev/null)
     echo "${p:-22}"
 }
+
+
+# puerto_ocupado PORT [tcp|udp|both]  -> 0 ocupado / 1 libre
+# Detecta sockets en escucha con ss (columna Local Address:Port).
+puerto_ocupado(){
+    local p="$1" proto="${2:-tcp}"
+    [[ "$p" =~ ^[0-9]+$ ]] || return 1
+    case "$proto" in
+        tcp)
+            ss -tln 2>/dev/null | awk -v p="$p" 'NR>1{
+                n=split($4,a,":"); if (a[n]==p) { found=1; exit }
+            } END{ exit found?0:1 }'
+            ;;
+        udp)
+            ss -uln 2>/dev/null | awk -v p="$p" 'NR>1{
+                n=split($4,a,":"); if (a[n]==p) { found=1; exit }
+            } END{ exit found?0:1 }'
+            ;;
+        both|*)
+            ss -tuln 2>/dev/null | awk -v p="$p" 'NR>1{
+                n=split($4,a,":"); if (a[n]==p) { found=1; exit }
+            } END{ exit found?0:1 }'
+            ;;
+    esac
+}
+
+# Nombre corto del proceso que escucha en PORT (si ss lo reporta).
+puerto_quien(){
+    local p="$1" proto="${2:-tcp}" line
+    case "$proto" in
+        udp)  line=$(ss -ulnp 2>/dev/null | awk -v p="$p" 'NR>1{n=split($5,a,":"); if(a[n]==p){print; exit}}') ;;
+        both) line=$(ss -tulnp 2>/dev/null | awk -v p="$p" 'NR>1{n=split($5,a,":"); if(a[n]==p){print; exit}}') ;;
+        *)    line=$(ss -tlnp 2>/dev/null | awk -v p="$p" 'NR>1{n=split($5,a,":"); if(a[n]==p){print; exit}}') ;;
+    esac
+    [[ -z "$line" ]] && return 0
+    if [[ "$line" =~ users:\(\(\"([^\"]+)\" ]]; then
+        printf '%s' "${BASH_REMATCH[1]}"
+    else
+        printf '%s' "otro servicio"
+    fi
+}
+
+# pedir_puerto VAR "Prompt [default]: " DEFAULT [tcp|udp|both] [allow_proc]
+# Si el puerto esta ocupado, avisa (proceso) y pregunta si queres elegir otro.
+# allow_proc opcional: si el puerto lo usa ese proceso, se considera libre (ej. sshd al reconfigurar).
+# Devuelve 0 y asigna VAR / 1 si cancela o agota intentos.
+pedir_puerto(){
+    local _var="$1" _prompt="$2" _def="${3:-}" _proto="${4:-tcp}" _allow="${5:-}"
+    local p quien intentos=0 sn
+    while (( intentos < 8 )); do
+        if [[ -n "$_def" ]]; then
+            read -r -p "$_prompt" p
+            p=${p:-$_def}
+        else
+            read -r -p "$_prompt" p
+        fi
+        if ! [[ "$p" =~ ^[0-9]+$ && "$p" -ge 1 && "$p" -le 65535 ]]; then
+            ERR "Puerto invalido (entero 1-65535)."
+            intentos=$((intentos+1))
+            continue
+        fi
+        if puerto_ocupado "$p" "$_proto"; then
+            quien=$(puerto_quien "$p" "$_proto")
+            if [[ -n "$_allow" && -n "$quien" && "$quien" == "$_allow" ]]; then
+                printf -v "$_var" '%s' "$p"
+                return 0
+            fi
+            ERR "El puerto ${p}/${_proto} esta ocupado${quien:+ por ${quien}}."
+            read -r -p "Queres elegir otro puerto? (s/n): " sn
+            if [[ "$sn" != "s" && "$sn" != "S" ]]; then
+                INFO "Cancelado."
+                return 1
+            fi
+            _def=""
+            _prompt="Puerto libre (1-65535): "
+            intentos=$((intentos+1))
+            continue
+        fi
+        printf -v "$_var" '%s' "$p"
+        return 0
+    done
+    ERR "Demasiados intentos sin un puerto libre."
+    return 1
+}
+
 
 sshd_recargar(){
     systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null \
@@ -1593,8 +1669,7 @@ menu_webmin(){
                fi
                PAUSA ;;
             3) ufw allow 10000/tcp 2>/dev/null && OK "Puerto abierto." || ERR "UFW no activo."; PAUSA ;;
-            4) read -r -p "Nuevo puerto: " P
-               if ! [[ "$P" =~ ^[0-9]+$ && "$P" -ge 1 && "$P" -le 65535 ]]; then ERR "Puerto invalido."; PAUSA; continue; fi
+            4) if ! pedir_puerto P "Nuevo puerto Webmin: " "" tcp; then PAUSA; continue; fi
                sed -i "s/^port=.*/port=$P/;s/^listen=.*/listen=$P/" /etc/webmin/miniserv.conf 2>/dev/null
                ufw allow "$P/tcp" >/dev/null 2>&1
                systemctl restart webmin 2>/dev/null && OK "Puerto cambiado a $P." || ERR "Webmin no instalado."
@@ -1717,12 +1792,8 @@ F2BEOF
 
 cambiar_puerto_ssh(){
     local P
-    read -r -p "Puerto SSH nuevo (ej. 2222): " P
-    [[ "$P" =~ ^[0-9]+$ && "$P" -ge 1 && "$P" -le 65535 ]] || { ERR "Puerto invalido."; PAUSA; return; }
-    if ss -tln 2>/dev/null | awk 'NR>1{print $4}' | grep -qE "[:.]${P}$"; then
-        ss -tlnp 2>/dev/null | grep -E "[:.]${P}[[:space:]]" | grep -q 'sshd' \
-            || { ERR "El puerto $P ya lo usa otro servicio."; PAUSA; return; }
-    fi
+    # Permitimos que el propio sshd ya este en ese puerto (reconfiguracion).
+    if ! pedir_puerto P "Puerto SSH nuevo (ej. 2222): " "" tcp sshd; then PAUSA; return; fi
     if systemctl is-active --quiet ssh.socket 2>/dev/null; then
         INFO "Ubuntu usa ssh.socket (ignora Port de sshd_config): paso a ssh.service."
         systemctl disable --now ssh.socket >/dev/null 2>&1
@@ -1866,8 +1937,6 @@ quitar_auto_menu(){
 diagnostico(){
     echo -e "${CIAN}--- DIAGNOSTICO DEL SERVIDOR ---${NC}"
     local RAM_P DISCO_P LOAD ADV=0
-    echo -e " Panel: ${BLANCO}v${GHOST_VER}${NC}   Update: ${GRIS}${REPO_RAW:0:60}${NC}"
-    echo -e " Licencia URL: ${GRIS}${LICENSE_URL:-no configurada}${NC}"
     RAM_P=$(free | awk '/Mem/{printf "%d", $3*100/$2}')
     DISCO_P=$(df -h / | awk 'NR==2{gsub(/%/,"",$5); print $5}')
     LOAD=$(cut -d' ' -f1 /proc/loadavg)
@@ -1893,32 +1962,15 @@ cambiar_hostname(){
 
 ghost_ver_de(){ grep -m1 "^GHOST_VER=" "$1" 2>/dev/null | cut -d"'" -f2; }
 
-ghost_script_valido(){
-    # ghost_script_valido ARCHIVO -> 0 si parece GHOST PANEL usable
-    local F="$1" SZ
-    [[ -f "$F" && -s "$F" ]] || return 1
-    SZ=$(wc -c < "$F" 2>/dev/null || echo 0)
-    (( SZ > 5000 )) || return 1
-    bash -n "$F" 2>/dev/null || return 1
-    grep -q "GHOST PANEL" "$F" 2>/dev/null || return 1
-    grep -q "^GHOST_VER=" "$F" 2>/dev/null || return 1
-    # evita HTML de error 404 de GitHub/CDN
-    head -c 200 "$F" 2>/dev/null | grep -qiE '<!DOCTYPE|<html|Not Found|404' && return 1
-    return 0
-}
-
 ghost_instalar_script(){
     # ghost_instalar_script ARCHIVO -> valida, compara versiones, respalda, instala y relanza
-    # NO toca: key de licencia, conf, usuarios, banners, xray config.
     local F="$1" NV CV="$GHOST_VER" DEST="$VPSMGR_DEST" RUN SN BK
-    if ! ghost_script_valido "$F"; then
-        ERR "El archivo no es un GHOST PANEL valido (sintaxis, firma o descarga corrupta/HTML)."
-        return 1
-    fi
+    bash -n "$F" 2>/dev/null || { ERR "El archivo no es un script bash valido."; return 1; }
+    grep -q "GHOST PANEL" "$F" || { ERR "No parece ser GHOST PANEL."; return 1; }
     NV=$(ghost_ver_de "$F")
     echo -e "  Instalada: ${AMARILLO}v${CV}${NC}    Nueva: ${VERDE}${NV:+v$NV}${NV:-sin version}${NC}"
     if [[ -z "$NV" ]]; then
-        WARN "El archivo no declara version: puede ser anterior al rediseno."
+        WARN "El archivo no declara version: es ANTERIOR al rediseno. Instalarlo pierde la interfaz y los arreglos."
     elif [[ "$NV" == "$CV" ]]; then
         INFO "Es la misma version que la instalada."
     elif [[ "$(printf '%s\n%s\n' "$CV" "$NV" | sort -V | tail -1)" == "$CV" ]]; then
@@ -1926,73 +1978,50 @@ ghost_instalar_script(){
     fi
     read -r -p "  Instalar igual? (s/n): " SN
     [[ "$SN" == "s" ]] || { INFO "Cancelado."; return 1; }
-    RUN="${GHOST_SELF:-$(readlink -f "$0" 2>/dev/null || true)}"
+    RUN="${GHOST_SELF:-$(readlink -f "$0" 2>/dev/null)}"
     mkdir -p /root/backups; chmod 700 /root/backups
     BK="/root/backups/ghost-panel-v${CV}-$(date +%F_%H%M%S).sh"
-    if [[ -n "$RUN" && -f "$RUN" ]]; then
-        cp -a "$RUN" "$BK" 2>/dev/null && INFO "Respaldo: $BK"
-    elif [[ -f "$DEST" ]]; then
-        cp -a "$DEST" "$BK" 2>/dev/null && INFO "Respaldo: $BK"
-    fi
-    # install recrea el destino: no corrompe el script que bash esta leyendo
+    if [[ -n "$RUN" && -f "$RUN" ]]; then cp -a "$RUN" "$BK" 2>/dev/null && INFO "Respaldo: $BK"; fi
+    # install borra y recrea el destino: no corrompe el script que bash esta leyendo
     install -m 755 "$F" "$DEST" || { ERR "No se pudo escribir $DEST"; return 1; }
-    ln -sf "$DEST" /usr/local/bin/vpsmgr 2>/dev/null || true
-    ln -sf "$DEST" /usr/local/bin/vps 2>/dev/null || true
     OK "Instalado en $DEST (v${NV:-?})"
-    if [[ -n "$RUN" && -f "$RUN" && "$RUN" != "$(readlink -f "$DEST" 2>/dev/null)" && -w "$RUN" ]]; then
-        install -m 755 "$F" "$RUN" 2>/dev/null && OK "Tambien actualizado el archivo en ejecucion: $RUN"
+    if [[ -n "$RUN" && -f "$RUN" && "$RUN" != "$(readlink -f "$DEST")" && -w "$RUN" ]]; then
+        install -m 755 "$F" "$RUN" 2>/dev/null && OK "Tambien actualizado el archivo que estas ejecutando: $RUN"
     fi
     vps_log INFO "script actualizado v$CV -> v${NV:-?}"
-    INFO "Se preservan: licencia, conf, usuarios, Xray, banners y limites."
     read -r -p "  Reiniciar el panel ahora con la version nueva? (s/n): " SN
     [[ "$SN" == "s" ]] && exec "$DEST"
     return 0
 }
 
 auto_update_descargar(){
-    local TMPF URL RC
-    [[ -n "${REPO_RAW:-}" ]] || { ERR "Fuente sin configurar (opcion 2)."; PAUSA; return; }
-    URL="${REPO_RAW}$([[ "$REPO_RAW" == *\?* ]] && echo '&' || echo '?')cb=$(date +%s)"
+    local TMPF URL
+    [[ -n "$REPO_RAW" ]] || { ERR "Fuente sin configurar (opcion 2)."; PAUSA; return; }
+    URL="${REPO_RAW}$([[ "$REPO_RAW" == *\?* ]] && echo '&' || echo '?')cb=$(date +%s)"   # evita cache del CDN
     TMPF=$(mktemp /tmp/vpsmgr.XXXXXX) || { ERR "Sin temporal."; PAUSA; return; }
     INFO "Descargando desde: $REPO_RAW"
-    RC=1
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL --max-time 45 -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
-            -A "GhostPanel/${GHOST_VER}" "$URL" -o "$TMPF" && RC=0
-    elif command -v wget >/dev/null 2>&1; then
-        wget -q --no-cache -T 45 -O "$TMPF" "$URL" && RC=0
+        curl -fsSL --max-time 30 -H 'Cache-Control: no-cache' "$URL" -o "$TMPF" 2>/dev/null
     else
-        ERR "Se necesita curl o wget."
-        rm -f "$TMPF"
-        PAUSA
-        return
+        wget -q --no-cache -T 30 "$URL" -O "$TMPF" 2>/dev/null
     fi
-    if [[ $RC -eq 0 ]] && ghost_script_valido "$TMPF"; then
-        ghost_instalar_script "$TMPF"
-    else
-        ERR "No se pudo descargar un script valido. Revisa la URL (repo publico, enlace raw) y la red."
-        if [[ -s "$TMPF" ]]; then
-            INFO "Primeras lineas del archivo recibido:"
-            head -n 5 "$TMPF" 2>/dev/null | sed 's/^/  /'
-        fi
-    fi
+    if [[ -s "$TMPF" ]]; then ghost_instalar_script "$TMPF"
+    else ERR "No se pudo descargar. Revisa la URL (repo publico, enlace raw) y la red."; fi
     rm -f "$TMPF"
     PAUSA
 }
 
 auto_update(){
-    local F U L
+    local F U
     while true; do
         cabecera
         SUBTOP "ACTUALIZAR SCRIPT"
         ui_kv "Version" "v${GHOST_VER}"
         ui_kv "Fuente" "${REPO_RAW:-sin configurar}"
-        ui_kv "Licencia URL" "${LICENSE_URL:-sin configurar}"
         FR_MID
         FR_OPT 1 "Actualizar desde la fuente" "" ""
         FR_OPT 2 "Cambiar fuente (URL raw)" "" ""
         FR_OPT 3 "Instalar desde archivo local" "" ""
-        FR_OPT 4 "Configurar LICENSE_URL (Worker)" "" ""
         FR_OPT 0 "$(T t_volver)" "" ""
         FR_BOT
         PROMPT
@@ -2000,20 +2029,14 @@ auto_update(){
             1) auto_update_descargar ;;
             2) read -r -p "  URL raw de TU repo (https://...): " U
                if [[ "$U" =~ ^https?://[^[:space:]]+$ ]]; then
-                   ghost_conf_set UPDATE_URL "$U"
-                   REPO_RAW="$U"
-                   OK "Fuente guardada en $CONF_FILE"
+                   touch /etc/ghost-panel.conf; chmod 600 /etc/ghost-panel.conf
+                   sed -i '/^UPDATE_URL=/d' /etc/ghost-panel.conf
+                   echo "UPDATE_URL=$U" >> /etc/ghost-panel.conf
+                   REPO_RAW="$U"; OK "Fuente guardada."
                else ERR "URL invalida."; fi
                PAUSA ;;
             3) read -r -p "  Ruta del archivo .sh: " F
                if [[ -f "$F" ]]; then ghost_instalar_script "$F"; else ERR "No existe: $F"; fi
-               PAUSA ;;
-            4) read -r -p "  URL del Worker de licencias (https://...): " L
-               if [[ "$L" =~ ^https?://[^[:space:]]+$ ]]; then
-                   ghost_conf_set LICENSE_URL "$L"
-                   LICENSE_URL="$L"
-                   OK "LICENSE_URL guardada en $CONF_FILE"
-               else ERR "URL invalida."; fi
                PAUSA ;;
             0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
         esac
@@ -2131,8 +2154,7 @@ PYEOF
 checkuser_instalar(){
     echo -e "${CIAN}--- INSTALADOR CHECKUSER ---${NC}"
     local PORT TOKEN
-    read -r -p "Puerto para el checkuser [8080]: " PORT; PORT=${PORT:-8080}
-    [[ "$PORT" =~ ^[0-9]+$ ]] || { ERR "Puerto invalido."; PAUSA; return; }
+    if ! pedir_puerto PORT "Puerto para el checkuser [8080]: " "8080" tcp; then PAUSA; return; fi
     read -r -p "Token de seguridad (entero = aleatorio): " TOKEN
     [[ -z "$TOKEN" ]] && TOKEN=$(tr -dc 'a-zA-Z0-9' </dev/urandom 2>/dev/null | head -c 20)
     printf 'PORT=%s\nTOKEN=%s\n' "$PORT" "$TOKEN" > /etc/vps-checkuser.conf
@@ -2225,8 +2247,7 @@ instalar_xray(){
         [[ "$SN" != "s" ]] && { PAUSA; return; }
     fi
     echo -e "${CIAN}--- INSTALADOR XRAY (VLESS + REALITY) ---${NC}"
-    read -r -p "Puerto para Xray [8443]: " XP; XP=${XP:-8443}
-    [[ "$XP" =~ ^[0-9]+$ && "$XP" -ge 1 && "$XP" -le 65535 ]] || { ERR "Puerto invalido."; PAUSA; return; }
+    if ! pedir_puerto XP "Puerto para Xray [8443]: " "8443" tcp; then PAUSA; return; fi
     read -r -p "SNI (dominio camuflaje) [www.microsoft.com]: " SNI; SNI=${SNI:-www.microsoft.com}
 
     INFO "Instalando Xray (descarga oficial)..."
@@ -2305,9 +2326,10 @@ instalar_ssl_stunnel(){
         [[ "$SN" != "s" ]] && { PAUSA; return; }
     fi
     echo -e "${CIAN}--- INSTALADOR SSL (STUNNEL) ---${NC}"
-    read -r -p "Puerto SSL [443]: " SP; SP=${SP:-443}
-    [[ "$SP" =~ ^[0-9]+$ && "$SP" -ge 1 && "$SP" -le 65535 ]] || { ERR "Puerto invalido."; PAUSA; return; }
-    read -r -p "Puerto SSH destino [22]: " SSHP; SSHP=${SSHP:-22}
+    if ! pedir_puerto SP "Puerto SSL [443]: " "443" tcp; then PAUSA; return; fi
+    read -r -p "Puerto SSH destino [$(sshd_puerto_actual)]: " SSHP
+    SSHP=${SSHP:-$(sshd_puerto_actual)}
+    [[ "$SSHP" =~ ^[0-9]+$ && "$SSHP" -ge 1 && "$SSHP" -le 65535 ]] || { ERR "Puerto SSH invalido."; PAUSA; return; }
 
     INFO "Instalando stunnel4..."
     apt update -y >/dev/null 2>&1
@@ -2675,8 +2697,7 @@ instalar_hysteria(){
         [[ "$SN" != "s" ]] && { PAUSA; return; }
     fi
     echo -e "${CIAN}--- INSTALADOR HYSTERIA2 (UDP) ---${NC}"
-    read -r -p "Puerto UDP [8443]: " HP; HP=${HP:-8443}
-    [[ "$HP" =~ ^[0-9]+$ && "$HP" -ge 1 && "$HP" -le 65535 ]] || { ERR "Puerto invalido."; PAUSA; return; }
+    if ! pedir_puerto HP "Puerto UDP [8443]: " "8443" udp; then PAUSA; return; fi
     INFO "Instalando Hysteria2..."
     bash <(curl -fsSL https://get.hy2.sh/) >/dev/null 2>&1 \
         || { ERR "No se pudo instalar (sin red?)."; PAUSA; return; }
@@ -2746,8 +2767,7 @@ instalar_badvpn(){
     fi
 
     echo -e "${CIAN}--- INSTALADOR BADVPN (UDP GW) ---${NC}"
-    read -r -p "Puerto UDP GW [7300]: " BP; BP=${BP:-7300}
-    [[ "$BP" =~ ^[0-9]+$ && "$BP" -ge 1 && "$BP" -le 65535 ]] || { ERR "Puerto invalido."; PAUSA; return; }
+    if ! pedir_puerto BP "Puerto UDP GW [7300]: " "7300" tcp; then PAUSA; return; fi
 
     # El paquete "badvpn" NO existe en los repos de Ubuntu 22.04/24.04.
     # Se compila solo el modulo udpgw desde el codigo fuente oficial.
@@ -2848,8 +2868,7 @@ instalar_xray_ws(){
             || { ERR "No se pudo instalar Xray."; PAUSA; return; }
     fi
     echo -e "${CIAN}--- XRAY VLESS + WEBSOCKET (para CDN) ---${NC}"
-    read -r -p "Puerto WS [8080]: " WP; WP=${WP:-8080}
-    [[ "$WP" =~ ^[0-9]+$ && "$WP" -ge 1 && "$WP" -le 65535 ]] || { ERR "Puerto invalido."; PAUSA; return; }
+    if ! pedir_puerto WP "Puerto WS [8080]: " "8080" tcp; then PAUSA; return; fi
     read -r -p "Path WS [/vpsjb]: " WPATH; WPATH=${WPATH:-/vpsjb}
     [[ "$WPATH" == /* ]] || WPATH="/$WPATH"
     local UUID; UUID=$(xray uuid)
@@ -2898,8 +2917,7 @@ instalar_wsepro(){
         [[ "$SN" != "s" ]] && { PAUSA; return; }
     fi
     echo -e "${CIAN}--- WEBSOCKET SSH (ws-epro propio, WS -> SSH) ---${NC}"
-    read -r -p "Puerto WS [80]: " EP; EP=${EP:-80}
-    [[ "$EP" =~ ^[0-9]+$ && "$EP" -ge 1 && "$EP" -le 65535 ]] || { ERR "Puerto invalido."; PAUSA; return; }
+    if ! pedir_puerto EP "Puerto WS [80]: " "80" tcp; then PAUSA; return; fi
     local SSHP; SSHP=$(sshd_puerto_actual)
 
     cat > /usr/local/bin/vpsjb-ws.py <<'WSEOF'
@@ -3129,31 +3147,92 @@ adguard_activo(){
 }
 
 instalar_adguard(){
+    # El install.sh oficial NO usa -c/-w como rutas de config:
+    #   -c = canal (release|beta|edge|development)
+    #   -o = directorio base (queda /opt/AdGuardHome)
+    #   -r = reinstalar
+    # -c/-w de config son del BINARIO AdGuardHome, no del install.sh.
     echo -e "${CIAN}--- INSTALADOR AdGuard Home ---${NC}"
+    local REINST=0 ARCH URL TMP AGH="/opt/AdGuardHome/AdGuardHome" CFG="/opt/AdGuardHome/AdGuardHome.yaml"
     if adguard_instalado; then
         read -r -p "AdGuard ya esta instalado. Reinstalar? (s/n): " SN
         [[ "$SN" != "s" ]] && { PAUSA; return; }
-        systemctl stop AdGuardHome 2>/dev/null
+        REINST=1
+        systemctl stop AdGuardHome 2>/dev/null || true
+        pkill -f '/opt/AdGuardHome/AdGuardHome' 2>/dev/null || true
+        sleep 1
     fi
-    INFO "Liberando el stub DNS de systemd-resolved (necesario para puerto 53 local)..."
+
+    INFO "Liberando puerto 53 (stub de systemd-resolved)..."
     mkdir -p /etc/systemd/resolved.conf.d
     cat > /etc/systemd/resolved.conf.d/adguardhome.conf <<'RSEOF'
 [Resolve]
 DNS=1.1.1.1
 DNSStubListener=no
 RSEOF
-    ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null
+    # Evitar que resolv.conf apunte al stub 127.0.0.53
+    ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null || true
     systemctl restart systemd-resolved 2>/dev/null || true
-
-    INFO "Descargando e instalando AdGuard Home (script oficial)..."
-    if ! curl -s -S -L --max-time 60 https://raw.githubusercontent.com/AdguardTeam/AdGuardHome/master/scripts/install.sh | sh -s -- -v -c /opt/AdGuardHome/AdGuardHome.yaml -w /opt/AdGuardHome; then
-        ERR "No se pudo instalar AdGuard Home (sin red o error del instalador)."
-        PAUSA; return
+    sleep 1
+    # Si algo sigue en :53, avisar (no abortar: AdGuard puede fallar al arrancar y se diagnostica abajo)
+    if ss -uln 2>/dev/null | awk 'NR>1{n=split($4,a,":"); if(a[n]==53){found=1}} END{exit found?0:1}'; then
+        WARN "El puerto UDP 53 sigue en uso: $(ss -ulnp 2>/dev/null | awk 'NR>1{n=split($5,a,":"); if(a[n]==53){print; exit}}')"
+        WARN "Si AdGuard no arranca, libera el puerto 53 y reintenta."
     fi
 
+    INFO "Descargando e instalando AdGuard Home..."
+    # 1) Script oficial (flags correctos)
+    local INST_OK=0
+    if (( REINST )); then
+        if curl -s -S -L --max-time 30 https://raw.githubusercontent.com/AdguardTeam/AdGuardHome/master/scripts/install.sh \
+            | sh -s -- -v -c release -o /opt -r; then
+            INST_OK=1
+        fi
+    else
+        if curl -s -S -L --max-time 30 https://raw.githubusercontent.com/AdguardTeam/AdGuardHome/master/scripts/install.sh \
+            | sh -s -- -v -c release -o /opt; then
+            INST_OK=1
+        fi
+    fi
+
+    # 2) Fallback manual si el script oficial fallo
+    if [[ $INST_OK -ne 1 || ! -x "$AGH" ]]; then
+        WARN "Script oficial fallo o no dejo el binario. Instalacion manual..."
+        case "$(uname -m)" in
+            x86_64|amd64) ARCH=amd64 ;;
+            aarch64|arm64) ARCH=arm64 ;;
+            armv7l|armhf) ARCH=armv7 ;;
+            *) ARCH=amd64 ;;
+        esac
+        URL="https://static.adtidy.org/adguardhome/release/AdGuardHome_linux_${ARCH}.tar.gz"
+        TMP=$(mktemp -d /tmp/agh-XXXXXX) || { ERR "Sin temporal."; PAUSA; return; }
+        if curl -fsSL --max-time 120 "$URL" -o "$TMP/agh.tar.gz" \
+            && tar -C "$TMP" -xzf "$TMP/agh.tar.gz" \
+            && [[ -x "$TMP/AdGuardHome/AdGuardHome" ]]; then
+            mkdir -p /opt/AdGuardHome
+            # Detener servicio previo si existe
+            systemctl stop AdGuardHome 2>/dev/null || true
+            "$TMP/AdGuardHome/AdGuardHome" -s uninstall 2>/dev/null || true
+            install -m 755 "$TMP/AdGuardHome/AdGuardHome" "$AGH"
+            # Copiar frontend y demas si vinieron en el tar
+            cp -a "$TMP/AdGuardHome/." /opt/AdGuardHome/ 2>/dev/null || true
+            chmod 755 "$AGH"
+            INST_OK=1
+            OK "Binario instalado manualmente en $AGH"
+        else
+            ERR "No se pudo descargar AdGuard Home ($URL)."
+            rm -rf "$TMP"
+            PAUSA; return
+        fi
+        rm -rf "$TMP"
+    fi
+
+    [[ -x "$AGH" ]] || { ERR "No existe el binario $AGH"; PAUSA; return; }
+
     mkdir -p /opt/AdGuardHome
-    if [[ ! -f /opt/AdGuardHome/AdGuardHome.yaml ]]; then
-        cat > /opt/AdGuardHome/AdGuardHome.yaml <<'AGEOF'
+    # Config segura: DNS solo local + interfaz WG; panel web solo localhost
+    if [[ ! -f "$CFG" ]] || (( REINST )); then
+        cat > "$CFG" <<'AGEOF'
 http:
   address: 127.0.0.1:3000
 dns:
@@ -3178,12 +3257,18 @@ filters:
     url: https://big.oisd.nl/
     name: OISD Big
 AGEOF
+        chmod 644 "$CFG"
     fi
 
-    systemctl enable --now AdGuardHome 2>/dev/null || {
-        /opt/AdGuardHome/AdGuardHome -s install -c /opt/AdGuardHome/AdGuardHome.yaml -w /opt/AdGuardHome 2>/dev/null
-        systemctl enable --now AdGuardHome 2>/dev/null
-    }
+    # Registrar/iniciar servicio systemd (aqui SI van -c config y -w workdir)
+    systemctl stop AdGuardHome 2>/dev/null || true
+    "$AGH" -s uninstall 2>/dev/null || true
+    if ! "$AGH" -s install -c "$CFG" -w /opt/AdGuardHome; then
+        ERR "No se pudo registrar el servicio systemd de AdGuard."
+        PAUSA; return
+    fi
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now AdGuardHome 2>/dev/null || "$AGH" -s start 2>/dev/null
     sleep 2
 
     if adguard_activo; then
@@ -3200,7 +3285,10 @@ AGEOF
         echo -e " Otros protocolos: configura DNS del celular a 10.66.0.1 solo si usas el tunel WG."
         vps_log INFO "AdGuard Home instalado (bind local + wg0)"
     else
-        ERR "AdGuard no levanto. Revisa: journalctl -u AdGuardHome -n 30"
+        ERR "AdGuard no levanto. Revisa: journalctl -u AdGuardHome -n 40"
+        if ss -uln 2>/dev/null | awk 'NR>1{n=split($4,a,":"); if(a[n]==53){found=1}} END{exit found?0:1}'; then
+            ERR "Puerto 53 sigue ocupado. Eso suele impedir el arranque del DNS."
+        fi
     fi
     PAUSA
 }
@@ -3414,8 +3502,7 @@ instalar_shadowsocks(){
         [[ "$SN" != "s" ]] && { PAUSA; return; }
     fi
     echo -e "${CIAN}--- SHADOWSOCKS ---${NC}"
-    read -r -p "Puerto SS [8388]: " SP; SP=${SP:-8388}
-    [[ "$SP" =~ ^[0-9]+$ && "$SP" -ge 1 && "$SP" -le 65535 ]] || { ERR "Puerto invalido."; PAUSA; return; }
+    if ! pedir_puerto SP "Puerto SS [8388]: " "8388" both; then PAUSA; return; fi
     INFO "Instalando shadowsocks-libev (repositorio Ubuntu)..."
     apt update -y >/dev/null 2>&1
     apt install -y shadowsocks-libev >/dev/null 2>&1 || { ERR "No se pudo instalar shadowsocks-libev."; PAUSA; return; }
@@ -3468,8 +3555,7 @@ instalar_trojan(){
         bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1             || { ERR "No se pudo instalar Xray."; PAUSA; return; }
     fi
     echo -e "${CIAN}--- TROJAN (dentro de Xray) ---${NC}"
-    read -r -p "Puerto Trojan [9443]: " TP; TP=${TP:-9443}
-    [[ "$TP" =~ ^[0-9]+$ && "$TP" -ge 1 && "$TP" -le 65535 ]] || { ERR "Puerto invalido."; PAUSA; return; }
+    if ! pedir_puerto TP "Puerto Trojan [9443]: " "9443" tcp; then PAUSA; return; fi
     read -r -p "SNI (dominio camuflaje) [www.microsoft.com]: " SNI; SNI=${SNI:-www.microsoft.com}
     mkdir -p /etc/vpsjb-trojan
     openssl req -x509 -nodes -newkey rsa:2048 -days 3650 -subj "/CN=$SNI" \
@@ -3527,8 +3613,7 @@ instalar_wireguard(){
         [[ "$SN" != "s" ]] && { PAUSA; return; }
     fi
     echo -e "${CIAN}--- WIREGUARD ---${NC}"
-    read -r -p "Puerto UDP [51820]: " WP; WP=${WP:-51820}
-    [[ "$WP" =~ ^[0-9]+$ && "$WP" -ge 1 && "$WP" -le 65535 ]] || { ERR "Puerto invalido."; PAUSA; return; }
+    if ! pedir_puerto WP "Puerto UDP [51820]: " "51820" udp; then PAUSA; return; fi
     INFO "Instalando wireguard..."
     apt update -y >/dev/null 2>&1
     apt install -y wireguard >/dev/null 2>&1 || { ERR "No se pudo instalar wireguard."; PAUSA; return; }
