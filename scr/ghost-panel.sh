@@ -3,7 +3,12 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 3.7.1
+#  Version: 3.7.3
+#  Cambios 3.7.3:
+#    - AdGuard: unit systemd propio + parar proceso del install.sh (ya no queda DETENIDO)
+#    - AdGuard: config minima estable; verifica systemctl is-active real
+#  Cambios 3.7.2:
+#    - REPO_RAW: fuente de auto-update apunta a pitubarrios/ghost-panel (URL 404 anterior)
 #  Cambios 3.7.1:
 #    - AdGuard: bind 10.66.0.1 solo si la IP esta asignada (evita crash al arrancar)
 #    - AdGuard: auto-reparacion en Estado (libera :53, reescribe yaml, re-registra unit)
@@ -23,7 +28,7 @@ AZUL='\033[1;34m'; CIAN='\033[1;36m'; BLANCO='\033[1;37m'
 NC='\033[0m'
 NARANJA='\033[38;5;208m'; GRIS='\033[38;5;245m'; MORADO='\033[38;5;141m'
 BORDE="$GRIS"          # color del marco
-GHOST_VER='3.7.1'
+GHOST_VER='3.7.3'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -33,7 +38,7 @@ SECRET_KEY='Copiaesta**'
 KEY_FILE='/etc/vps-manager.key'
 PREFIJO_KEY='VPSJB1'   # prefijo de marca; tambien acepta keys viejas VPSMGR1
 # URL del script en TU repo (para la opcion de auto-update)
-REPO_RAW='https://raw.githubusercontent.com/pitubarrios/vps-manager/refs/heads/main/scr/ghost-panel-pro.sh'
+REPO_RAW='https://raw.githubusercontent.com/pitubarrios/ghost-panel/refs/heads/main/scr/ghost-panel.sh'
 VPSMGR_DEST=/usr/local/bin/ghostpanel
 if [[ -r /etc/ghost-panel.conf ]]; then
     _u=$(awk -F= '/^UPDATE_URL=/{print substr($0,12); exit}' /etc/ghost-panel.conf)
@@ -47,7 +52,7 @@ LICENSE_URL='https://vps-licencias.jorgebarriosmpya.workers.dev'
 GRACE_SECS=259200                      # 72h de gracia si el servidor no responde
 LICENSE_CACHE='/etc/vps-license.cache'
 # REPO_RAW: cuando tengas tu GitHub, cambia la URL de abajo o usa
-# /etc/ghost-panel.conf -> UPDATE_URL=https://raw.githubusercontent.com/TU_USER/TU_REPO/refs/heads/main/ghost-panel-pro.sh
+# /etc/ghost-panel.conf -> UPDATE_URL=https://raw.githubusercontent.com/pitubarrios/ghost-panel/refs/heads/main/scr/ghost-panel.sh
 
 machine_hash(){
     if [[ -f /etc/machine-id ]]; then
@@ -3151,12 +3156,10 @@ adguard_instalado(){
 }
 
 adguard_activo(){
-    # systemctl, proceso o puerto web 3000 / DNS 53 del binario
+    # Preferir unit systemd (estable). Fallback: proceso AdGuardHome.
     systemctl is-active --quiet AdGuardHome 2>/dev/null && return 0
     pgrep -x AdGuardHome >/dev/null 2>&1 && return 0
     pgrep -f '/opt/AdGuardHome/AdGuardHome' >/dev/null 2>&1 && return 0
-    # Puerto web del panel (cualquiera de las binds)
-    ss -tln 2>/dev/null | awk 'NR>1{n=split($4,a,":"); if(a[n]==3000){found=1}} END{exit found?0:1}' && return 0
     return 1
 }
 
@@ -3178,15 +3181,14 @@ adguard_ip_disponible(){
 
 adguard_escribir_config(){
     # DNS solo en IPs que EXISTEN ahora: 127.0.0.1 siempre; 10.66.0.1 solo si WireGuard
-    # tiene esa direccion activa. Bind a 10.66.0.1 sin la IP asignada tumba el servicio
-    # (cannot assign requested address) y systemctl lo deja en failed/stopped.
+    # tiene esa direccion activa. Bind a IP inexistente = "cannot assign requested address" = crash.
     local CFG="${1:-/opt/AdGuardHome/AdGuardHome.yaml}" hosts
     hosts='    - 127.0.0.1'
     if adguard_ip_disponible "10.66.0.1"; then
         hosts+=$'\n    - 10.66.0.1'
     fi
     mkdir -p "$(dirname "$CFG")"
-    # Preservar usuario/password del panel web si ya se configuro el wizard
+    # Preservar users del wizard si ya existen
     local USERS_BLOCK=""
     if [[ -f "$CFG" ]] && grep -q '^users:' "$CFG" 2>/dev/null; then
         USERS_BLOCK=$(awk '
@@ -3197,33 +3199,27 @@ adguard_escribir_config(){
             }
         ' "$CFG")
     fi
+    # Config minima y estable (sin schema_version fijo: AdGuard lo migra solo)
     cat > "$CFG" <<AGEOF
-# Generado por Ghost Panel — no bindear IPs inexistentes
-schema_version: 28
 http:
   address: 127.0.0.1:3000
-  session_ttl: 720h
 dns:
   bind_hosts:
 ${hosts}
   port: 53
   upstream_dns:
-    - https://dns.cloudflare.com/dns-query
-    - https://dns.google/dns-query
+    - 1.1.1.1
+    - 8.8.8.8
   bootstrap_dns:
     - 1.1.1.1
     - 8.8.8.8
   protection_enabled: true
   parental_enabled: false
   ratelimit: 20
-  cache_size: 4194304
 filters:
   - enabled: true
     url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt
     name: AdGuard DNS filter
-  - enabled: true
-    url: https://big.oisd.nl/
-    name: OISD Big
 AGEOF
     if [[ -n "$USERS_BLOCK" ]]; then
         printf '\n%s\n' "$USERS_BLOCK" >> "$CFG"
@@ -3236,36 +3232,87 @@ adguard_liberar_53(){
     cat > /etc/systemd/resolved.conf.d/adguardhome.conf <<'RSEOF'
 [Resolve]
 DNS=1.1.1.1
+FallbackDNS=8.8.8.8
 DNSStubListener=no
 RSEOF
-    # Preferir resolv de systemd-resolved (sin stub en :53)
     if [[ -f /run/systemd/resolve/resolv.conf ]]; then
         ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null || true
     fi
     systemctl restart systemd-resolved 2>/dev/null || true
     sleep 1
+    # Si algo sigue en :53 que no sea AdGuard, intentar detenerlo
+    if ss -ulnp 2>/dev/null | grep -qE ':(53)\\b' && ! pgrep -f AdGuardHome >/dev/null 2>&1; then
+        systemctl stop systemd-resolved 2>/dev/null || true
+        sleep 1
+        systemctl start systemd-resolved 2>/dev/null || true
+        sleep 1
+    fi
+}
+
+adguard_unit_propio(){
+    # Unit systemd propio (mas fiable que "AdGuardHome -s install")
+    local AGH="/opt/AdGuardHome/AdGuardHome" CFG="/opt/AdGuardHome/AdGuardHome.yaml"
+    cat > /etc/systemd/system/AdGuardHome.service <<UNIT
+[Unit]
+Description=AdGuard Home (Ghost Panel)
+Documentation=https://github.com/AdguardTeam/AdGuardHome
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${AGH} -c ${CFG} -w /opt/AdGuardHome --no-check-update --pidfile /run/AdGuardHome.pid
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload 2>/dev/null || true
+}
+
+adguard_parar_todo(){
+    systemctl stop AdGuardHome 2>/dev/null || true
+    /opt/AdGuardHome/AdGuardHome -s stop 2>/dev/null || true
+    pkill -x AdGuardHome 2>/dev/null || true
+    pkill -f '/opt/AdGuardHome/AdGuardHome' 2>/dev/null || true
+    sleep 1
 }
 
 adguard_arreglar_y_arrancar(){
-    # Reescribe config segura, libera :53 y arranca. Usado por instalar y por estado.
+    # Para todo, libera :53, escribe config segura, unit propio, arranca y verifica.
     local AGH="/opt/AdGuardHome/AdGuardHome" CFG="/opt/AdGuardHome/AdGuardHome.yaml"
     [[ -x "$AGH" ]] || return 1
-    adguard_liberar_53
-    adguard_escribir_config "$CFG"
-    # Asegurar unit con -c/-w correctos
-    if systemctl list-unit-files AdGuardHome.service >/dev/null 2>&1 \
-        || systemctl cat AdGuardHome >/dev/null 2>&1; then
-        systemctl stop AdGuardHome 2>/dev/null || "$AGH" -s stop 2>/dev/null || true
-        "$AGH" -s uninstall 2>/dev/null || true
-    fi
-    "$AGH" -s install -c "$CFG" -w /opt/AdGuardHome 2>/dev/null || true
-    systemctl daemon-reload 2>/dev/null || true
-    systemctl enable AdGuardHome 2>/dev/null || true
-    systemctl reset-failed AdGuardHome 2>/dev/null || true
-    systemctl restart AdGuardHome 2>/dev/null || "$AGH" -s start -c "$CFG" -w /opt/AdGuardHome 2>/dev/null || true
-    adguard_esperar_activo 20
-}
 
+    adguard_parar_todo
+    adguard_liberar_53
+
+    # Quitar unit viejo del instalador oficial (a veces apunta mal)
+    "$AGH" -s uninstall 2>/dev/null || true
+    adguard_escribir_config "$CFG"
+    adguard_unit_propio
+
+    systemctl reset-failed AdGuardHome 2>/dev/null || true
+    systemctl enable AdGuardHome 2>/dev/null || true
+    systemctl restart AdGuardHome 2>/dev/null || true
+
+    if adguard_esperar_activo 25; then
+        # Verificar que systemd lo mantiene (no un proceso huerfano del install.sh)
+        if systemctl is-active --quiet AdGuardHome 2>/dev/null; then
+            return 0
+        fi
+        # Proceso vivo pero unit fallido: forzar de nuevo
+        systemctl restart AdGuardHome 2>/dev/null || true
+        sleep 2
+        systemctl is-active --quiet AdGuardHome 2>/dev/null && return 0
+    fi
+    return 1
+}
 instalar_adguard(){
     # install.sh oficial: -c=canal, -o=dir base, -r=reinstalar (NO son rutas de config).
     echo -e "${CIAN}--- INSTALADOR AdGuard Home ---${NC}"
@@ -3325,7 +3372,11 @@ instalar_adguard(){
     fi
     [[ -x "$AGH" ]] || { ERR "No existe $AGH"; PAUSA; return; }
 
-    # Config segura + unit + arranque (sin bind a IP inexistente)
+    # El install.sh oficial deja un proceso temporal (log "serving url=...") que no es el unit.
+    # Pararlo antes de aplicar nuestra config y unit propio.
+    INFO "Aplicando config segura y servicio systemd propio..."
+    adguard_parar_todo
+
     if ! adguard_arreglar_y_arrancar; then
         ERR "No se pudo registrar/arrancar AdGuard Home."
         journalctl -u AdGuardHome -n 20 --no-pager 2>/dev/null | sed 's/^/  /' || true
