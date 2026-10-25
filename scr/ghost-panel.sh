@@ -3,7 +3,9 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 3.7.5
+#  Version: 3.7.6
+#  Cambios 3.7.6:
+#    - AdGuard: ExecStart sin -s run/--pidfile (fixaba status=64 USAGE)
 #  Cambios 3.7.5:
 #    - AdBlock solo en menu principal [9] (quitado duplicado de Protocolos [14])
 #  Cambios 3.7.4:
@@ -33,7 +35,7 @@ AZUL='\033[1;34m'; CIAN='\033[1;36m'; BLANCO='\033[1;37m'
 NC='\033[0m'
 NARANJA='\033[38;5;208m'; GRIS='\033[38;5;245m'; MORADO='\033[38;5;141m'
 BORDE="$GRIS"          # color del marco
-GHOST_VER='3.7.5'
+GHOST_VER='3.7.6'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -53,7 +55,7 @@ fi
 # Pone aca la URL de tu Worker de Cloudflare.
 # Vacio = el panel se niega a arrancar (modo produccion).
 # Para desarrollo local sin Worker: export GHOST_DEV=1 antes de ejecutar.
-LICENSE_URL='https://vps-licencias.jorgebarriosmpya.workers.dev'
+LICENSE_URL=''
 GRACE_SECS=259200                      # 72h de gracia si el servidor no responde
 LICENSE_CACHE='/etc/vps-license.cache'
 # REPO_RAW: cuando tengas tu GitHub, cambia la URL de abajo o usa
@@ -3256,20 +3258,20 @@ RSEOF
 
 adguard_unit_propio(){
     local AGH="/opt/AdGuardHome/AdGuardHome" CFG="/opt/AdGuardHome/AdGuardHome.yaml"
-    # Unit igual al que genera el instalador oficial (-s run), sin Capabilities restrictivas
+    # Sin -s run ni --pidfile=... : esa forma da "unknown option" / exit 64 USAGE
+    # en varias builds de AdGuard. Type=simple + binario directo es estable.
     cat > /etc/systemd/system/AdGuardHome.service <<UNIT
 [Unit]
 Description=AdGuard Home
 Documentation=https://github.com/AdguardTeam/AdGuardHome
-After=network.target
-Before=network-online.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${AGH} -s run --pidfile=/run/AdGuardHome.pid -c ${CFG} -w /opt/AdGuardHome --no-check-update
-ExecReload=/bin/kill -HUP \$MAINPID
+ExecStart=${AGH} -c ${CFG} -w /opt/AdGuardHome --no-check-update
 Restart=always
-RestartSec=5
+RestartSec=3
 LimitNOFILE=65535
 
 [Install]
