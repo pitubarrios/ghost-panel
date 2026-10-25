@@ -2,9 +2,13 @@
 # ============================================================
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
-#  Uso:  sudo bash vps-manager.sh
-#  (revision: v3.6.2 — fix instalador AdGuard Home flags oficiales + fallback manual)
-#   sshd_config seguro, ghost_bootstrap activo, usuarios protegidos)
+#  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
+#  Version: 3.7.0
+#  Cambios 3.7.0:
+#    - Puerto ocupado: avisa y permite elegir otro (todos los protocolos)
+#    - AdGuard Home: flags oficiales del install.sh + fallback manual
+#    - AdGuard: no bindea 10.66.0.1 sin WireGuard; espera activo + journal
+#  (sshd_config seguro, ghost_bootstrap, usuarios protegidos)
 # ============================================================
 
 set -u
@@ -15,7 +19,7 @@ AZUL='\033[1;34m'; CIAN='\033[1;36m'; BLANCO='\033[1;37m'
 NC='\033[0m'
 NARANJA='\033[38;5;208m'; GRIS='\033[38;5;245m'; MORADO='\033[38;5;141m'
 BORDE="$GRIS"          # color del marco
-GHOST_VER='3.6.2'
+GHOST_VER='3.7.0'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -25,7 +29,7 @@ SECRET_KEY='Copiaesta**'
 KEY_FILE='/etc/vps-manager.key'
 PREFIJO_KEY='VPSJB1'   # prefijo de marca; tambien acepta keys viejas VPSMGR1
 # URL del script en TU repo (para la opcion de auto-update)
-REPO_RAW='https://raw.githubusercontent.com/pitubarrios/vps-manager/refs/heads/main/scr/ghost-panel.sh'
+REPO_RAW='https://raw.githubusercontent.com/pitubarrios/vps-manager/refs/heads/main/scr/ghost-panel-pro.sh'
 VPSMGR_DEST=/usr/local/bin/ghostpanel
 if [[ -r /etc/ghost-panel.conf ]]; then
     _u=$(awk -F= '/^UPDATE_URL=/{print substr($0,12); exit}' /etc/ghost-panel.conf)
@@ -3143,102 +3147,40 @@ adguard_instalado(){
 }
 
 adguard_activo(){
-    systemctl is-active --quiet AdGuardHome 2>/dev/null || pgrep -f '/opt/AdGuardHome/AdGuardHome' >/dev/null 2>&1
+    # systemctl, proceso o puerto web 3000 / DNS 53 del binario
+    systemctl is-active --quiet AdGuardHome 2>/dev/null && return 0
+    pgrep -x AdGuardHome >/dev/null 2>&1 && return 0
+    pgrep -f '/opt/AdGuardHome/AdGuardHome' >/dev/null 2>&1 && return 0
+    # Puerto web del panel (cualquiera de las binds)
+    ss -tln 2>/dev/null | awk 'NR>1{n=split($4,a,":"); if(a[n]==3000){found=1}} END{exit found?0:1}' && return 0
+    return 1
 }
 
-instalar_adguard(){
-    # El install.sh oficial NO usa -c/-w como rutas de config:
-    #   -c = canal (release|beta|edge|development)
-    #   -o = directorio base (queda /opt/AdGuardHome)
-    #   -r = reinstalar
-    # -c/-w de config son del BINARIO AdGuardHome, no del install.sh.
-    echo -e "${CIAN}--- INSTALADOR AdGuard Home ---${NC}"
-    local REINST=0 ARCH URL TMP AGH="/opt/AdGuardHome/AdGuardHome" CFG="/opt/AdGuardHome/AdGuardHome.yaml"
-    if adguard_instalado; then
-        read -r -p "AdGuard ya esta instalado. Reinstalar? (s/n): " SN
-        [[ "$SN" != "s" ]] && { PAUSA; return; }
-        REINST=1
-        systemctl stop AdGuardHome 2>/dev/null || true
-        pkill -f '/opt/AdGuardHome/AdGuardHome' 2>/dev/null || true
+adguard_esperar_activo(){
+    # Espera hasta N segundos a que el servicio quede arriba
+    local i n="${1:-15}"
+    for ((i=1; i<=n; i++)); do
+        if adguard_activo; then return 0; fi
         sleep 1
+    done
+    return 1
+}
+
+adguard_escribir_config(){
+    # DNS solo en interfaces que existen: 127.0.0.1 siempre; 10.66.0.1 si hay wg0.
+    # Bind a 10.66.0.1 sin WireGuard hace fallar el arranque.
+    local CFG="${1:-/opt/AdGuardHome/AdGuardHome.yaml}" hosts
+    hosts='    - 127.0.0.1'
+    if ip -o link show wg0 >/dev/null 2>&1 || [[ -f /etc/wireguard/wg0.conf ]]; then
+        hosts+=$'\n    - 10.66.0.1'
     fi
-
-    INFO "Liberando puerto 53 (stub de systemd-resolved)..."
-    mkdir -p /etc/systemd/resolved.conf.d
-    cat > /etc/systemd/resolved.conf.d/adguardhome.conf <<'RSEOF'
-[Resolve]
-DNS=1.1.1.1
-DNSStubListener=no
-RSEOF
-    # Evitar que resolv.conf apunte al stub 127.0.0.53
-    ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null || true
-    systemctl restart systemd-resolved 2>/dev/null || true
-    sleep 1
-    # Si algo sigue en :53, avisar (no abortar: AdGuard puede fallar al arrancar y se diagnostica abajo)
-    if ss -uln 2>/dev/null | awk 'NR>1{n=split($4,a,":"); if(a[n]==53){found=1}} END{exit found?0:1}'; then
-        WARN "El puerto UDP 53 sigue en uso: $(ss -ulnp 2>/dev/null | awk 'NR>1{n=split($5,a,":"); if(a[n]==53){print; exit}}')"
-        WARN "Si AdGuard no arranca, libera el puerto 53 y reintenta."
-    fi
-
-    INFO "Descargando e instalando AdGuard Home..."
-    # 1) Script oficial (flags correctos)
-    local INST_OK=0
-    if (( REINST )); then
-        if curl -s -S -L --max-time 30 https://raw.githubusercontent.com/AdguardTeam/AdGuardHome/master/scripts/install.sh \
-            | sh -s -- -v -c release -o /opt -r; then
-            INST_OK=1
-        fi
-    else
-        if curl -s -S -L --max-time 30 https://raw.githubusercontent.com/AdguardTeam/AdGuardHome/master/scripts/install.sh \
-            | sh -s -- -v -c release -o /opt; then
-            INST_OK=1
-        fi
-    fi
-
-    # 2) Fallback manual si el script oficial fallo
-    if [[ $INST_OK -ne 1 || ! -x "$AGH" ]]; then
-        WARN "Script oficial fallo o no dejo el binario. Instalacion manual..."
-        case "$(uname -m)" in
-            x86_64|amd64) ARCH=amd64 ;;
-            aarch64|arm64) ARCH=arm64 ;;
-            armv7l|armhf) ARCH=armv7 ;;
-            *) ARCH=amd64 ;;
-        esac
-        URL="https://static.adtidy.org/adguardhome/release/AdGuardHome_linux_${ARCH}.tar.gz"
-        TMP=$(mktemp -d /tmp/agh-XXXXXX) || { ERR "Sin temporal."; PAUSA; return; }
-        if curl -fsSL --max-time 120 "$URL" -o "$TMP/agh.tar.gz" \
-            && tar -C "$TMP" -xzf "$TMP/agh.tar.gz" \
-            && [[ -x "$TMP/AdGuardHome/AdGuardHome" ]]; then
-            mkdir -p /opt/AdGuardHome
-            # Detener servicio previo si existe
-            systemctl stop AdGuardHome 2>/dev/null || true
-            "$TMP/AdGuardHome/AdGuardHome" -s uninstall 2>/dev/null || true
-            install -m 755 "$TMP/AdGuardHome/AdGuardHome" "$AGH"
-            # Copiar frontend y demas si vinieron en el tar
-            cp -a "$TMP/AdGuardHome/." /opt/AdGuardHome/ 2>/dev/null || true
-            chmod 755 "$AGH"
-            INST_OK=1
-            OK "Binario instalado manualmente en $AGH"
-        else
-            ERR "No se pudo descargar AdGuard Home ($URL)."
-            rm -rf "$TMP"
-            PAUSA; return
-        fi
-        rm -rf "$TMP"
-    fi
-
-    [[ -x "$AGH" ]] || { ERR "No existe el binario $AGH"; PAUSA; return; }
-
-    mkdir -p /opt/AdGuardHome
-    # Config segura: DNS solo local + interfaz WG; panel web solo localhost
-    if [[ ! -f "$CFG" ]] || (( REINST )); then
-        cat > "$CFG" <<'AGEOF'
+    mkdir -p "$(dirname "$CFG")"
+    cat > "$CFG" <<AGEOF
 http:
   address: 127.0.0.1:3000
 dns:
   bind_hosts:
-    - 127.0.0.1
-    - 10.66.0.1
+${hosts}
   port: 53
   upstream_dns:
     - https://dns.cloudflare.com/dns-query
@@ -3257,38 +3199,122 @@ filters:
     url: https://big.oisd.nl/
     name: OISD Big
 AGEOF
-        chmod 644 "$CFG"
+    chmod 644 "$CFG"
+}
+
+instalar_adguard(){
+    # install.sh oficial: -c=canal, -o=dir base, -r=reinstalar (NO son rutas de config).
+    echo -e "${CIAN}--- INSTALADOR AdGuard Home ---${NC}"
+    local REINST=0 ARCH URL TMP AGH="/opt/AdGuardHome/AdGuardHome" CFG="/opt/AdGuardHome/AdGuardHome.yaml"
+    if adguard_instalado; then
+        read -r -p "AdGuard ya esta instalado. Reinstalar? (s/n): " SN
+        [[ "$SN" != "s" ]] && { PAUSA; return; }
+        REINST=1
+        systemctl stop AdGuardHome 2>/dev/null || true
+        pkill -x AdGuardHome 2>/dev/null || true
+        pkill -f '/opt/AdGuardHome/AdGuardHome' 2>/dev/null || true
+        sleep 1
     fi
 
-    # Registrar/iniciar servicio systemd (aqui SI van -c config y -w workdir)
-    systemctl stop AdGuardHome 2>/dev/null || true
-    "$AGH" -s uninstall 2>/dev/null || true
-    if ! "$AGH" -s install -c "$CFG" -w /opt/AdGuardHome; then
-        ERR "No se pudo registrar el servicio systemd de AdGuard."
-        PAUSA; return
+    INFO "Liberando puerto 53 (stub de systemd-resolved)..."
+    mkdir -p /etc/systemd/resolved.conf.d
+    cat > /etc/systemd/resolved.conf.d/adguardhome.conf <<'RSEOF'
+[Resolve]
+DNS=1.1.1.1
+DNSStubListener=no
+RSEOF
+    ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null || true
+    systemctl restart systemd-resolved 2>/dev/null || true
+    sleep 1
+    if ss -uln 2>/dev/null | awk 'NR>1{n=split($4,a,":"); if(a[n]==53){found=1}} END{exit found?0:1}'; then
+        WARN "UDP 53 sigue en uso: $(ss -ulnp 2>/dev/null | awk 'NR>1{n=split($5,a,":"); if(a[n]==53){print; exit}}')"
+    fi
+
+    INFO "Descargando e instalando AdGuard Home..."
+    local INST_OK=0
+    if (( REINST )); then
+        curl -s -S -L --max-time 30 https://raw.githubusercontent.com/AdguardTeam/AdGuardHome/master/scripts/install.sh \
+            | sh -s -- -v -c release -o /opt -r && INST_OK=1
+    else
+        curl -s -S -L --max-time 30 https://raw.githubusercontent.com/AdguardTeam/AdGuardHome/master/scripts/install.sh \
+            | sh -s -- -v -c release -o /opt && INST_OK=1
+    fi
+
+    if [[ $INST_OK -ne 1 || ! -x "$AGH" ]]; then
+        WARN "Script oficial fallo o sin binario. Instalacion manual..."
+        case "$(uname -m)" in
+            x86_64|amd64) ARCH=amd64 ;;
+            aarch64|arm64) ARCH=arm64 ;;
+            armv7l|armhf) ARCH=armv7 ;;
+            *) ARCH=amd64 ;;
+        esac
+        URL="https://static.adtidy.org/adguardhome/release/AdGuardHome_linux_${ARCH}.tar.gz"
+        TMP=$(mktemp -d /tmp/agh-XXXXXX) || { ERR "Sin temporal."; PAUSA; return; }
+        if curl -fsSL --max-time 120 "$URL" -o "$TMP/agh.tar.gz" \
+            && tar -C "$TMP" -xzf "$TMP/agh.tar.gz" \
+            && [[ -x "$TMP/AdGuardHome/AdGuardHome" ]]; then
+            mkdir -p /opt/AdGuardHome
+            systemctl stop AdGuardHome 2>/dev/null || true
+            "$TMP/AdGuardHome/AdGuardHome" -s uninstall 2>/dev/null || true
+            install -m 755 "$TMP/AdGuardHome/AdGuardHome" "$AGH"
+            cp -a "$TMP/AdGuardHome/." /opt/AdGuardHome/ 2>/dev/null || true
+            chmod 755 "$AGH"
+            INST_OK=1
+            OK "Binario en $AGH"
+        else
+            ERR "No se pudo descargar AdGuard Home ($URL)."
+            rm -rf "$TMP"; PAUSA; return
+        fi
+        rm -rf "$TMP"
+    fi
+    [[ -x "$AGH" ]] || { ERR "No existe $AGH"; PAUSA; return; }
+
+    # Config segura (sin bind a 10.66.0.1 si no hay wg0 — eso tumba el servicio)
+    adguard_escribir_config "$CFG"
+
+    # Si el instalador oficial ya dejo el servicio, solo reiniciar con nuestra config.
+    # Evita uninstall+install que a veces deja el unit a medias.
+    if systemctl list-unit-files AdGuardHome.service >/dev/null 2>&1 \
+        || systemctl cat AdGuardHome >/dev/null 2>&1; then
+        systemctl stop AdGuardHome 2>/dev/null || "$AGH" -s stop 2>/dev/null || true
+        # Asegurar unit con -c/-w correctos
+        "$AGH" -s uninstall 2>/dev/null || true
+        "$AGH" -s install -c "$CFG" -w /opt/AdGuardHome 2>/dev/null \
+            || { ERR "No se pudo registrar el servicio."; journalctl -u AdGuardHome -n 15 --no-pager 2>/dev/null; PAUSA; return; }
+    else
+        "$AGH" -s install -c "$CFG" -w /opt/AdGuardHome 2>/dev/null \
+            || { ERR "No se pudo registrar el servicio."; PAUSA; return; }
     fi
     systemctl daemon-reload 2>/dev/null || true
-    systemctl enable --now AdGuardHome 2>/dev/null || "$AGH" -s start 2>/dev/null
-    sleep 2
+    systemctl enable AdGuardHome 2>/dev/null || true
+    systemctl restart AdGuardHome 2>/dev/null || "$AGH" -s start 2>/dev/null || true
 
-    if adguard_activo; then
+    if adguard_esperar_activo 20; then
         OK "AdGuard Home ACTIVO."
         echo
-        echo -e " ${AMARILLO}Seguridad:${NC} DNS escucha en 127.0.0.1 y 10.66.0.1 (WireGuard)."
-        echo -e " ${AMARILLO}NO se abrio el puerto 53 al Internet publico.${NC}"
+        echo -e " ${AMARILLO}Seguridad:${NC} DNS en 127.0.0.1$([ -f /etc/wireguard/wg0.conf ] && echo ' y 10.66.0.1 (WG)' || echo ' (agrega 10.66.0.1 al instalar WireGuard)')."
+        echo -e " ${AMARILLO}NO se abrio el puerto 53 a Internet.${NC}"
         echo
         echo -e " Panel web (desde tu PC):"
         echo -e "   ${VERDE}ssh -L 3000:127.0.0.1:3000 root@$(ip_publica)${NC}"
-        echo -e "   Luego abre: ${CIAN}http://127.0.0.1:3000${NC}"
+        echo -e "   Luego: ${CIAN}http://127.0.0.1:3000${NC}"
         echo
-        echo -e " Clientes WireGuard: DNS = ${VERDE}10.66.0.1${NC} (se aplica al re-generar config)."
-        echo -e " Otros protocolos: configura DNS del celular a 10.66.0.1 solo si usas el tunel WG."
-        vps_log INFO "AdGuard Home instalado (bind local + wg0)"
-    else
-        ERR "AdGuard no levanto. Revisa: journalctl -u AdGuardHome -n 40"
-        if ss -uln 2>/dev/null | awk 'NR>1{n=split($4,a,":"); if(a[n]==53){found=1}} END{exit found?0:1}'; then
-            ERR "Puerto 53 sigue ocupado. Eso suele impedir el arranque del DNS."
+        if [[ -f /etc/wireguard/wg0.conf ]]; then
+            echo -e " Clientes WireGuard: DNS = ${VERDE}10.66.0.1${NC}"
+        else
+            INFO "Instala WireGuard despues: el panel pondra DNS=10.66.0.1 en el cliente."
         fi
+        vps_log INFO "AdGuard Home instalado/activo"
+    else
+        ERR "AdGuard no quedo activo tras el arranque."
+        echo -e "${GRIS}--- ultimas lineas del journal ---${NC}"
+        journalctl -u AdGuardHome -n 25 --no-pager 2>/dev/null | sed 's/^/  /' || true
+        if ss -uln 2>/dev/null | awk 'NR>1{n=split($4,a,":"); if(a[n]==53){found=1}} END{exit found?0:1}'; then
+            ERR "UDP 53 ocupado: suele impedir el DNS de AdGuard."
+        fi
+        # Si el proceso murio pero el binario esta, sugerir arranque manual
+        INFO "Proba: systemctl status AdGuardHome"
+        INFO "O: /opt/AdGuardHome/AdGuardHome -s start -c $CFG -w /opt/AdGuardHome"
     fi
     PAUSA
 }
