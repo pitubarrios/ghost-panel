@@ -3,7 +3,12 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 3.7.3
+#  Version: 3.7.5
+#  Cambios 3.7.5:
+#    - AdBlock solo en menu principal [9] (quitado duplicado de Protocolos [14])
+#  Cambios 3.7.4:
+#    - AdGuard: ACTIVO solo si systemctl is-active (ignora proceso del install.sh)
+#    - AdGuard: unit oficial -s run, Restart=always, diagnostico completo si falla
 #  Cambios 3.7.3:
 #    - AdGuard: unit systemd propio + parar proceso del install.sh (ya no queda DETENIDO)
 #    - AdGuard: config minima estable; verifica systemctl is-active real
@@ -28,7 +33,7 @@ AZUL='\033[1;34m'; CIAN='\033[1;36m'; BLANCO='\033[1;37m'
 NC='\033[0m'
 NARANJA='\033[38;5;208m'; GRIS='\033[38;5;245m'; MORADO='\033[38;5;141m'
 BORDE="$GRIS"          # color del marco
-GHOST_VER='3.7.3'
+GHOST_VER='3.7.5'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -3156,11 +3161,9 @@ adguard_instalado(){
 }
 
 adguard_activo(){
-    # Preferir unit systemd (estable). Fallback: proceso AdGuardHome.
-    systemctl is-active --quiet AdGuardHome 2>/dev/null && return 0
-    pgrep -x AdGuardHome >/dev/null 2>&1 && return 0
-    pgrep -f '/opt/AdGuardHome/AdGuardHome' >/dev/null 2>&1 && return 0
-    return 1
+    # SOLO systemctl: el install.sh deja un proceso temporal que engaña a pgrep
+    # y el panel marcaba ACTIVO aunque el unit estuviera dead/failed.
+    systemctl is-active --quiet AdGuardHome 2>/dev/null
 }
 
 adguard_esperar_activo(){
@@ -3235,40 +3238,39 @@ DNS=1.1.1.1
 FallbackDNS=8.8.8.8
 DNSStubListener=no
 RSEOF
+    # resolv.conf -> resolved (sin stub en :53)
     if [[ -f /run/systemd/resolve/resolv.conf ]]; then
         ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null || true
     fi
     systemctl restart systemd-resolved 2>/dev/null || true
-    sleep 1
-    # Si algo sigue en :53 que no sea AdGuard, intentar detenerlo
-    if ss -ulnp 2>/dev/null | grep -qE ':(53)\\b' && ! pgrep -f AdGuardHome >/dev/null 2>&1; then
+    sleep 2
+    # Si 127.0.0.1:53 o *:53 sigue ocupado por resolved, forzar
+    if ss -ulnp 2>/dev/null | grep -E ':(53)\s' | grep -qi resolved; then
+        WARN "systemd-resolved aun en :53 — reiniciando de nuevo..."
         systemctl stop systemd-resolved 2>/dev/null || true
         sleep 1
         systemctl start systemd-resolved 2>/dev/null || true
-        sleep 1
+        sleep 2
     fi
 }
 
 adguard_unit_propio(){
-    # Unit systemd propio (mas fiable que "AdGuardHome -s install")
     local AGH="/opt/AdGuardHome/AdGuardHome" CFG="/opt/AdGuardHome/AdGuardHome.yaml"
+    # Unit igual al que genera el instalador oficial (-s run), sin Capabilities restrictivas
     cat > /etc/systemd/system/AdGuardHome.service <<UNIT
 [Unit]
-Description=AdGuard Home (Ghost Panel)
+Description=AdGuard Home
 Documentation=https://github.com/AdguardTeam/AdGuardHome
-After=network-online.target
-Wants=network-online.target
+After=network.target
+Before=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${AGH} -c ${CFG} -w /opt/AdGuardHome --no-check-update --pidfile /run/AdGuardHome.pid
+ExecStart=${AGH} -s run --pidfile=/run/AdGuardHome.pid -c ${CFG} -w /opt/AdGuardHome --no-check-update
 ExecReload=/bin/kill -HUP \$MAINPID
-Restart=on-failure
-RestartSec=3
-LimitNOFILE=65536
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW
-NoNewPrivileges=false
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target
@@ -3279,40 +3281,66 @@ UNIT
 adguard_parar_todo(){
     systemctl stop AdGuardHome 2>/dev/null || true
     /opt/AdGuardHome/AdGuardHome -s stop 2>/dev/null || true
-    pkill -x AdGuardHome 2>/dev/null || true
-    pkill -f '/opt/AdGuardHome/AdGuardHome' 2>/dev/null || true
+    pkill -9 -x AdGuardHome 2>/dev/null || true
+    pkill -9 -f '/opt/AdGuardHome/AdGuardHome' 2>/dev/null || true
     sleep 1
 }
 
+adguard_diag(){
+    echo -e "${GRIS}--- diagnostico AdGuard ---${NC}"
+    systemctl status AdGuardHome --no-pager -l 2>/dev/null | sed 's/^/  /' | head -20 || true
+    echo -e "${GRIS}--- quien usa :53 / :3000 ---${NC}"
+    ss -tulnp 2>/dev/null | grep -E ':(53|3000)\s' | sed 's/^/  /' || echo "  (nadie)"
+    echo -e "${GRIS}--- journal (ultimas 30) ---${NC}"
+    journalctl -u AdGuardHome -n 30 --no-pager 2>/dev/null | sed 's/^/  /' || true
+    echo -e "${GRIS}--- yaml bind_hosts ---${NC}"
+    grep -A5 'bind_hosts\|address:' /opt/AdGuardHome/AdGuardHome.yaml 2>/dev/null | sed 's/^/  /' || true
+}
+
 adguard_arreglar_y_arrancar(){
-    # Para todo, libera :53, escribe config segura, unit propio, arranca y verifica.
     local AGH="/opt/AdGuardHome/AdGuardHome" CFG="/opt/AdGuardHome/AdGuardHome.yaml"
     [[ -x "$AGH" ]] || return 1
 
     adguard_parar_todo
     adguard_liberar_53
 
-    # Quitar unit viejo del instalador oficial (a veces apunta mal)
+    # Quitar unit del instalador oficial e instalar el nuestro
     "$AGH" -s uninstall 2>/dev/null || true
+    rm -f /etc/systemd/system/AdGuardHome.service
+    systemctl daemon-reload 2>/dev/null || true
+
     adguard_escribir_config "$CFG"
+    chmod 755 /opt/AdGuardHome "$AGH" 2>/dev/null || true
     adguard_unit_propio
+
+    # Puerto 53 libre?
+    if ss -uln 2>/dev/null | awk 'NR>1{n=split($4,a,":"); if(a[n]==53){found=1}} END{exit found?0:1}'; then
+        WARN "UDP 53 ocupado antes de arrancar:"
+        ss -ulnp 2>/dev/null | grep ':53' | sed 's/^/  /' || true
+    fi
 
     systemctl reset-failed AdGuardHome 2>/dev/null || true
     systemctl enable AdGuardHome 2>/dev/null || true
-    systemctl restart AdGuardHome 2>/dev/null || true
+    systemctl start AdGuardHome 2>/dev/null || true
 
-    if adguard_esperar_activo 25; then
-        # Verificar que systemd lo mantiene (no un proceso huerfano del install.sh)
+    local i
+    for ((i=1; i<=20; i++)); do
         if systemctl is-active --quiet AdGuardHome 2>/dev/null; then
-            return 0
+            # Confirmar que sigue vivo 2s (no sale al toque)
+            sleep 2
+            if systemctl is-active --quiet AdGuardHome 2>/dev/null; then
+                return 0
+            fi
         fi
-        # Proceso vivo pero unit fallido: forzar de nuevo
-        systemctl restart AdGuardHome 2>/dev/null || true
-        sleep 2
-        systemctl is-active --quiet AdGuardHome 2>/dev/null && return 0
-    fi
+        # Si failed, no tiene sentido esperar 20s en vano
+        if systemctl is-failed --quiet AdGuardHome 2>/dev/null; then
+            break
+        fi
+        sleep 1
+    done
     return 1
 }
+
 instalar_adguard(){
     # install.sh oficial: -c=canal, -o=dir base, -r=reinstalar (NO son rutas de config).
     echo -e "${CIAN}--- INSTALADOR AdGuard Home ---${NC}"
@@ -3379,7 +3407,7 @@ instalar_adguard(){
 
     if ! adguard_arreglar_y_arrancar; then
         ERR "No se pudo registrar/arrancar AdGuard Home."
-        journalctl -u AdGuardHome -n 20 --no-pager 2>/dev/null | sed 's/^/  /' || true
+        adguard_diag
         PAUSA; return
     fi
 
@@ -3424,14 +3452,8 @@ estado_adguard(){
             if adguard_arreglar_y_arrancar; then
                 OK "Servicio ACTIVO tras reparacion"
             else
-                ERR "No arranco. Ultimas lineas del journal:"
-                journalctl -u AdGuardHome -n 25 --no-pager 2>/dev/null | sed 's/^/  /' || true
-                if ss -uln 2>/dev/null | awk 'NR>1{n=split($4,a,":"); if(a[n]==53){found=1}} END{exit found?0:1}'; then
-                    ERR "UDP 53 ocupado: $(ss -ulnp 2>/dev/null | awk 'NR>1{n=split($5,a,":"); if(a[n]==53){print; exit}}')"
-                fi
-                if grep -q '10\.66\.0\.1' /opt/AdGuardHome/AdGuardHome.yaml 2>/dev/null && ! adguard_ip_disponible 10.66.0.1; then
-                    ERR "La config pide bind a 10.66.0.1 pero esa IP no esta asignada (WireGuard apagado)."
-                fi
+                ERR "No arranco. Diagnostico:"
+                adguard_diag
             fi
         fi
         echo
@@ -3508,9 +3530,10 @@ menu_protocolos(){
         FR_OPT 7 "$(T t_wsepro)" 8 "$(T t_shadowsocks)"
         FR_OPT 9 "$(T t_trojan)" 10 "$(T t_wireguard)"
         FR_OPT 11 "$(T t_estado_prot)" 12 "$(T t_quitar)"
-        FR_OPT 13 "$(T t_cf_test)" 14 "$(T t_adblock)"
+        FR_OPT 13 "$(T t_cf_test)" "" ""
         FR_OPT 0 "$(T t_volver)" "" ""
         FR_BOT
+        echo -e "  ${GRIS}AdBlock/AdGuard: menu principal opcion 9${NC}"
         PROMPT
         case "$OP" in
             1) instalar_xray ;;        2) instalar_xray_ws ;;
@@ -3519,7 +3542,7 @@ menu_protocolos(){
             7) instalar_wsepro ;;      8) instalar_shadowsocks ;;
             9) instalar_trojan ;;      10) instalar_wireguard ;;
             11) estado_protocolos ;;   12) menu_quitar ;;
-            13) tunel_trycloudflare ;; 14) menu_adblock ;;
+            13) tunel_trycloudflare ;;
             0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
         esac
     done
