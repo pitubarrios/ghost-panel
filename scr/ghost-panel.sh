@@ -3,7 +3,15 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 3.7.6
+#  Version: 3.7.8
+#  Cambios 3.7.8:
+#    - Iconos (emoji) en menus y mensajes; fantasma en cabecera, licencia, salida y banners
+#    - Marcos de la UI: ancho real de emojis (2 columnas) -> bordes alineados en cualquier terminal
+#    - Nueva opcion [9] Desinstalar Ghost Panel (servicios, archivos, config sshd y el propio script)
+#  Cambios 3.7.7:
+#    - crear_usuario: pide limite de trafico en GB (0/vacio = sin limite) -> /etc/vps-trafico/USUARIO
+#    - Banner por usuario: + limite de conexiones, trafico usado, limite GB y restante
+#    - AdGuard Home movido del menu principal a Protocolos [11] (+ opcion Reparar)
 #  Cambios 3.7.6:
 #    - AdGuard: ExecStart sin -s run/--pidfile (fixaba status=64 USAGE)
 #  Cambios 3.7.5:
@@ -35,7 +43,7 @@ AZUL='\033[1;34m'; CIAN='\033[1;36m'; BLANCO='\033[1;37m'
 NC='\033[0m'
 NARANJA='\033[38;5;208m'; GRIS='\033[38;5;245m'; MORADO='\033[38;5;141m'
 BORDE="$GRIS"          # color del marco
-GHOST_VER='3.7.6'
+GHOST_VER='3.7.8'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -203,10 +211,10 @@ TXT_ES[t_ui_days]="dias"; TXT_EN[t_ui_days]="days"
 TXT_ES[t_usuarios]="Usuarios SSH"; TXT_EN[t_usuarios]="SSH Users"
 TXT_ES[t_protocolos]="Protocolos"; TXT_EN[t_protocolos]="Protocols"
 TXT_ES[t_seguridad]="Seguridad"; TXT_EN[t_seguridad]="Security"
-TXT_ES[t_sistema]="Sistema y Recursos"; TXT_EN[t_sistema]="System & Resources"
+TXT_ES[t_sistema]="Sistema/Recursos"; TXT_EN[t_sistema]="System/Resources"
 TXT_ES[t_herramientas]="Herramientas"; TXT_EN[t_herramientas]="Tools"
 TXT_ES[t_webmin]="Webmin"; TXT_EN[t_webmin]="Webmin"
-TXT_ES[t_backup]="Backup / Restaurar"; TXT_EN[t_backup]="Backup / Restore"
+TXT_ES[t_backup]="Backup/Restaurar"; TXT_EN[t_backup]="Backup / Restore"
 TXT_ES[t_diagnostico]="Diagnostico"; TXT_EN[t_diagnostico]="Diagnostics"
 TXT_ES[t_servidor_id]="Servidor ID"; TXT_EN[t_servidor_id]="Server ID"
 TXT_ES[t_salir]="Salir"; TXT_EN[t_salir]="Exit"
@@ -220,9 +228,9 @@ TXT_ES[t_bloquear]="Bloquear/Desbl."; TXT_EN[t_bloquear]="Block/Unblock"
 TXT_ES[t_renovar]="Renovar usuario"; TXT_EN[t_renovar]="Renew user"
 TXT_ES[t_limite]="Cambiar limite"; TXT_EN[t_limite]="Change limit"
 TXT_ES[t_eliminar]="Eliminar usuario"; TXT_EN[t_eliminar]="Delete user"
-TXT_ES[t_vencidos]="Eliminar vencidos"; TXT_EN[t_vencidos]="Delete expired"
+TXT_ES[t_vencidos]="Borrar vencidos"; TXT_EN[t_vencidos]="Delete expired"
 TXT_ES[t_test]="Crear test SSH"; TXT_EN[t_test]="Create SSH test"
-TXT_ES[t_conexiones]="Conexiones online"; TXT_EN[t_conexiones]="Online connections"
+TXT_ES[t_conexiones]="Conectados"; TXT_EN[t_conexiones]="Online sessions"
 TXT_ES[t_desconectar]="Desconectar usr"; TXT_EN[t_desconectar]="Disconnect user"
 TXT_ES[t_sub_seg]="SEGURIDAD"; TXT_EN[t_sub_seg]="SECURITY"
 TXT_ES[t_fail2ban]="Fail2ban"; TXT_EN[t_fail2ban]="Fail2ban"
@@ -257,13 +265,13 @@ TXT_ES[t_sub_backup]="BACKUP / RESTAURAR"; TXT_EN[t_sub_backup]="BACKUP / RESTOR
 TXT_ES[t_backup_crear]="Crear backup"; TXT_EN[t_backup_crear]="Create backup"
 TXT_ES[t_backup_restaurar]="Restaurar backup"; TXT_EN[t_backup_restaurar]="Restore backup"
 TXT_ES[t_sub_prot]="PROTOCOLOS / CONEXIONES"; TXT_EN[t_sub_prot]="PROTOCOLS / CONNECTIONS"
-TXT_ES[t_xray]="Xray VLESS+Reality"; TXT_EN[t_xray]="Xray VLESS+Reality"
+TXT_ES[t_xray]="Xray Reality"; TXT_EN[t_xray]="Xray Reality"
 TXT_ES[t_xray_ws]="Xray WS (CDN)"; TXT_EN[t_xray_ws]="Xray WS (CDN)"
 TXT_ES[t_openvpn]="OpenVPN"; TXT_EN[t_openvpn]="OpenVPN"
 TXT_ES[t_stunnel]="SSL Stunnel 443"; TXT_EN[t_stunnel]="SSL Stunnel 443"
 TXT_ES[t_hysteria]="Hysteria2 (UDP)"; TXT_EN[t_hysteria]="Hysteria2 (UDP)"
 TXT_ES[t_badvpn]="BadVPN (UDP GW)"; TXT_EN[t_badvpn]="BadVPN (UDP GW)"
-TXT_ES[t_wsepro]="WS-epro (WS->SSH)"; TXT_EN[t_wsepro]="WS-epro (WS->SSH)"
+TXT_ES[t_wsepro]="WS-epro WS->SSH"; TXT_EN[t_wsepro]="WS-epro WS->SSH"
 TXT_ES[t_shadowsocks]="Shadowsocks"; TXT_EN[t_shadowsocks]="Shadowsocks"
 TXT_ES[t_trojan]="Trojan"; TXT_EN[t_trojan]="Trojan"
 TXT_ES[t_wireguard]="WireGuard"; TXT_EN[t_wireguard]="WireGuard"
@@ -281,9 +289,9 @@ TXT_ES[t_cu_probar]="Probar consulta"; TXT_EN[t_cu_probar]="Test query"
 TXT_ES[t_cu_token]="Ver token y puerto"; TXT_EN[t_cu_token]="Show token & port"
 TXT_ES[t_remover]="Remover"; TXT_EN[t_remover]="Remove"
 TXT_ES[t_sub_trafico]="TRAFICO POR USUARIO"; TXT_EN[t_sub_trafico]="PER-USER TRAFFIC"
-TXT_ES[t_tr_activar]="Activar contadores"; TXT_EN[t_tr_activar]="Enable counters"
+TXT_ES[t_tr_activar]="Activar conteo"; TXT_EN[t_tr_activar]="Enable counters"
 TXT_ES[t_tr_ver]="Ver consumo"; TXT_EN[t_tr_ver]="View usage"
-TXT_ES[t_tr_limite]="Poner limite (GB)"; TXT_EN[t_tr_limite]="Set limit (GB)"
+TXT_ES[t_tr_limite]="Limite (GB)"; TXT_EN[t_tr_limite]="Limit (GB)"
 TXT_ES[t_tr_cortar]="Cortar excedidos"; TXT_EN[t_tr_cortar]="Cut exceeded"
 TXT_ES[t_tr_reset]="Reset contadores"; TXT_EN[t_tr_reset]="Reset counters"
 TXT_ES[t_sub_quitar]="QUITAR PROTOCOLOS"; TXT_EN[t_sub_quitar]="REMOVE PROTOCOLS"
@@ -295,15 +303,24 @@ TXT_ES[t_disco]="Disco"; TXT_EN[t_disco]="Disk"
 TXT_ES[t_online]="Online"; TXT_EN[t_online]="Online"
 TXT_ES[t_licencia]="Licencia"; TXT_EN[t_licencia]="License"
 TXT_ES[t_lic_req]="LICENCIA REQUERIDA"; TXT_EN[t_lic_req]="LICENSE REQUIRED"
-TXT_ES[t_panel_jb]="GHOST PANEL by Jorge Barrios"; TXT_EN[t_panel_jb]="GHOST PANEL by Jorge Barrios"
+TXT_ES[t_panel_jb]="👻 GHOST PANEL by Jorge Barrios"; TXT_EN[t_panel_jb]="👻 GHOST PANEL by Jorge Barrios"
 TXT_ES[t_id_srv]="ID de este servidor"; TXT_EN[t_id_srv]="ID of this server"
 TXT_ES[t_online_req]="VALIDACION ONLINE OBLIGATORIA"; TXT_EN[t_online_req]="ONLINE VALIDATION REQUIRED"
 TXT_ES[t_online_req2]="LICENSE_URL vacio. Configuralo o usa GHOST_DEV=1 para pruebas."; TXT_EN[t_online_req2]="LICENSE_URL empty. Set it or use GHOST_DEV=1 for testing."
 TXT_ES[t_opinv]="Opcion invalida."; TXT_EN[t_opinv]="Invalid option."
-TXT_ES[t_cf_test]="Tunel CDN (prueba)"; TXT_EN[t_cf_test]="CDN tunnel (test)"
+TXT_ES[t_cf_test]="Tunel CDN (test)"; TXT_EN[t_cf_test]="CDN tunnel"
 TXT_ES[t_q_tunnel]="Tunel CDN (cloudflared)"; TXT_EN[t_q_tunnel]="CDN tunnel (cloudflared)"
-TXT_ES[t_adblock]="AdBlock (AdGuard)"; TXT_EN[t_adblock]="AdBlock (AdGuard)"
-TXT_ES[t_sub_adblock]="ADBLOCK / AdGuard Home"; TXT_EN[t_sub_adblock]="ADBLOCK / AdGuard Home"
+TXT_ES[t_desinst]="Desinstalar Ghost Panel"; TXT_EN[t_desinst]="Uninstall Ghost Panel"
+TXT_ES[t_du_titulo]="DESINSTALAR GHOST PANEL"; TXT_EN[t_du_titulo]="UNINSTALL GHOST PANEL"
+TXT_ES[t_du_word]="DESINSTALAR"; TXT_EN[t_du_word]="UNINSTALL"
+TXT_ES[t_du_conf]="Escribe DESINSTALAR para confirmar (ENTER = cancelar):"; TXT_EN[t_du_conf]="Type UNINSTALL to confirm (ENTER = cancel):"
+TXT_ES[t_du_fin]="Ghost Panel desinstalado por completo. Hasta pronto!"; TXT_EN[t_du_fin]="Ghost Panel fully uninstalled. See you!"
+TXT_ES[t_adguard]="AdGuard Home"; TXT_EN[t_adguard]="AdGuard Home"
+TXT_ES[t_sub_adguard]="PROTOCOLOS / AdGuard Home"; TXT_EN[t_sub_adguard]="PROTOCOLS / AdGuard Home"
+TXT_ES[t_ad_reparar]="Reparar / reiniciar"; TXT_EN[t_ad_reparar]="Repair / restart"
+TXT_ES[t_ad_nota1]="Bloquea anuncios por DNS solo para clientes WireGuard (DNS=10.66.0.1)."; TXT_EN[t_ad_nota1]="DNS ad-blocking for WireGuard clients only (DNS=10.66.0.1)."
+TXT_ES[t_ad_nota2]="No aplica a HTTP Custom/SSH. Puerto 53 NO se publica a Internet."; TXT_EN[t_ad_nota2]="Does not apply to HTTP Custom/SSH. Port 53 is NOT exposed to the Internet."
+TXT_ES[t_nu_gb]="Limite de trafico en GB (0 = sin limite) [0]:"; TXT_EN[t_nu_gb]="Traffic limit in GB (0 = unlimited) [0]:"
 TXT_ES[t_ad_inst]="Instalar AdGuard Home"; TXT_EN[t_ad_inst]="Install AdGuard Home"
 TXT_ES[t_ad_estado]="Estado / panel web"; TXT_EN[t_ad_estado]="Status / web UI"
 TXT_ES[t_ad_quitar]="Quitar AdGuard"; TXT_EN[t_ad_quitar]="Remove AdGuard"
@@ -944,7 +961,8 @@ FR_BOT(){ printf '%b\n' "${BORDE}└$(ui_rep ─ $((UI_W+2)))┘${NC}"; }
 ui_box_top(){
     # ┌─ TITULO ─────────┐   (titulo en morado dentro del marco)
     local t=" $1 " n
-    n=$(( UI_W + 1 - ${#t} ))
+    ui_fit "$t" 999
+    n=$(( UI_W + 1 - UI_FITW ))
     (( n < 1 )) && n=1
     printf '%b\n' "${BORDE}┌─${NC}${MORADO}${t}${NC}${BORDE}$(ui_rep ─ "$n")┐${NC}"
 }
@@ -952,15 +970,47 @@ ui_crumb(){
     if [[ -n "${1:-}" ]]; then printf '%b\n' "  ${GRIS}Inicio ›${NC} ${CIAN}${1}${NC}"
     else printf '%b\n' "  ${GRIS}Inicio ›${NC}"; fi
 }
+# --- Ancho visible de un caracter: emoji/CJK = 2 columnas, VS16/ZWJ = 0, resto = 1 ---
+# Solo se usan emojis "anchos por defecto" (sin selector de variacion) para que todas las
+# terminales (Termux, PuTTY, JuiceSSH, xterm...) coincidan con este calculo.
+ui_cw(){
+    # ui_cw CARACTER -> UI_CW (0, 1 o 2)
+    local c="$1" cp
+    case "$c" in [\ -~]) UI_CW=1; return ;; esac        # ASCII: camino rapido
+    printf -v cp '%d' "'$c" 2>/dev/null || { UI_CW=1; return; }
+    if (( cp == 0xFE0F || cp == 0xFE0E || cp == 0x200D )); then UI_CW=0
+    elif (( (cp >= 0x1100  && cp <= 0x115F)  || (cp >= 0x2E80  && cp <= 0xA4CF)  ||
+            (cp >= 0xAC00  && cp <= 0xD7A3)  || (cp >= 0xF900  && cp <= 0xFAFF)  ||
+            (cp >= 0xFE30  && cp <= 0xFE6F)  || (cp >= 0xFF00  && cp <= 0xFF60)  ||
+            (cp >= 0xFFE0  && cp <= 0xFFE6)  || (cp >= 0x1F300 && cp <= 0x1F64F) ||
+            (cp >= 0x1F680 && cp <= 0x1F6FF) || (cp >= 0x1F7E0 && cp <= 0x1F7EB) ||
+            (cp >= 0x1F900 && cp <= 0x1F9FF) || (cp >= 0x1FA70 && cp <= 0x1FAFF) ||
+            cp == 0x231B || cp == 0x23F0 || cp == 0x26A1 || cp == 0x26C5 || cp == 0x26D4 ||
+            cp == 0x2705 || cp == 0x274C || cp == 0x274E || cp == 0x2795 ||
+            cp == 0x2B50 || cp == 0x2B55 )); then UI_CW=2
+    else UI_CW=1; fi
+}
+ui_fit(){
+    # ui_fit TEXTO ANCHO -> UI_FIT (texto recortado a ANCHO columnas) y UI_FITW (columnas usadas)
+    local s="$1" max="$2" out="" w=0 ch
+    while [[ -n "$s" ]]; do
+        ch="${s:0:1}"; s="${s:1}"
+        ui_cw "$ch"
+        (( w + UI_CW > max )) && break
+        out+="$ch"; w=$(( w + UI_CW ))
+    done
+    UI_FIT="$out"; UI_FITW=$w
+}
 FR_TXT(){
-    local raw="$1" out="" vis=0 esc W=$UI_W
+    local raw="$1" out="" vis=0 esc ch W=$UI_W
     raw="${raw//\\033/$'\x1b'}"
     while [[ -n "$raw" ]]; do
         if [[ "$raw" == $'\x1b['* ]]; then
             esc="${raw%%m*}m"; out+="$esc"; raw="${raw#"$esc"}"; continue
         fi
-        [[ $vis -ge $W ]] && break
-        out+="${raw:0:1}"; vis=$((vis+1)); raw="${raw:1}"
+        ch="${raw:0:1}"; ui_cw "$ch"
+        (( vis + UI_CW > W )) && break
+        out+="$ch"; vis=$(( vis + UI_CW )); raw="${raw:1}"
     done
     printf '%b %s%b%*s %b\n' "${BORDE}│${NC}" "$out" "$NC" "$((W-vis))" "" "${BORDE}│${NC}"
 }
@@ -969,8 +1019,8 @@ ui_cell(){
     local k="$1" lbl="${2:-}" w="$3" ic="$CIAN" pad txt
     [[ "$k" == "0" ]] && ic="$ROJO"
     txt=$(printf '%-4s' "[$k]")
-    lbl="${lbl:0:$((w-6))}"
-    pad=$(( w - 5 - ${#lbl} ))
+    ui_fit "$lbl" $(( w - 6 )); lbl="$UI_FIT"
+    pad=$(( w - 5 - UI_FITW ))
     (( pad < 0 )) && pad=0
     printf '%b%s%b %b%s%b%*s' "$ic" "$txt" "$NC" "$BLANCO" "$lbl" "$NC" "$pad" ""
 }
@@ -1010,10 +1060,10 @@ cpu_pct(){
     t2=$((a+b+c+d+e+f+g+h)); i2=$((d+e))
     if (( t2 > t1 )); then echo $(( 100 * ((t2-t1) - (i2-i1)) / (t2-t1) )); else echo 0; fi
 }
-OK(){ echo -e "  ${VERDE}✔${NC} $1"; }
-ERR(){ echo -e "  ${ROJO}✘${NC} $1"; }
+OK(){ echo -e "  ${VERDE}✅${NC} $1"; }
+ERR(){ echo -e "  ${ROJO}❌${NC} $1"; }
 INFO(){ echo -e "  ${CIAN}●${NC} $1"; }
-WARN(){ echo -e "  ${AMARILLO}▲${NC} $1"; }
+WARN(){ echo -e "  ${AMARILLO}🔶${NC} $1"; }
 FILA(){
     if [[ -n "$3" ]]; then
         printf " ${AZUL}[%-2s]${NC} %-26s ${AZUL}[%-2s]${NC} %s\n" "$1" "$2" "$3" "$4"
@@ -1044,7 +1094,7 @@ cabecera(){
         lic_txt="${lic_txt}  ${GRIS}·${NC}  ${AMARILLO}${lic} $(T t_ui_days)${NC}"
     fi
     FR_TOP
-    FR_TXT " ${MORADO}◆${NC} ${BLANCO}GHOST PANEL${NC}  ${GRIS}-  v${GHOST_VER}${NC}"
+    FR_TXT " 👻 ${BLANCO}GHOST PANEL${NC}  ${GRIS}-  v${GHOST_VER}${NC}"
     ui_sec "$(T t_ui_sys)"
     ui_kv "OS" "${os}  ${GRIS}·${NC}  kernel ${kern}"
     ui_kv "Uptime" "$up"
@@ -1096,7 +1146,7 @@ estado_webmin_min(){
 # ------------------------------------------------------------
 crear_usuario(){
     echo -e "${CIAN}--- CREAR USUARIO SSH ---${NC}"
-    local USU DIAS MAXC CLAVE EXPISO
+    local USU DIAS MAXC GB GB_TXT CLAVE EXPISO
     read -r -p "Nombre de usuario: " USU
     nombre_usuario_valido "$USU" || { ERR "Nombre invalido (minusculas, numeros, - y _; max 32; empieza con letra)."; PAUSA; return; }
     id "$USU" >/dev/null 2>&1 && { ERR "El usuario ya existe."; PAUSA; return; }
@@ -1105,6 +1155,10 @@ crear_usuario(){
     [[ "$DIAS" =~ ^[0-9]+$ && "$DIAS" -ge 1 ]] || { ERR "Dias invalidos (entero >= 1)."; PAUSA; return; }
     read -r -p "Conexion maxima (ej. 1) [1]: " MAXC; MAXC=${MAXC:-1}
     [[ "$MAXC" =~ ^[0-9]+$ ]] || { ERR "Limite invalido."; PAUSA; return; }
+    # Limite de trafico en GB: vacio o 0 = sin limite (se valida ANTES de crear nada)
+    read -r -p "$(T t_nu_gb) " GB; GB=${GB:-0}
+    [[ "$GB" =~ ^[0-9]{1,6}$ ]] || { ERR "Trafico invalido (entero >= 0; 0 = sin limite)."; PAUSA; return; }
+    GB=$((10#$GB))   # normaliza ceros a la izquierda ("010" -> 10)
     IFS= read -r -p "Contrasena: " CLAVE
     [[ -n "$CLAVE" ]] || { ERR "Contrasena vacia."; PAUSA; return; }
     useradd -m -s /bin/bash "$USU" 2>/dev/null || { ERR "No se pudo crear."; PAUSA; return; }
@@ -1115,15 +1169,25 @@ crear_usuario(){
     chage -M 99999 -E "$EXPISO" "$USU"
     mkdir -p /etc/vps-limits
     echo "$MAXC" > "/etc/vps-limits/$USU"
+    # Cuota de trafico (misma ruta/formato que trafico_limite). Sin limite -> sin archivo.
+    if (( GB > 0 )); then
+        mkdir -p /etc/vps-trafico
+        echo "$GB" > "/etc/vps-trafico/$USU"
+        GB_TXT="${GB} GB"
+    else
+        rm -f "/etc/vps-trafico/$USU"   # evita heredar un archivo viejo de un usuario homonimo
+        GB_TXT="Sin limite"
+    fi
+    trafico_regla_usuario "$USU"       # si el conteo iptables esta activo, el usuario nuevo ya cuenta
     xray_usuario add "$USU"
     # Banner personalizado con nombre/vencimiento/dias (sin configurar nada en la app)
     banner_usuario_actualizar "$USU"
     banner_rebuild_match
     # Asegurar CheckUser (opcional, por si la app lo usa)
     checkuser_auto_activar
-    vps_log INFO "usuario creado: $USU (${DIAS}d, limite $MAXC)"
+    vps_log INFO "usuario creado: $USU (${DIAS}d, limite $MAXC, trafico $GB_TXT)"
     OK "Usuario '$USU' creado. Vence: $EXPISO"
-    echo -e "  Usuario: ${VERDE}$USU${NC}   Clave: ${VERDE}$CLAVE${NC}   Limite: $MAXC"
+    echo -e "  Usuario: ${VERDE}$USU${NC}   Clave: ${VERDE}$CLAVE${NC}   Limite: $MAXC   Trafico: $GB_TXT"
     echo -e "  IP: $(ip_publica)  |  Puerto SSH: $(sshd_puerto_actual)"
     if [[ -f /etc/vps-checkuser.conf ]]; then
         local _P _T
@@ -1281,7 +1345,7 @@ banner_html_http_custom(){
     # Variables en texto plano limpio: USER EXP DAYS WARN (HC las sustituye).
     # Ningun texto fijo contiene USER/EXP/DAYS/WARN (HC reemplaza aunque esten dentro de otra palabra).
     # WARN va solo en su renglon: si viene vacio no queda ningun rotulo huerfano.
-    printf '%s' '<p style="text-align:center;"><font color="#00FFFF"><b>═══════════════════════</b></font></p><p style="text-align:center;"><font color="#00FF7F"><b>🌐 G H O S T   P A N E L 🌐</b></font></p><p style="text-align:center;"><font color="#9E9E9E"><i>--- CONEXION VIP ESTABLE ---</i></font></p><p style="text-align:center;"><font color="#00FFFF"><b>═══════════════════════</b></font></p><p style="text-align:center;"><font color="#FFFFFF"><b>👤 USUARIO : </b></font><font color="#00BFFF"><b>USER</b></font></p><p style="text-align:center;"><font color="#FFFFFF"><b>📅 VENCIMIENTO : </b></font><font color="#FFD700"><b>EXP</b></font></p><p style="text-align:center;"><font color="#FFFFFF"><b>⏳ RESTANTES : </b></font><font color="#FF8C00"><b>DAYS</b></font></p><p style="text-align:center;"><font color="#555555">──────────────────────</font></p><p style="text-align:center;"><font color="#FF4444"><b>WARN</b></font></p><p style="text-align:center;"><font color="#7CFC00"><i>🚀 Disfruta de la mejor velocidad 🚀</i></font></p><p style="text-align:center;"><font color="#00FFFF"><b>═══════════════════════</b></font></p>'
+    printf '%s' '<p style="text-align:center;"><font color="#00FFFF"><b>═══════════════════════</b></font></p><p style="text-align:center;"><font color="#00FF7F"><b>👻 G H O S T   P A N E L 👻</b></font></p><p style="text-align:center;"><font color="#9E9E9E"><i>--- CONEXION VIP ESTABLE ---</i></font></p><p style="text-align:center;"><font color="#00FFFF"><b>═══════════════════════</b></font></p><p style="text-align:center;"><font color="#FFFFFF"><b>👤 USUARIO : </b></font><font color="#00BFFF"><b>USER</b></font></p><p style="text-align:center;"><font color="#FFFFFF"><b>📅 VENCIMIENTO : </b></font><font color="#FFD700"><b>EXP</b></font></p><p style="text-align:center;"><font color="#FFFFFF"><b>⏳ RESTANTES : </b></font><font color="#FF8C00"><b>DAYS</b></font></p><p style="text-align:center;"><font color="#555555">──────────────────────</font></p><p style="text-align:center;"><font color="#FF4444"><b>WARN</b></font></p><p style="text-align:center;"><font color="#7CFC00"><i>🚀 Disfruta de la mejor velocidad 🚀</i></font></p><p style="text-align:center;"><font color="#00FFFF"><b>═══════════════════════</b></font></p>'
 }
 
 banner_validar_hc(){
@@ -1467,13 +1531,99 @@ banner_eliminar(){
     PAUSA
 }
 
+# ------------------------------------------------------------
+# TRAFICO: helpers compartidos (panel + banner)
+# Total por usuario = SSH (iptables owner) + Xray (Stats API, up+down).
+# ------------------------------------------------------------
+declare -A TRAF_CACHE=()   # usuario -> bytes totales (se llena con trafico_cache_cargar)
+TRAF_BATCH=0               # 1 = lotes (banner_todos_actualizar): reutiliza TRAF_CACHE
+
+fmt_bytes(){
+    # fmt_bytes BYTES -> "512 MB" si < 1 GB, o "1.25 GB" (2 decimales, sin bc)
+    local b="${1:-0}"
+    [[ "$b" =~ ^[0-9]+$ ]] || b=0
+    if (( b < 1073741824 )); then
+        echo "$(( b / 1048576 )) MB"
+    else
+        local c=$(( b * 100 / 1073741824 ))
+        printf '%d.%02d GB\n' $(( c / 100 )) $(( c % 100 ))
+    fi
+}
+
+xray_stats_todos(){
+    # Imprime "usuario up down" (bytes) por cada email Xray; nada si la API no responde.
+    local RAW
+    command -v xray >/dev/null 2>&1 || return 0
+    RAW=$(xray api statsquery --server=127.0.0.1:10085 2>/dev/null) || return 0
+    [[ -n "$RAW" ]] || return 0
+    printf '%s' "$RAW" | python3 -c '
+import json, sys, re
+raw = sys.stdin.read()
+st = {}
+def add(u, d, v):
+    st.setdefault(u, [0, 0])[0 if d == "uplink" else 1] = v
+try:
+    data = json.loads(raw) if raw.strip()[:1] in "{[" else None
+except Exception:
+    data = None
+if isinstance(data, dict) and "stat" in data:
+    for s in data.get("stat") or []:
+        m = re.match(r"user>>>([^>]+)>>>traffic>>>(uplink|downlink)$", s.get("name", ""))
+        if m:
+            add(m.group(1), m.group(2), int(s.get("value") or 0))
+else:
+    for m in re.finditer(r"user>>>([^>\s]+)>>>traffic>>>(uplink|downlink)[^\d]*(\d+)", raw):
+        add(m.group(1), m.group(2), int(m.group(3)))
+for u, (a, b) in st.items():
+    print(u, a, b)
+' 2>/dev/null
+}
+
+trafico_cache_cargar(){
+    # Lee UNA vez los contadores (iptables + Xray) de todos los usuarios -> TRAF_CACHE
+    local B UIDN U UP DN
+    TRAF_CACHE=()
+    while read -r B UIDN; do
+        [[ -n "$UIDN" ]] || continue
+        U=$(id -un "$UIDN" 2>/dev/null) || continue
+        TRAF_CACHE[$U]=$(( ${TRAF_CACHE[$U]:-0} + B ))
+    done < <(iptables -L VPS-TRAFFIC -v -x -n 2>/dev/null | awk '/owner UID match/ {print $2, $NF}')
+    while read -r U UP DN; do
+        [[ -n "$U" ]] || continue
+        TRAF_CACHE[$U]=$(( ${TRAF_CACHE[$U]:-0} + ${UP:-0} + ${DN:-0} ))
+    done < <(xray_stats_todos)
+}
+
+trafico_usuario_bytes(){
+    # trafico_usuario_bytes USUARIO -> bytes usados (SSH + Xray). Lectura fresca salvo en modo lote.
+    (( TRAF_BATCH )) || trafico_cache_cargar
+    echo "${TRAF_CACHE[$1]:-0}"
+}
+
+trafico_regla_usuario(){
+    # trafico_regla_usuario USUARIO -> añade su regla al conteo iptables (idempotente).
+    # Si el conteo no esta activado (cadena VPS-TRAFFIC inexistente) no hace nada.
+    iptables -L VPS-TRAFFIC -n >/dev/null 2>&1 || return 0
+    iptables -C VPS-TRAFFIC -m owner --uid-owner "$1" -j RETURN 2>/dev/null \
+        || iptables -A VPS-TRAFFIC -m owner --uid-owner "$1" -j RETURN 2>/dev/null
+    return 0
+}
+
 # Banner personalizado por usuario (sin CheckUser en la app).
 # OpenSSH no expande %u en Banner: se usan bloques Match User.
+# Nota: Dropbear solo admite UN banner global (/etc/dropbear/banner), no por usuario.
 BANNERS_DIR='/etc/vps-banners'
+
+banner_fila(){
+    # banner_fila "ETIQUETA" "#COLOR" "VALOR" -> una fila <p> con el mismo estilo del banner.
+    # OJO: ni etiquetas ni valores deben contener los tokens que HTTP Custom sustituye (USER, EXP, DAYS, WARN).
+    printf '<p style="text-align:center;"><font color="#FFFFFF"><b>%s : </b></font><font color="%s"><b>%s</b></font></p>' "$1" "$2" "$3"
+}
 
 banner_html_para_usuario(){
     # banner_html_para_usuario USUARIO -> imprime HTML con datos reales (1 linea)
     local U="$1" EXPISO D WARN="" EXP_TXT DAYS_TXT
+    local CONN_TXT LIM_GB GB_TXT USED_B USED_TXT LIM_B REST_B REST_TXT="" REST_COLOR="#7CFC00" EXTRA_ROWS
     EXPISO=$(usuario_fecha_cuenta "$U")
     if [[ "$EXPISO" == "never" ]]; then
         EXP_TXT="Sin vencimiento"
@@ -1489,8 +1639,24 @@ banner_html_para_usuario(){
             (( D <= 3 )) && WARN="Por vencer: quedan ${D} dias"
         fi
     fi
+    # --- Limite de conexiones: archivo ausente o 0 = sin limite (igual que el limiter) ---
+    CONN_TXT=$(tr -dc '0-9' 2>/dev/null < "/etc/vps-limits/$U"); CONN_TXT=${CONN_TXT:0:6}
+    if [[ -n "$CONN_TXT" ]] && (( 10#$CONN_TXT > 0 )); then CONN_TXT=$((10#$CONN_TXT)); else CONN_TXT="Sin limite"; fi
+    # --- Trafico usado (SSH + Xray) y cuota en GB: archivo ausente o 0 = sin limite ---
+    USED_B=$(trafico_usuario_bytes "$U"); USED_TXT=$(fmt_bytes "$USED_B")
+    LIM_GB=$(tr -dc '0-9' 2>/dev/null < "/etc/vps-trafico/$U"); LIM_GB=${LIM_GB:0:6}
+    if [[ -n "$LIM_GB" ]] && (( 10#$LIM_GB > 0 )); then
+        LIM_GB=$((10#$LIM_GB)); GB_TXT="${LIM_GB} GB"
+        LIM_B=$(( LIM_GB * 1073741824 )); REST_B=$(( LIM_B - USED_B )); (( REST_B < 0 )) && REST_B=0
+        REST_TXT=$(fmt_bytes "$REST_B")
+        (( REST_B * 10 <= LIM_B )) && REST_COLOR="#FF4444"   # queda 10% o menos -> rojo
+    else
+        GB_TXT="Sin limite"
+    fi
+    EXTRA_ROWS="$(banner_fila "🔌 LIMITE CONEXIONES" "#00FF7F" "$CONN_TXT")$(banner_fila "📊 TRAFICO USADO" "#DA70D6" "$USED_TXT")$(banner_fila "📦 LIMITE TRAFICO" "#40E0D0" "$GB_TXT")"
+    [[ -n "$REST_TXT" ]] && EXTRA_ROWS+="$(banner_fila "🔋 TRAFICO RESTANTE" "$REST_COLOR" "$REST_TXT")"
     # Misma plantilla visual, pero con valores reales (sin tokens USER/EXP/DAYS)
-    printf '%s' "<p style=\"text-align:center;\"><font color=\"#00FFFF\"><b>═══════════════════════</b></font></p><p style=\"text-align:center;\"><font color=\"#00FF7F\"><b>🌐 G H O S T   P A N E L 🌐</b></font></p><p style=\"text-align:center;\"><font color=\"#9E9E9E\"><i>--- CONEXION VIP ESTABLE ---</i></font></p><p style=\"text-align:center;\"><font color=\"#00FFFF\"><b>═══════════════════════</b></font></p><p style=\"text-align:center;\"><font color=\"#FFFFFF\"><b>👤 USUARIO : </b></font><font color=\"#00BFFF\"><b>${U}</b></font></p><p style=\"text-align:center;\"><font color=\"#FFFFFF\"><b>📅 VENCIMIENTO : </b></font><font color=\"#FFD700\"><b>${EXP_TXT}</b></font></p><p style=\"text-align:center;\"><font color=\"#FFFFFF\"><b>⏳ RESTANTES : </b></font><font color=\"#FF8C00\"><b>${DAYS_TXT}</b></font></p><p style=\"text-align:center;\"><font color=\"#555555\">──────────────────────</font></p><p style=\"text-align:center;\"><font color=\"#FF4444\"><b>${WARN}</b></font></p><p style=\"text-align:center;\"><font color=\"#7CFC00\"><i>🚀 Disfruta de la mejor velocidad 🚀</i></font></p><p style=\"text-align:center;\"><font color=\"#00FFFF\"><b>═══════════════════════</b></font></p>"
+    printf '%s' "<p style=\"text-align:center;\"><font color=\"#00FFFF\"><b>═══════════════════════</b></font></p><p style=\"text-align:center;\"><font color=\"#00FF7F\"><b>👻 G H O S T   P A N E L 👻</b></font></p><p style=\"text-align:center;\"><font color=\"#9E9E9E\"><i>--- CONEXION VIP ESTABLE ---</i></font></p><p style=\"text-align:center;\"><font color=\"#00FFFF\"><b>═══════════════════════</b></font></p><p style=\"text-align:center;\"><font color=\"#FFFFFF\"><b>👤 USUARIO : </b></font><font color=\"#00BFFF\"><b>${U}</b></font></p><p style=\"text-align:center;\"><font color=\"#FFFFFF\"><b>📅 VENCIMIENTO : </b></font><font color=\"#FFD700\"><b>${EXP_TXT}</b></font></p><p style=\"text-align:center;\"><font color=\"#FFFFFF\"><b>⏳ RESTANTES : </b></font><font color=\"#FF8C00\"><b>${DAYS_TXT}</b></font></p>${EXTRA_ROWS}<p style=\"text-align:center;\"><font color=\"#555555\">──────────────────────</font></p><p style=\"text-align:center;\"><font color=\"#FF4444\"><b>${WARN}</b></font></p><p style=\"text-align:center;\"><font color=\"#7CFC00\"><i>🚀 Disfruta de la mejor velocidad 🚀</i></font></p><p style=\"text-align:center;\"><font color=\"#00FFFF\"><b>═══════════════════════</b></font></p>"
 }
 
 banner_usuario_actualizar(){
@@ -1549,10 +1715,12 @@ banner_todos_actualizar(){
     # Regenera banner de todos los usuarios humanos + Match en sshd
     local U
     mkdir -p "$BANNERS_DIR"
+    trafico_cache_cargar; TRAF_BATCH=1     # una sola lectura de contadores para todos los usuarios
     while read -r U; do
         usuario_protegido "$U" && continue
         banner_usuario_actualizar "$U"
     done < <(awk -F: '$3>=1000 && $1!="nobody"{print $1}' /etc/passwd)
+    TRAF_BATCH=0
     banner_rebuild_match
 }
 
@@ -1875,6 +2043,7 @@ cambiar_limite(){
     [[ "$M" =~ ^[0-9]+$ ]] || { ERR "Numero invalido."; PAUSA; return; }
     mkdir -p /etc/vps-limits
     echo "$M" > "/etc/vps-limits/$USU"
+    banner_usuario_actualizar "$USU"   # el banner refleja el nuevo limite de conexiones
     OK "Limite de '$USU' actualizado a $M sesiones."
     PAUSA
 }
@@ -2628,6 +2797,7 @@ trafico_ver(){
     echo
     INFO "SSH = trafico de procesos del UID (tuneles SSH). Xray = stats por email si API :10085 activa."
     INFO "Reset solo pone a cero contadores iptables (no borra stats de Xray)."
+    banner_todos_actualizar >/dev/null 2>&1 || true   # deja los banners con el consumo actual
     PAUSA
 }
 
@@ -2638,6 +2808,7 @@ trafico_limite(){
     [[ "$G" =~ ^[0-9]+$ ]] || { ERR "Numero invalido."; PAUSA; return; }
     mkdir -p /etc/vps-trafico
     echo "$G" > "/etc/vps-trafico/$USU"
+    banner_usuario_actualizar "$USU"   # el banner refleja el nuevo limite
     OK "Limite de $USU = ${G}GB."
     PAUSA
 }
@@ -2658,11 +2829,13 @@ trafico_cortar(){
         fi
     done
     [[ $CORTADOS -eq 0 ]] && OK "Nadie supero su limite." || OK "Bloqueados: $CORTADOS."
+    banner_todos_actualizar >/dev/null 2>&1 || true
     PAUSA
 }
 
 trafico_reset(){
     iptables -Z VPS-TRAFFIC 2>/dev/null && OK "Contadores en cero." || ERR "La cadena no existe (activa antes)."
+    banner_todos_actualizar >/dev/null 2>&1 || true
     PAUSA
 }
 
@@ -2670,9 +2843,9 @@ menu_trafico(){
     while true; do
         cabecera
         SUBTOP "$(T t_sub_trafico)"
-        FR_OPT 1 "$(T t_tr_activar)" 4 "$(T t_tr_cortar)"
-        FR_OPT 2 "$(T t_tr_ver)" 5 "$(T t_tr_reset)"
-        FR_OPT 3 "$(T t_tr_limite)" "" ""
+        FR_OPT 1 "📶 $(T t_tr_activar)" 4 "🚫 $(T t_tr_cortar)"
+        FR_OPT 2 "📈 $(T t_tr_ver)" 5 "🔄 $(T t_tr_reset)"
+        FR_OPT 3 "🚦 $(T t_tr_limite)" "" ""
         FR_OPT 0 "$(T t_volver)" "" ""
         FR_BOT
         PROMPT
@@ -3499,22 +3672,42 @@ quitar_adguard(){
     PAUSA
 }
 
-menu_adblock(){
+reparar_adguard(){
+    # Reutiliza la logica de reparacion existente (libera :53, reescribe yaml, re-registra el unit).
+    echo -e "${CIAN}--- REPARAR AdGuard Home ---${NC}"
+    if ! adguard_instalado; then ERR "AdGuard Home no esta instalado."; PAUSA; return; fi
+    INFO "Liberando :53, reescribiendo config y re-registrando el servicio..."
+    if adguard_arreglar_y_arrancar; then
+        OK "Servicio ACTIVO tras reparacion"
+        vps_log INFO "AdGuard Home reparado"
+    else
+        ERR "No arranco. Diagnostico:"
+        adguard_diag
+    fi
+    PAUSA
+}
+
+# Submenu de AdGuard Home (se abre desde Protocolos [11]).
+menu_adguard(){
     while true; do
         cabecera
-        SUBTOP "$(T t_sub_adblock)"
-        FR_OPT 1 "$(T t_ad_inst)" 3 "$(T t_ad_listas)"
-        FR_OPT 2 "$(T t_ad_estado)" 4 "$(T t_ad_quitar)"
+        SUBTOP "$(T t_sub_adguard)"
+        FR_OPT 1 "📥 $(T t_ad_inst)" "" ""
+        FR_OPT 2 "📊 $(T t_ad_estado)" "" ""
+        FR_OPT 3 "🔧 $(T t_ad_reparar)" "" ""
+        FR_OPT 4 "🔄 $(T t_ad_listas)" "" ""
+        FR_OPT 5 "🧹 $(T t_ad_quitar)" "" ""
         FR_OPT 0 "$(T t_volver)" "" ""
         FR_BOT
-        echo -e "  ${GRIS}Bloquea anuncios por DNS para clientes WireGuard (DNS=10.66.0.1).${NC}"
-        echo -e "  ${GRIS}Puerto 53 NO se publica a Internet.${NC}"
+        echo -e "  ${GRIS}$(T t_ad_nota1)${NC}"
+        echo -e "  ${GRIS}$(T t_ad_nota2)${NC}"
         PROMPT
         case "$OP" in
             1) instalar_adguard ;;
             2) estado_adguard ;;
-            3) actualizar_listas_adguard ;;
-            4) quitar_adguard ;;
+            3) reparar_adguard ;;
+            4) actualizar_listas_adguard ;;
+            5) quitar_adguard ;;
             0) break ;;
             *) ERR "$(T t_opinv)"; sleep 1 ;;
         esac
@@ -3526,16 +3719,15 @@ menu_protocolos(){
     while true; do
         cabecera
         SUBTOP "$(T t_sub_prot)"
-        FR_OPT 1 "$(T t_xray)" 2 "$(T t_xray_ws)"
-        FR_OPT 3 "$(T t_openvpn)" 4 "$(T t_stunnel)"
-        FR_OPT 5 "$(T t_hysteria)" 6 "$(T t_badvpn)"
-        FR_OPT 7 "$(T t_wsepro)" 8 "$(T t_shadowsocks)"
-        FR_OPT 9 "$(T t_trojan)" 10 "$(T t_wireguard)"
-        FR_OPT 11 "$(T t_estado_prot)" 12 "$(T t_quitar)"
-        FR_OPT 13 "$(T t_cf_test)" "" ""
+        FR_OPT 1 "⚡ $(T t_xray)" 2 "🌐 $(T t_xray_ws)"
+        FR_OPT 3 "🔐 $(T t_openvpn)" 4 "🔏 $(T t_stunnel)"
+        FR_OPT 5 "🚀 $(T t_hysteria)" 6 "🎮 $(T t_badvpn)"
+        FR_OPT 7 "🔗 $(T t_wsepro)" 8 "🎭 $(T t_shadowsocks)"
+        FR_OPT 9 "🐴 $(T t_trojan)" 10 "🐉 $(T t_wireguard)"
+        FR_OPT 11 "🚫 $(T t_adguard)" 12 "📊 $(T t_estado_prot)"
+        FR_OPT 13 "🧹 $(T t_quitar)" 14 "⛅ $(T t_cf_test)"
         FR_OPT 0 "$(T t_volver)" "" ""
         FR_BOT
-        echo -e "  ${GRIS}AdBlock/AdGuard: menu principal opcion 9${NC}"
         PROMPT
         case "$OP" in
             1) instalar_xray ;;        2) instalar_xray_ws ;;
@@ -3543,8 +3735,8 @@ menu_protocolos(){
             5) instalar_hysteria ;;    6) instalar_badvpn ;;
             7) instalar_wsepro ;;      8) instalar_shadowsocks ;;
             9) instalar_trojan ;;      10) instalar_wireguard ;;
-            11) estado_protocolos ;;   12) menu_quitar ;;
-            13) tunel_trycloudflare ;;
+            11) menu_adguard ;;        12) estado_protocolos ;;
+            13) menu_quitar ;;         14) tunel_trycloudflare ;;
             0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
         esac
     done
@@ -3557,12 +3749,12 @@ menu_usuarios(){
     while true; do
         cabecera
         SUBTOP "$(T t_sub_usuarios)"
-        FR_OPT 1 "$(T t_crear)" 7 "$(T t_eliminar)"
-        FR_OPT 2 "$(T t_listar)" 8 "$(T t_vencidos)"
-        FR_OPT 3 "$(T t_clave)" 9 "$(T t_test)"
-        FR_OPT 4 "$(T t_bloquear)" 10 "$(T t_conexiones)"
-        FR_OPT 5 "$(T t_renovar)" 11 "$(T t_desconectar)"
-        FR_OPT 6 "$(T t_limite)" "" ""
+        FR_OPT 1 "➕ $(T t_crear)" 7 "❌ $(T t_eliminar)"
+        FR_OPT 2 "📋 $(T t_listar)" 8 "⏰ $(T t_vencidos)"
+        FR_OPT 3 "🔑 $(T t_clave)" 9 "🧪 $(T t_test)"
+        FR_OPT 4 "🔒 $(T t_bloquear)" 10 "📡 $(T t_conexiones)"
+        FR_OPT 5 "🔄 $(T t_renovar)" 11 "⛔ $(T t_desconectar)"
+        FR_OPT 6 "🚦 $(T t_limite)" "" ""
         FR_OPT 0 "$(T t_volver)" "" ""
         FR_BOT
         PROMPT
@@ -4053,6 +4245,155 @@ quitar_tunel_cdn(){
 }
 
 # ------------------------------------------------------------
+# DESINSTALAR GHOST PANEL
+# Quita servicios, archivos, config de sshd/Dropbear, reglas iptables, auto-menu, logs
+# y el propio script. Reutiliza las funciones quitar_* (sin pausas, respondiendo "s").
+# ------------------------------------------------------------
+desinst_run(){
+    # desinst_run FUNCION -> la ejecuta sin PAUSA y contestando "s" a sus preguntas
+    ( export DEBIAN_FRONTEND=noninteractive; PAUSA(){ :; }; yes s 2>/dev/null | "$@" ) 2>&1 | sed 's/^/  /'
+}
+
+desinst_protocolos(){
+    # Solo actua sobre lo que realmente esta instalado (evita ruido y apt innecesario)
+    [[ -e /usr/local/bin/xray || -d /usr/local/etc/xray ]]            && desinst_run quitar_xray_completo
+    [[ -f /etc/systemd/system/vpsjb-ws.service ]]                      && desinst_run quitar_wsepro
+    [[ -f /etc/stunnel/stunnel.conf ]]                                 && desinst_run quitar_stunnel
+    [[ -d /etc/hysteria || -e /usr/local/bin/hysteria ]]              && desinst_run quitar_hysteria
+    [[ -f /etc/shadowsocks-libev/config.json || -f /etc/systemd/system/vpsjb-ss.service ]] && desinst_run quitar_shadowsocks
+    [[ -f /etc/wireguard/wg0.conf ]]                                   && desinst_run quitar_wireguard
+    [[ -f /etc/systemd/system/badvpn.service || -e /usr/local/bin/badvpn-udpgw ]] && desinst_run quitar_badvpn
+    [[ -d /opt/AdGuardHome ]]                                          && desinst_run quitar_adguard
+    [[ -d /etc/webmin ]]                                               && desinst_run remover_webmin
+    # Tunel CDN (cloudflared)
+    pkill -x cloudflared 2>/dev/null
+    dpkg -s cloudflared >/dev/null 2>&1 && dpkg -r cloudflared >/dev/null 2>&1 && OK "cloudflared removido."
+    rm -f /root/cloudflared.deb /var/log/ghost-cf-tunnel.log
+    # zram persistente
+    if [[ -f /etc/systemd/system/vpsjb-zram.service ]]; then
+        systemctl disable --now vpsjb-zram 2>/dev/null
+        swapoff /dev/zram0 2>/dev/null; zramctl --reset /dev/zram0 2>/dev/null
+        rm -f /etc/systemd/system/vpsjb-zram.service
+        OK "zram removido."
+    fi
+    # swapfile creado por el panel
+    if [[ -f /swapfile ]] || grep -q '^/swapfile' /etc/fstab 2>/dev/null; then
+        swapoff /swapfile 2>/dev/null; rm -f /swapfile
+        sed -i '\#^/swapfile #d' /etc/fstab 2>/dev/null
+        OK "Swapfile removido."
+    fi
+    rmdir /etc/wireguard /etc/stunnel /etc/hysteria 2>/dev/null
+    return 0
+}
+
+desinstalar_ghost(){
+    local RUN WORD R U L N=0 DO_USERS=0 DO_PROTO=1 DO_BK=0 USERS=()
+    echo -e "${ROJO}--- 🔥 $(T t_du_titulo) ---${NC}"
+    echo
+    echo "  Se eliminara TODO lo que creo Ghost Panel:"
+    echo "   · Servicios: limiter, CheckUser, cron de vencidos, contadores iptables"
+    echo "   · Banners (OpenSSH Match User, /etc/banner-vps, Dropbear) y auto-menu"
+    echo "   · Datos: limites, trafico, usuarios del panel, licencia, idioma, links, logs"
+    echo "   · Ajustes: sysctl/BBR del panel, jail.local de fail2ban"
+    echo "   · El comando ghostpanel (vpsmgr, vps) y este archivo del script"
+    echo
+    while read -r U; do
+        usuario_protegido "$U" && continue
+        USERS+=("$U")
+    done < <(awk -F: '$3>=1000 && $1!="nobody"{print $1}' /etc/passwd)
+
+    read -r -p "  ¿Quitar tambien los protocolos instalados (Xray, WS, Hysteria, Stunnel, WireGuard, AdGuard, Webmin...)? (S/n): " R
+    [[ "$R" =~ ^[nN]$ ]] && DO_PROTO=0
+    if (( ${#USERS[@]} > 0 )); then
+        echo -e "  ${AMARILLO}Usuarios SSH detectados (${#USERS[@]}):${NC} ${USERS[*]}"
+        read -r -p "  ¿ELIMINAR tambien estos usuarios y sus carpetas /home? (s/N): " R
+        [[ "$R" =~ ^[sSyY]$ ]] && DO_USERS=1
+    fi
+    if compgen -G "/root/backups/ghost-panel-v*.sh" >/dev/null || compgen -G "/root/backups/backup-*.tar.gz" >/dev/null; then
+        read -r -p "  ¿Borrar tambien los respaldos en /root/backups? (s/N): " R
+        [[ "$R" =~ ^[sSyY]$ ]] && DO_BK=1
+    fi
+    echo
+    read -r -p "  $(T t_du_conf) " WORD
+    if [[ "${WORD^^}" != "$(T t_du_word)" ]]; then INFO "Cancelado. No se toco nada."; PAUSA; return; fi
+    echo
+
+    # 1) Usuarios (opcional): primero, mientras xray/sshd siguen existiendo
+    if (( DO_USERS )); then
+        for U in "${USERS[@]}"; do purgar_usuario "$U" && N=$((N+1)); done
+        OK "Usuarios eliminados: $N"
+    fi
+
+    # 2) Servicios propios del panel
+    INFO "Deteniendo servicios del panel..."
+    desinst_run limiter_quitar
+    desinst_run checkuser_quitar
+    rm -f /usr/local/bin/vps-limiter.sh /usr/local/bin/vps-checkuser.py /usr/local/bin/vps-cron-diario.sh \
+          /etc/cron.d/ghost-panel-vencidos /etc/vps-checkuser.conf
+
+    # 3) sshd / Dropbear: banner global, bloques Match User, overrides neutralizados
+    INFO "Limpiando sshd_config y banners..."
+    desinst_run banner_eliminar
+    if grep -q '# GHOST-BANNERS-INICIO' "$SSHD_CFG" 2>/dev/null; then
+        sed -i '/# GHOST-BANNERS-INICIO/,/# GHOST-BANNERS-FIN/d' "$SSHD_CFG"
+    fi
+    for L in /etc/ssh/sshd_config.d/*.conf; do   # reactiva los "Banner" que el panel comento
+        [[ -f "$L" ]] && sed -i -E 's/^# (.*)   # desactivado por GHOST PANEL$/\1/' "$L"
+    done
+    rm -f /etc/ssh/sshd_config.d/*.ghost.bak "${SSHD_CFG}.ghost.bak" "${SSHD_CFG}.ghost-banners.bak"
+    if sshd -t 2>/dev/null; then sshd_recargar 2>/dev/null || true
+    else WARN "sshd_config no valida: revisa /etc/ssh/sshd_config antes de reiniciar sshd."; fi
+    rm -rf /etc/vps-banners
+
+    # 4) Contadores de trafico
+    iptables -D OUTPUT -j VPS-TRAFFIC 2>/dev/null
+    iptables -F VPS-TRAFFIC 2>/dev/null; iptables -X VPS-TRAFFIC 2>/dev/null
+
+    # 5) Protocolos instalados por el panel (opcional)
+    if (( DO_PROTO )); then
+        INFO "Quitando protocolos instalados..."
+        desinst_protocolos
+    fi
+
+    # 6) Ajustes del sistema hechos por el panel
+    rm -f /etc/sysctl.d/99-vps-manager.conf /etc/modules-load.d/bbr.conf /etc/fail2ban/jail.local
+    systemctl is-active --quiet fail2ban 2>/dev/null && systemctl restart fail2ban 2>/dev/null
+    systemctl daemon-reload 2>/dev/null
+
+    # 7) Datos, licencia, config, auto-menu
+    INFO "Borrando datos y configuracion..."
+    rm -rf /etc/vps-limits /etc/vps-trafico /etc/vps-users
+    rm -f /etc/vps-manager.key /etc/vps-manager.lang /etc/vps-license.cache /etc/vps-license.name \
+          /etc/ghost-panel.conf /run/vps-ip.cache /root/vps-links.txt /root/wg-client.conf /root/paquetes.txt
+    [[ -d /etc/openvpn ]] || rm -f /root/openvpn-install.sh      # si OpenVPN sigue, se conserva su instalador
+    for L in /root/.bashrc "$HOME/.bashrc"; do
+        [[ -f "$L" ]] && sed -i '/VPS-JB-AUTOMENU-INICIO/,/VPS-JB-AUTOMENU-FIN/d' "$L"
+    done
+    if (( DO_BK )); then
+        rm -f /root/backups/ghost-panel-v*.sh /root/backups/backup-*.tar.gz
+        rmdir /root/backups 2>/dev/null
+        OK "Respaldos borrados."
+    fi
+
+    # 8) Comando global + este script + log (lo ultimo: despues no se escribe nada al log)
+    RUN=$(readlink -f "$0" 2>/dev/null)
+    for L in vpsmgr vps; do
+        [[ -L "/usr/local/bin/$L" && "$(readlink -f "/usr/local/bin/$L")" == "$(readlink -f "$VPSMGR_DEST")" ]] \
+            && rm -f "/usr/local/bin/$L"
+    done
+    rm -f "$VPSMGR_DEST"
+    [[ -n "$RUN" && -f "$RUN" ]] && rm -f "$RUN"
+    rm -f /var/log/ghost-panel.log
+
+    echo
+    echo -e "  👻 ${VERDE}$(T t_du_fin)${NC}"
+    echo -e "  ${GRIS}No se tocaron: paquetes del sistema (python3, curl, ufw, fail2ban...), reglas UFW ya abiertas,"
+    echo -e "  PasswordAuthentication de sshd, ni OpenVPN (para quitarlo: bash /root/openvpn-install.sh).${NC}"
+    echo
+    exit 0
+}
+
+# ------------------------------------------------------------
 # MENU PRINCIPAL
 # ------------------------------------------------------------
 [[ $EUID -ne 0 ]] && { echo -e "${ROJO}Ejecuta como root o con sudo.${NC}"; exit 1; }
@@ -4072,13 +4413,13 @@ while true; do
     cabecera
     ui_crumb
     ui_box_top "$(T t_menu_principal)"
-    FR_OPT 1 "$(T t_usuarios)" 2 "$(T t_protocolos)"
-    FR_OPT 3 "$(T t_seguridad)" 4 "$(T t_sistema)"
-    FR_OPT 5 "$(T t_herramientas)" 6 "$(T t_webmin)"
-    FR_OPT 7 "$(T t_backup)" 8 "$(T t_diagnostico)"
-    FR_OPT 9 "$(T t_adblock)" "" ""
+    FR_OPT 1 "👤 $(T t_usuarios)" 2 "🔌 $(T t_protocolos)"
+    FR_OPT 3 "🔰 $(T t_seguridad)" 4 "🔧 $(T t_sistema)"
+    FR_OPT 5 "🧰 $(T t_herramientas)" 6 "🌐 $(T t_webmin)"
+    FR_OPT 7 "💾 $(T t_backup)" 8 "🩺 $(T t_diagnostico)"
+    FR_OPT 9 "🔥 $(T t_desinst)" "" ""
     FR_TXT ""
-    FR_OPT 0 "$(T t_salir)" "" ""
+    FR_OPT 0 "🚪 $(T t_salir)" "" ""
     FR_BOT
     echo -e "  ${GRIS}$(T t_servidor_id) ${VERDE}$(machine_hash)${GRIS}  ·  $(date '+%d/%m/%Y %H:%M')${NC}"
     PROMPT
@@ -4091,8 +4432,8 @@ while true; do
         6) menu_webmin ;;
         7) menu_backup ;;
         8) diagnostico ;;
-        9) menu_adblock ;;
-        0) echo -e "${VERDE}Hasta luego!${NC}"; exit 0 ;;
+        9) desinstalar_ghost ;;
+        0) echo -e "👻 ${VERDE}Hasta luego!${NC}"; exit 0 ;;
         *) ERR "$(T t_opinv)"; sleep 1 ;;
     esac
 done
