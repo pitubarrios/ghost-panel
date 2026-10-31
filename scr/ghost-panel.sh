@@ -3,8 +3,12 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 3.7.9
-#  Cambios 3.7.9:
+#  Version: 3.8.0
+#  Cambios 3.8.0:
+#    - Cortar excedidos mide SSH + Xray (misma cifra que el banner) via trafico_excedido
+#    - Auto-corte cada 5 min (cron opcional, Trafico -> [6]): bloquea cuotas excedidas y refresca banners
+#    - Cabecera: trafico "--" si los contadores no estan activos (antes mostraba "0 MB")
+#  Cambios 3.7.9:#  Cambios 3.7.9:
 #    - Logo fantasma ASCII con degradado + intro de ~1 s (cualquier tecla la salta)
 #    - Cabecera compacta (~11 lineas) con datos del negocio: usuarios, online, por vencer, bloqueados, trafico
 #    - Colores por seccion, marcos redondeados, servicios 🟢/🔴/⚫, licencia con semaforo
@@ -77,7 +81,7 @@ tema_guardar(){
     echo "THEME=$1" >> /etc/ghost-panel.conf
 }
 tema_cargar
-GHOST_VER='3.7.9'
+GHOST_VER='3.8.0'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -327,6 +331,9 @@ TXT_ES[t_tr_activar]="Activar conteo"; TXT_EN[t_tr_activar]="Enable counters"
 TXT_ES[t_tr_ver]="Ver consumo"; TXT_EN[t_tr_ver]="View usage"
 TXT_ES[t_tr_limite]="Limite (GB)"; TXT_EN[t_tr_limite]="Limit (GB)"
 TXT_ES[t_tr_cortar]="Cortar excedidos"; TXT_EN[t_tr_cortar]="Cut exceeded"
+TXT_ES[t_tr_auto]="Auto-corte 5 min"; TXT_EN[t_tr_auto]="Auto-cut 5 min"
+TXT_ES[t_tr_auto_on]="Auto-corte ACTIVO (cada 5 min: bloquea excedidos y refresca banners)"; TXT_EN[t_tr_auto_on]="Auto-cut ACTIVE (every 5 min: blocks over-quota users, refreshes banners)"
+TXT_ES[t_tr_auto_off]="Auto-corte inactivo"; TXT_EN[t_tr_auto_off]="Auto-cut inactive"
 TXT_ES[t_tr_reset]="Reset contadores"; TXT_EN[t_tr_reset]="Reset counters"
 TXT_ES[t_sub_quitar]="QUITAR PROTOCOLOS"; TXT_EN[t_sub_quitar]="REMOVE PROTOCOLS"
 TXT_ES[t_q_xray]="Xray completo"; TXT_EN[t_q_xray]="Xray (full)"
@@ -1164,7 +1171,7 @@ ghost_stats_refrescar(){
     read -r GS_USERS GS_VENC GS_HOY GS_PRONTO GS_BLOQ <<< "${out:-0 0 0 0 0}"
     trafico_cache_cargar
     for v in "${TRAF_CACHE[@]:-}"; do t=$(( t + ${v:-0} )); done
-    GS_TRAF=$(fmt_bytes "$t")
+    if (( ${#TRAF_CACHE[@]} == 0 )); then GS_TRAF="--"; else GS_TRAF=$(fmt_bytes "$t"); fi   # "--" = contadores sin activar
 }
 
 ui_mini(){
@@ -2951,43 +2958,119 @@ trafico_limite(){
     PAUSA
 }
 
-trafico_cortar(){
-    local CORTADOS=0
+trafico_excedido(){
+    # trafico_excedido USUARIO -> 0 (verdadero) si tiene cuota en GB y ya la supero.
+    # Usa trafico_usuario_bytes (SSH + Xray): la misma cifra que muestran el banner y "Ver consumo".
+    local G
+    G=$(tr -dc '0-9' 2>/dev/null < "/etc/vps-trafico/$1"); G=${G:0:6}
+    [[ -n "$G" ]] && (( 10#$G > 0 )) || return 1
+    (( $(trafico_usuario_bytes "$1") >= 10#$G * 1073741824 ))
+}
+
+trafico_bloquear_excedidos(){
+    # Bloquea (usermod -L + cierra sesiones) a quien supero su cuota; imprime "USUARIO GB" por cada
+    # bloqueo nuevo. Llamar con la cache cargada (trafico_cache_cargar; TRAF_BATCH=1).
+    local F U G
     for F in /etc/vps-trafico/*; do
         [[ -f "$F" ]] || continue
-        local U G USED
-        U=$(basename "$F"); G=$(cat "$F")
-        [[ "$G" =~ ^[0-9]+$ && "$G" -gt 0 ]] || continue
-        USED=$(iptables -L VPS-TRAFFIC -v -x -n 2>/dev/null | awk -v uid="$(id -u "$U" 2>/dev/null)" '/owner UID match/ && $NF==uid {print $2; exit}')
-        [[ -n "$USED" && $(( USED / 1073741824 )) -ge "$G" ]] || continue
-        if ! passwd -S "$U" 2>/dev/null | grep -q ' L '; then
-            usermod -L "$U" 2>/dev/null; pkill -u "$U" 2>/dev/null
-            INFO "$U supero su limite (${G}GB) y fue bloqueado."
-            CORTADOS=$((CORTADOS+1))
-        fi
+        U=$(basename "$F"); id "$U" >/dev/null 2>&1 || continue
+        usuario_protegido "$U" && continue
+        trafico_excedido "$U" || continue
+        passwd -S "$U" 2>/dev/null | grep -q ' L ' && continue      # ya estaba bloqueado
+        G=$(tr -dc '0-9' 2>/dev/null < "$F")
+        usermod -L "$U" 2>/dev/null; pkill -u "$U" 2>/dev/null
+        echo "$U ${G:-?}"
     done
+}
+
+trafico_cortar(){
+    local CORTADOS=0 U G
+    trafico_cache_cargar; TRAF_BATCH=1            # una sola lectura de contadores para todos
+    while read -r U G; do
+        [[ -n "$U" ]] || continue
+        INFO "$U supero su limite (${G}GB) y fue bloqueado."
+        vps_log INFO "cuota excedida, bloqueado: $U (${G}GB)"
+        CORTADOS=$((CORTADOS+1))
+    done < <(trafico_bloquear_excedidos)
+    TRAF_BATCH=0
     [[ $CORTADOS -eq 0 ]] && OK "Nadie supero su limite." || OK "Bloqueados: $CORTADOS."
     banner_todos_actualizar >/dev/null 2>&1 || true
     PAUSA
 }
 
-trafico_reset(){
-    iptables -Z VPS-TRAFFIC 2>/dev/null && OK "Contadores en cero." || ERR "La cadena no existe (activa antes)."
-    banner_todos_actualizar >/dev/null 2>&1 || true
-    PAUSA
+# ---- Auto-corte: un ciclo = bloquear excedidos + regenerar banners (corre desde cron) ----
+trafico_auto_ciclo(){
+    local U G
+    trafico_cache_cargar; TRAF_BATCH=1
+    while read -r U G; do
+        [[ -n "$U" ]] || continue
+        vps_log INFO "auto-corte: $U supero ${G}GB, bloqueado"
+    done < <(trafico_bloquear_excedidos)
+    while read -r U; do
+        usuario_protegido "$U" && continue
+        banner_usuario_actualizar "$U"
+    done < <(awk -F: '$3>=1000 && $1!="nobody"{print $1}' /etc/passwd)
+    TRAF_BATCH=0
 }
 
+trafico_cron_instalar(){
+    # Genera /usr/local/bin/vps-trafico-cron.sh COPIANDO las funciones de este script (declare -f):
+    # no duplica codigo, no ejecuta el panel completo (sin validacion de licencia ni menus).
+    # Se regenera en cada arranque del panel para que siempre coincida con la version instalada.
+    local FN
+    {
+        echo '#!/bin/bash'
+        echo '# Generado por Ghost Panel (trafico_cron_instalar). No editar: se regenera solo.'
+        echo 'export PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin LC_ALL=C.UTF-8'
+        echo 'exec 9>/run/ghost-trafico.lock; flock -n 9 || exit 0      # sin ciclos solapados'
+        declare -p BANNERS_DIR LOG_PANEL PROTEGIDOS_NOMBRES
+        echo 'declare -A TRAF_CACHE=(); TRAF_BATCH=0'
+        for FN in vps_log usuario_protegido ui_rep fmt_bytes xray_stats_todos trafico_cache_cargar \
+                  trafico_usuario_bytes trafico_excedido trafico_bloquear_excedidos usuario_fecha_cuenta \
+                  dias_hasta banner_barra banner_fila banner_html_para_usuario banner_usuario_actualizar \
+                  trafico_auto_ciclo; do
+            declare -f "$FN"
+        done
+        echo 'trafico_auto_ciclo'
+    } > /usr/local/bin/vps-trafico-cron.sh
+    chmod 755 /usr/local/bin/vps-trafico-cron.sh
+    cat > /etc/cron.d/ghost-panel-trafico <<'TAB'
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+*/5 * * * * root /usr/local/bin/vps-trafico-cron.sh
+TAB
+    chmod 644 /etc/cron.d/ghost-panel-trafico
+}
+
+trafico_auto_toggle(){
+    if [[ -f /etc/cron.d/ghost-panel-trafico ]]; then
+        rm -f /etc/cron.d/ghost-panel-trafico /usr/local/bin/vps-trafico-cron.sh /run/ghost-trafico.lock
+        OK "Auto-corte desactivado (los banners vuelven a actualizarse solo con el panel)."
+        vps_log INFO "auto-corte desactivado"
+    else
+        trafico_cron_instalar
+        /usr/local/bin/vps-trafico-cron.sh >/dev/null 2>&1       # primer ciclo ahora mismo
+        OK "Auto-corte ACTIVO: cada 5 min bloquea a quien exceda su cuota y refresca los banners."
+        INFO "Activa antes los contadores (opcion 1) para que el trafico SSH cuente."
+        WARN "El bloqueo cierra SSH (usermod -L). Los clientes Xray siguen conectando hasta que los elimines."
+        vps_log INFO "auto-corte activado"
+    fi
+    PAUSA
+}
 menu_trafico(){
     while true; do
         cabecera
         SUBTOP "$(T t_sub_trafico)"
         FR_OPT 1 "📶 $(T t_tr_activar)" 4 "🚫 $(T t_tr_cortar)"
         FR_OPT 2 "📈 $(T t_tr_ver)" 5 "🔄 $(T t_tr_reset)"
-        FR_OPT 3 "🚦 $(T t_tr_limite)" "" ""
+        FR_OPT 3 "🚦 $(T t_tr_limite)" 6 "🤖 $(T t_tr_auto)"
         FR_OPT 0 "🔙 $(T t_volver)" "" ""
+        if [[ -f /etc/cron.d/ghost-panel-trafico ]]; then FR_TXT "  ${VERDE}🤖 $(T t_tr_auto_on)${NC}"
+        else FR_TXT "  ${GRIS}🤖 $(T t_tr_auto_off)${NC}"; fi
         FR_BOT
         PROMPT
         case "$OP" in
+            6) trafico_auto_toggle ;;
             1) trafico_activar ;;
             2) trafico_ver ;;
             3) trafico_limite ;;
@@ -4453,7 +4536,7 @@ desinstalar_ghost(){
     echo -e "${ROJO}--- 🔥 $(T t_du_titulo) ---${NC}"
     echo
     echo "  Se eliminara TODO lo que creo Ghost Panel:"
-    echo "   · Servicios: limiter, CheckUser, cron de vencidos, contadores iptables"
+    echo "   · Servicios: limiter, CheckUser, cron de vencidos y de auto-corte, contadores iptables"
     echo "   · Banners (OpenSSH Match User, /etc/banner-vps, Dropbear) y auto-menu"
     echo "   · Datos: limites, trafico, usuarios del panel, licencia, idioma, links, logs"
     echo "   · Ajustes: sysctl/BBR del panel, jail.local de fail2ban"
@@ -4491,7 +4574,7 @@ desinstalar_ghost(){
     desinst_run limiter_quitar
     desinst_run checkuser_quitar
     rm -f /usr/local/bin/vps-limiter.sh /usr/local/bin/vps-checkuser.py /usr/local/bin/vps-cron-diario.sh \
-          /etc/cron.d/ghost-panel-vencidos /etc/vps-checkuser.conf
+          /etc/cron.d/ghost-panel-vencidos /etc/cron.d/ghost-panel-trafico /usr/local/bin/vps-trafico-cron.sh /run/ghost-trafico.lock /etc/vps-checkuser.conf
 
     # 3) sshd / Dropbear: banner global, bloques Match User, overrides neutralizados
     INFO "Limpiando sshd_config y banners..."
@@ -4564,6 +4647,7 @@ seleccionar_idioma
 gate_licencia
 ghost_intro
 ghost_bootstrap
+[[ -f /etc/cron.d/ghost-panel-trafico ]] && trafico_cron_instalar   # mantiene el cron a la par de esta version
 # Comando global: ghostpanel (si el script se ejecuta desde otra ruta, lo instala)
 if [[ "$(readlink -f "$0" 2>/dev/null)" != "$(readlink -f "$VPSMGR_DEST" 2>/dev/null)" ]]; then
     install -m 755 "$(readlink -f "$0")" "$VPSMGR_DEST" 2>/dev/null && {
