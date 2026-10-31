@@ -3,8 +3,12 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 3.8.0
-#  Cambios 3.8.0:
+#  Version: 3.9.0
+#  Cambios 3.9.0:
+#    - Seguridad -> [8] Dominio y SSL: dominio + subdominios (verifica DNS, sin API) y certificado
+#      Let's Encrypt (certbot HTTP-01) desplegado a Stunnel, Hysteria2, Trojan, Webmin y AdGuard Home
+#    - Renovacion automatica con hooks (libera/restaura el puerto 80) y desinstalador integrado
+#  Cambios 3.8.0:#  Cambios 3.8.0:
 #    - Cortar excedidos mide SSH + Xray (misma cifra que el banner) via trafico_excedido
 #    - Auto-corte cada 5 min (cron opcional, Trafico -> [6]): bloquea cuotas excedidas y refresca banners
 #    - Cabecera: trafico "--" si los contadores no estan activos (antes mostraba "0 MB")
@@ -81,7 +85,7 @@ tema_guardar(){
     echo "THEME=$1" >> /etc/ghost-panel.conf
 }
 tema_cargar
-GHOST_VER='3.8.0'
+GHOST_VER='3.9.0'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -272,9 +276,9 @@ TXT_ES[t_conexiones]="Conectados"; TXT_EN[t_conexiones]="Online sessions"
 TXT_ES[t_desconectar]="Desconectar usr"; TXT_EN[t_desconectar]="Disconnect user"
 TXT_ES[t_sub_seg]="SEGURIDAD"; TXT_EN[t_sub_seg]="SECURITY"
 TXT_ES[t_fail2ban]="Fail2ban"; TXT_EN[t_fail2ban]="Fail2ban"
-TXT_ES[t_limiter_on]="Limiter (activar)"; TXT_EN[t_limiter_on]="Limiter (enable)"
+TXT_ES[t_limiter_on]="Activar limiter"; TXT_EN[t_limiter_on]="Limiter (enable)"
 TXT_ES[t_limiter_off]="Quitar limiter"; TXT_EN[t_limiter_off]="Remove limiter"
-TXT_ES[t_puerto_ssh]="Cambiar puerto SSH"; TXT_EN[t_puerto_ssh]="Change SSH port"
+TXT_ES[t_puerto_ssh]="Puerto SSH"; TXT_EN[t_puerto_ssh]="Change SSH port"
 TXT_ES[t_ver_puertos]="Ver puertos"; TXT_EN[t_ver_puertos]="Show ports"
 TXT_ES[t_abrir_puerto]="Abrir puerto"; TXT_EN[t_abrir_puerto]="Open port"
 TXT_ES[t_banner]="Banner SSH / HC"; TXT_EN[t_banner]="SSH / HC banner"
@@ -334,6 +338,18 @@ TXT_ES[t_tr_cortar]="Cortar excedidos"; TXT_EN[t_tr_cortar]="Cut exceeded"
 TXT_ES[t_tr_auto]="Auto-corte 5 min"; TXT_EN[t_tr_auto]="Auto-cut 5 min"
 TXT_ES[t_tr_auto_on]="Auto-corte ACTIVO (cada 5 min: bloquea excedidos y refresca banners)"; TXT_EN[t_tr_auto_on]="Auto-cut ACTIVE (every 5 min: blocks over-quota users, refreshes banners)"
 TXT_ES[t_tr_auto_off]="Auto-corte inactivo"; TXT_EN[t_tr_auto_off]="Auto-cut inactive"
+TXT_ES[t_ssl]="Dominio y SSL"; TXT_EN[t_ssl]="Domain & SSL"
+TXT_ES[t_sub_ssl]="SEGURIDAD / Dominio y SSL"; TXT_EN[t_sub_ssl]="SECURITY / Domain & SSL"
+TXT_ES[t_ssl_dom]="Dominio y verificar DNS"; TXT_EN[t_ssl_dom]="Domain & DNS check"
+TXT_ES[t_ssl_crear]="Crear subdominio"; TXT_EN[t_ssl_crear]="Create subdomain"
+TXT_ES[t_ssl_subs]="Mis subdominios"; TXT_EN[t_ssl_subs]="My subdomains"
+TXT_ES[t_ssl_emitir]="Emitir certificado SSL"; TXT_EN[t_ssl_emitir]="Issue SSL certificate"
+TXT_ES[t_ssl_renovar]="Renovar ahora"; TXT_EN[t_ssl_renovar]="Renew now"
+TXT_ES[t_ssl_estado]="Estado y enlaces"; TXT_EN[t_ssl_estado]="Status & links"
+TXT_ES[t_ssl_aplicar]="Aplicar a los servicios"; TXT_EN[t_ssl_aplicar]="Apply to services"
+TXT_ES[t_ssl_quitar]="Quitar Dominio y SSL"; TXT_EN[t_ssl_quitar]="Remove Domain & SSL"
+TXT_ES[t_ssl_sin_dom]="Sin dominio configurado (opcion 1)"; TXT_EN[t_ssl_sin_dom]="No domain set (option 1)"
+TXT_ES[t_ssl_sin_cert]="sin certificado aun"; TXT_EN[t_ssl_sin_cert]="no certificate yet"
 TXT_ES[t_tr_reset]="Reset contadores"; TXT_EN[t_tr_reset]="Reset counters"
 TXT_ES[t_sub_quitar]="QUITAR PROTOCOLOS"; TXT_EN[t_sub_quitar]="REMOVE PROTOCOLS"
 TXT_ES[t_q_xray]="Xray completo"; TXT_EN[t_q_xray]="Xray (full)"
@@ -3587,6 +3603,13 @@ adguard_escribir_config(){
         hosts+=$'\n    - 10.66.0.1'
     fi
     mkdir -p "$(dirname "$CFG")"
+    # TLS (Dominio y SSL): DNS-over-TLS interno con el certificado de /etc/ghost-ssl. HTTPS de la UI
+    # desactivado (port_https: 0) para no chocar con el 443. GHOST_SSL_OFF=1 lo omite (rollback).
+    local TLS_BLOCK="" TDOM
+    TDOM=$(awk -F= '$1=="DOMINIO"{print $2; exit}' /etc/ghost-ssl/domain.conf 2>/dev/null)
+    if [[ -n "$TDOM" && -z "${GHOST_SSL_OFF:-}" && -f /etc/ghost-ssl/fullchain.pem ]]; then
+        TLS_BLOCK=$'tls:\n  enabled: true\n  server_name: '"$TDOM"$'\n  force_https: false\n  port_https: 0\n  port_dns_over_tls: 853\n  port_dns_over_quic: 0\n  certificate_path: /etc/ghost-ssl/fullchain.pem\n  private_key_path: /etc/ghost-ssl/privkey.pem\n'
+    fi
     # Preservar users del wizard si ya existen
     local USERS_BLOCK=""
     if [[ -f "$CFG" ]] && grep -q '^users:' "$CFG" 2>/dev/null; then
@@ -3615,7 +3638,7 @@ ${hosts}
   protection_enabled: true
   parental_enabled: false
   ratelimit: 20
-filters:
+${TLS_BLOCK}filters:
   - enabled: true
     url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt
     name: AdGuard DNS filter
@@ -3989,20 +4012,557 @@ menu_usuarios(){
     done
 }
 
+# ------------------------------------------------------------
+# DOMINIO Y SSL  (Let's Encrypt con certbot, HTTP-01 standalone, SIN API de DNS)
+# Requisito: el cliente ya apunta su dominio (@) y un comodin (*) a la IP de la VPS en Cloudflare,
+# en "DNS only" (nube gris). El panel NO crea registros DNS: solo los VERIFICA.
+# Un unico certificado (lineage "ghost-panel") cubre el dominio y sus subdominios y se despliega a
+# Stunnel, Hysteria2, Trojan (Xray), Webmin y AdGuard Home. Renovacion: certbot.timer + hooks que
+# liberan/restauran el puerto 80 y vuelven a desplegar (script generado: /usr/local/bin/ghost-ssl-hook).
+# ------------------------------------------------------------
+SSL_DIR='/etc/ghost-ssl'
+SSL_NAME='ghost-panel'
+SSL_LIVE="/etc/letsencrypt/live/$SSL_NAME"
+SSL_HOOK='/usr/local/bin/ghost-ssl-hook'
+SSL_PROC_DIR='/proc'
+
+ssl_conf_get(){ awk -F= -v k="$1" '$1==k{sub(/^[^=]*=/,""); print; exit}' "$SSL_DIR/domain.conf" 2>/dev/null; }
+ssl_conf_set(){
+    mkdir -p "$SSL_DIR"; touch "$SSL_DIR/domain.conf"
+    sed -i "/^$1=/d" "$SSL_DIR/domain.conf"
+    echo "$1=$2" >> "$SSL_DIR/domain.conf"
+}
+ssl_subs_lista(){ [[ -f "$SSL_DIR/subdominios.list" ]] && cat "$SSL_DIR/subdominios.list"; return 0; }
+ssl_nombres(){ ssl_conf_get DOMINIO; ssl_subs_lista; }
+
+ssl_reiniciar(){
+    # ssl_reiniciar UNIDAD -> reinicia SOLO si esta corriendo (no enciende servicios apagados a proposito)
+    local u="$1" vivo=0
+    if systemctl is-active --quiet "$u" 2>/dev/null; then vivo=1
+    else
+        case "$u" in
+            stunnel4) pgrep -f stunnel >/dev/null 2>&1 && vivo=1 ;;
+            webmin)   pgrep -f miniserv >/dev/null 2>&1 && vivo=1 ;;
+            xray)     pgrep -x xray >/dev/null 2>&1 && vivo=1 ;;
+            hysteria-server) pgrep -x hysteria >/dev/null 2>&1 && vivo=1 ;;
+            AdGuardHome) pgrep -x AdGuardHome >/dev/null 2>&1 && vivo=1 ;;
+        esac
+    fi
+    (( vivo )) && { systemctl restart "$u" 2>/dev/null || service "$u" restart >/dev/null 2>&1 || true; }
+    return 0
+}
+
+ssl_guardar_original(){
+    # Copia (una sola vez) el archivo de certificado/clave original antes de pisarlo: lo usa ssl_quitar.
+    local f="$1" dst="$SSL_DIR/orig$1"
+    [[ -f "$f" && ! -e "$dst" ]] || return 0
+    mkdir -p "$(dirname "$dst")"; cp -a "$f" "$dst" 2>/dev/null
+    return 0
+}
+
+ssl_webmin_aplicar(){
+    # Apunta Webmin (miniserv) al certificado real; guarda las lineas originales para poder revertir.
+    local MC=/etc/webmin/miniserv.conf kv k
+    [[ -f "$MC" ]] || return 0
+    mkdir -p "$SSL_DIR"
+    if [[ ! -f "$SSL_DIR/webmin.orig" ]]; then grep -E '^(keyfile|certfile)=' "$MC" > "$SSL_DIR/webmin.orig" 2>/dev/null; touch "$SSL_DIR/webmin.orig"; fi
+    for kv in "keyfile=$SSL_DIR/privkey.pem" "certfile=$SSL_DIR/fullchain.pem"; do
+        k=${kv%%=*}
+        if grep -q "^$k=" "$MC"; then sed -i "s#^$k=.*#$kv#" "$MC"; else echo "$kv" >> "$MC"; fi
+    done
+    ssl_reiniciar webmin
+    return 0
+}
+
+ssl_desplegar(){
+    # ssl_desplegar [force] -> copia el certificado emitido a cada servicio instalado y lo reinicia.
+    # Sin "force" no hace nada si el certificado no cambio (asi el hook de renovacion es barato).
+    local force="${1:-}" crt="$SSL_LIVE/fullchain.pem" key="$SSL_LIVE/privkey.pem" XG DOM OLD
+    [[ -r "$crt" && -r "$key" ]] || return 1
+    mkdir -p "$SSL_DIR/orig"; chmod 755 "$SSL_DIR"
+    if [[ -z "$force" ]] && cmp -s "$crt" "$SSL_DIR/fullchain.pem" 2>/dev/null; then return 0; fi
+    install -m 644 "$crt" "$SSL_DIR/fullchain.pem"
+    install -m 600 "$key" "$SSL_DIR/privkey.pem"
+    DOM=$(ssl_conf_get DOMINIO)
+    # Stunnel: pem = cadena + clave
+    if [[ -f /etc/stunnel/stunnel.conf ]]; then
+        ssl_guardar_original /etc/stunnel/stunnel.pem
+        cat "$crt" "$key" > /etc/stunnel/stunnel.pem; chmod 600 /etc/stunnel/stunnel.pem
+        ssl_reiniciar stunnel4
+    fi
+    # Hysteria2
+    if [[ -f /etc/hysteria/server.crt ]]; then
+        ssl_guardar_original /etc/hysteria/server.crt; ssl_guardar_original /etc/hysteria/server.key
+        install -m 644 "$crt" /etc/hysteria/server.crt; install -m 600 "$key" /etc/hysteria/server.key
+        if id hysteria >/dev/null 2>&1; then chown hysteria:hysteria /etc/hysteria/server.crt /etc/hysteria/server.key
+        else chmod 644 /etc/hysteria/server.key; fi
+        ssl_reiniciar hysteria-server
+    fi
+    # Trojan (Xray): certificado real y SNI = dominio (guarda el SNI de camuflaje original)
+    if [[ -f /etc/vpsjb-trojan/cert.pem ]]; then
+        ssl_guardar_original /etc/vpsjb-trojan/cert.pem; ssl_guardar_original /etc/vpsjb-trojan/key.pem
+        install -m 644 "$crt" /etc/vpsjb-trojan/cert.pem
+        if XG=$(xray_grupo); then install -m 640 -o root -g "$XG" "$key" /etc/vpsjb-trojan/key.pem
+        else install -m 644 "$key" /etc/vpsjb-trojan/key.pem; fi
+        if [[ -n "$DOM" ]]; then
+            OLD=$(python3 - "$DOM" <<'PYEOF'
+import json, sys
+dom = sys.argv[1]; p = "/usr/local/etc/xray/config.json"
+try:
+    c = json.load(open(p)); old = ""; ch = False
+    for ib in c.get("inbounds", []):
+        if ib.get("protocol") == "trojan":
+            t = ib.get("streamSettings", {}).get("tlsSettings", {})
+            if t.get("serverName") != dom:
+                old = old or t.get("serverName", ""); t["serverName"] = dom; ch = True
+    if ch:
+        json.dump(c, open(p, "w"), indent=2)
+    print(old)
+except Exception:
+    pass
+PYEOF
+)
+            [[ -n "$OLD" && ! -f "$SSL_DIR/trojan-sni.orig" ]] && echo "$OLD" > "$SSL_DIR/trojan-sni.orig"
+        fi
+        ssl_reiniciar xray
+    fi
+    ssl_webmin_aplicar
+    # AdGuard Home: solo reinicia si su yaml ya apunta a /etc/ghost-ssl (el yaml lo escribe el panel)
+    grep -q 'certificate_path: /etc/ghost-ssl' /opt/AdGuardHome/AdGuardHome.yaml 2>/dev/null && ssl_reiniciar AdGuardHome
+    vps_log INFO "ssl: certificado desplegado (${DOM:-?})"
+    return 0
+}
+
+ssl_puerto80_liberar(){
+    # Detiene (via systemd) lo que escucha en el 80 para que certbot valide. Guarda las unidades en
+    # /run/ghost-ssl-stopped para que ssl_puerto80_restaurar las vuelva a levantar. Nunca toca SSH.
+    local f=/run/ghost-ssl-stopped pid unit i
+    : > "$f"
+    while read -r pid; do
+        [[ -n "$pid" ]] || continue
+        unit=$(grep -o '[A-Za-z0-9@_.:-]*\.service' "$SSL_PROC_DIR/$pid/cgroup" 2>/dev/null | tail -1)
+        case "$unit" in
+            ssh.service|sshd.service|ssh@*|dropbear.service)
+                echo "El puerto 80 lo usa SSH ($unit): no se detiene. Cambia ese puerto y reintenta." >&2; return 1 ;;
+            "")
+                echo "El puerto 80 lo usa un proceso fuera de systemd ($(cat "$SSL_PROC_DIR/$pid/comm" 2>/dev/null), pid $pid). Detenlo a mano y reintenta." >&2; return 1 ;;
+        esac
+        systemctl stop "$unit" 2>/dev/null && echo "$unit" >> "$f"
+    done < <(ss -ltnpH 'sport = :80' 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u)
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        ss -ltnH 'sport = :80' 2>/dev/null | grep -q . || return 0
+        sleep 0.5
+    done
+    echo "El puerto 80 sigue ocupado." >&2
+    return 1
+}
+ssl_puerto80_restaurar(){
+    local f=/run/ghost-ssl-stopped u
+    [[ -f "$f" ]] || return 0
+    while read -r u; do [[ -n "$u" ]] && systemctl start "$u" 2>/dev/null; done < "$f"
+    rm -f "$f"
+    return 0
+}
+
+ssl_hook_instalar(){
+    # Genera /usr/local/bin/ghost-ssl-hook COPIANDO las funciones de este script (declare -f): lo usa
+    # certbot en cada emision/renovacion (pre = liberar 80, post = restaurar, deploy = desplegar).
+    # Se regenera al abrir el panel para que coincida siempre con la version instalada.
+    local FN
+    {
+        echo '#!/bin/bash'
+        echo '# Generado por Ghost Panel (ssl_hook_instalar). No editar: se regenera solo.'
+        echo 'export PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin LC_ALL=C.UTF-8'
+        declare -p SSL_DIR SSL_NAME SSL_LIVE SSL_PROC_DIR LOG_PANEL
+        for FN in vps_log xray_grupo ssl_conf_get ssl_reiniciar ssl_guardar_original ssl_webmin_aplicar \
+                  ssl_desplegar ssl_puerto80_liberar ssl_puerto80_restaurar; do
+            declare -f "$FN"
+        done
+        echo 'case "${1:-}" in pre) ssl_puerto80_liberar ;; post) ssl_puerto80_restaurar ;; deploy) ssl_desplegar ;; esac'
+    } > "$SSL_HOOK"
+    chmod 755 "$SSL_HOOK"
+}
+
+ssl_certbot_instalar(){
+    command -v certbot >/dev/null 2>&1 && return 0
+    INFO "Instalando certbot..."
+    apt update -y >/dev/null 2>&1
+    DEBIAN_FRONTEND=noninteractive apt install -y certbot >/dev/null 2>&1 || { ERR "No se pudo instalar certbot (sin red?)."; return 1; }
+    mkdir -p "$SSL_DIR"; touch "$SSL_DIR/certbot-por-panel"      # el desinstalador lo quita solo si lo puso el panel
+    systemctl enable --now certbot.timer >/dev/null 2>&1 || true
+    return 0
+}
+
+ssl_ufw_80(){
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+        if ! ufw status 2>/dev/null | grep -qE '^80(/tcp)?[[:space:]]+ALLOW'; then
+            ufw allow 80/tcp >/dev/null 2>&1 && INFO "Puerto 80/tcp abierto en UFW (necesario para validar)."
+        fi
+    fi
+    return 0
+}
+
+ssl_resuelve(){ getent ahostsv4 "$1" 2>/dev/null | awk 'NR==1{print $1}'; }
+
+ssl_dns_verificar(){
+    # ssl_dns_verificar NOMBRE -> 0 si resuelve a la IP publica de esta VPS (imprime diagnostico)
+    local n="$1" ip r v6
+    ip=$(ip_publica); r=$(ssl_resuelve "$n")
+    if [[ -z "$r" ]]; then ERR "$n no resuelve (¿falta el registro A?)."; return 1; fi
+    if [[ "$r" != "$ip" ]]; then
+        ERR "$n resuelve a $r pero esta VPS es $ip."
+        INFO "En Cloudflare el registro debe apuntar a $ip y estar en 'DNS only' (nube gris), no en 'Proxied'."
+        return 1
+    fi
+    v6=$(getent ahostsv6 "$n" 2>/dev/null | awk '$1 !~ /^::ffff:/ {print $1; exit}')
+    if [[ -n "$v6" ]] && ! ip -6 addr 2>/dev/null | grep -qiF "$v6"; then
+        WARN "$n tiene un registro AAAA ($v6) que no es de esta VPS: Let's Encrypt validaria por IPv6 y fallaria. Borra ese AAAA."
+    fi
+    OK "$n -> $r"
+    return 0
+}
+
+ssl_dias_restantes(){
+    local f="$SSL_DIR/fullchain.pem" fin
+    [[ -f "$f" ]] || return 0
+    fin=$(openssl x509 -enddate -noout -in "$f" 2>/dev/null | cut -d= -f2)
+    [[ -n "$fin" ]] || return 0
+    echo $(( ( $(date -d "$fin" +%s) - $(date +%s) ) / 86400 ))
+}
+
+ssl_dominio_poner(){
+    local DOM EM cur re_d re_e
+    re_d='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$'
+    re_e='^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'
+    cur=$(ssl_conf_get DOMINIO)
+    echo -e "${CIAN}--- DOMINIO ---${NC}"
+    echo "  En Cloudflare crea 2 registros A hacia $(ip_publica), en 'DNS only' (nube gris):"
+    echo "    @  (dominio principal)     y     *  (todos los subdominios)"
+    echo
+    read -r -p "  Dominio${cur:+ [$cur]} (ej: midominio.com): " DOM; DOM=${DOM:-$cur}
+    DOM=$(echo "$DOM" | tr 'A-Z' 'a-z')
+    [[ "$DOM" =~ $re_d ]] || { ERR "Dominio invalido."; PAUSA; return; }
+    read -r -p "  Correo para avisos de Let's Encrypt (opcional, Enter = sin correo): " EM
+    if [[ -n "$EM" && ! "$EM" =~ $re_e ]]; then ERR "Correo invalido."; PAUSA; return; fi
+    if [[ -n "$cur" && "$cur" != "$DOM" && -s "$SSL_DIR/subdominios.list" ]]; then
+        WARN "Cambiaste de dominio: la lista de subdominios anterior se vacia."
+        : > "$SSL_DIR/subdominios.list"
+    fi
+    ssl_conf_set DOMINIO "$DOM"; ssl_conf_set EMAIL "$EM"
+    echo
+    ssl_dns_verificar "$DOM" || WARN "El dominio principal (@) aun no apunta a esta VPS."
+    ssl_dns_verificar "ghost-prueba-$RANDOM.$DOM" || WARN "Falta el comodin (*): los subdominios no resolveran."
+    vps_log INFO "ssl: dominio $DOM"
+    PAUSA
+}
+
+ssl_sub_crear(){
+    local DOM L F SN re
+    DOM=$(ssl_conf_get DOMINIO)
+    [[ -n "$DOM" ]] || { ERR "Primero configura el dominio (opcion 1)."; PAUSA; return; }
+    echo -e "${CIAN}--- CREAR SUBDOMINIO ---${NC}"
+    read -r -p "  Nombre (ej: cliente1 -> cliente1.$DOM): " L
+    L=$(echo "$L" | tr 'A-Z' 'a-z')
+    re='^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$'
+    [[ "$L" =~ $re ]] || { ERR "Nombre invalido (letras, numeros y guion; sin puntos)."; PAUSA; return; }
+    F="$L.$DOM"
+    if ssl_subs_lista | grep -qxF "$F"; then ERR "$F ya esta en la lista."; PAUSA; return; fi
+    if (( $(ssl_subs_lista | wc -l) >= 90 )); then ERR "Limite de 90 subdominios por certificado."; PAUSA; return; fi
+    ssl_dns_verificar "$F" || { PAUSA; return; }
+    echo "$F" >> "$SSL_DIR/subdominios.list"
+    OK "Subdominio $F registrado."
+    vps_log INFO "ssl: subdominio $F"
+    read -r -p "  ¿Actualizar el certificado ahora para incluirlo? (S/n): " SN
+    if [[ ! "$SN" =~ ^[nN]$ ]]; then ssl_emitir_flujo; else INFO "Pendiente: usa 'Emitir certificado SSL' cuando quieras."; fi
+    PAUSA
+}
+
+ssl_subs_menu(){
+    local i SEL F SN
+    echo -e "${CIAN}--- MIS SUBDOMINIOS ---${NC}"
+    if [[ -z "$(ssl_subs_lista)" ]]; then INFO "No hay subdominios (opcion 2 para crear)."; PAUSA; return; fi
+    i=0; while read -r F; do i=$((i+1)); printf '  %b[%d]%b %s\n' "$CIAN" "$i" "$NC" "$F"; done < <(ssl_subs_lista)
+    echo
+    read -r -p "  Numero a BORRAR (Enter = volver): " SEL
+    [[ "$SEL" =~ ^[0-9]+$ ]] || return
+    F=$(ssl_subs_lista | sed -n "${SEL}p")
+    [[ -n "$F" ]] || { ERR "Numero invalido."; PAUSA; return; }
+    sed -i "\#^${F}\$#d" "$SSL_DIR/subdominios.list"
+    OK "$F quitado de la lista."
+    INFO "Seguira dentro del certificado hasta que lo reemitas."
+    read -r -p "  ¿Reemitir ahora para quitarlo del certificado? (s/N): " SN
+    [[ "$SN" =~ ^[sSyY]$ ]] && ssl_emitir_flujo force
+    PAUSA
+}
+
+ssl_certbot_run(){
+    # ssl_certbot_run dry|real [force] -> certbot certonly standalone para dominio + subdominios.
+    # Los hooks (pre/post/deploy) quedan guardados en la renovacion de este certificado.
+    local mode="$1" force="${2:-}" a=() n EM LOGC=/tmp/ghost-certbot.log
+    EM=$(ssl_conf_get EMAIL)
+    a=(certonly --standalone --non-interactive --agree-tos --cert-name "$SSL_NAME" --preferred-challenges http --expand
+       --pre-hook "$SSL_HOOK pre" --post-hook "$SSL_HOOK post" --deploy-hook "$SSL_HOOK deploy")
+    if [[ -n "$EM" ]]; then a+=(--email "$EM"); else a+=(--register-unsafely-without-email); fi
+    [[ "$mode" == dry ]] && a+=(--dry-run)
+    [[ -n "$force" ]] && a+=(--force-renewal)
+    while read -r n; do [[ -n "$n" ]] && a+=(-d "$n"); done < <(ssl_nombres)
+    if certbot "${a[@]}" >"$LOGC" 2>&1; then rm -f "$LOGC"; return 0; fi
+    ERR "certbot fallo. Ultimas lineas:"
+    tail -n 12 "$LOGC" | sed 's/^/    /'
+    ssl_puerto80_restaurar            # por si el pre-hook alcanzo a detener algo
+    return 1
+}
+
+ssl_emitir_flujo(){
+    # Verifica DNS de todos los nombres, prepara certbot/UFW/hooks, simula y emite de verdad.
+    local n bad=0 force="${1:-}"
+    while read -r n; do ssl_dns_verificar "$n" || bad=1; done < <(ssl_nombres)
+    (( bad )) && { ERR "Corrige el DNS y vuelve a intentar."; return 1; }
+    ssl_certbot_instalar || return 1
+    ssl_ufw_80
+    ssl_hook_instalar
+    WARN "Se detendra unos segundos lo que use el puerto 80 (p. ej. WS-epro); los clientes reconectan solos."
+    INFO "1/2 Simulacion (no gasta limites de Let's Encrypt)..."
+    ssl_certbot_run dry "$force" || return 1
+    OK "Simulacion correcta."
+    INFO "2/2 Emision real..."
+    ssl_certbot_run real "$force" || return 1
+    ssl_desplegar            # no-op si el deploy-hook ya lo hizo
+    ssl_aplicar_adguard
+    OK "Certificado emitido y aplicado a los servicios instalados."
+    ssl_enlaces
+    return 0
+}
+
+ssl_emitir(){
+    [[ -n "$(ssl_conf_get DOMINIO)" ]] || { ERR "Primero configura el dominio (opcion 1)."; PAUSA; return; }
+    echo -e "${CIAN}--- EMITIR CERTIFICADO SSL ---${NC}"
+    ssl_emitir_flujo
+    PAUSA
+}
+
+ssl_renovar(){
+    local SN a=(renew --cert-name "$SSL_NAME")
+    [[ -d "$SSL_LIVE" ]] || { ERR "Aun no hay certificado (opcion 4)."; PAUSA; return; }
+    echo -e "${CIAN}--- RENOVAR ---${NC}"
+    INFO "Por defecto solo renueva si faltan menos de 30 dias."
+    read -r -p "  ¿Forzar la renovacion ahora? (s/N): " SN
+    [[ "$SN" =~ ^[sSyY]$ ]] && a+=(--force-renewal)
+    ssl_hook_instalar
+    if certbot "${a[@]}" >/tmp/ghost-certbot.log 2>&1; then
+        OK "Listo. Dias restantes: $(ssl_dias_restantes)"
+        rm -f /tmp/ghost-certbot.log
+    else
+        ERR "Fallo la renovacion:"; tail -n 12 /tmp/ghost-certbot.log | sed 's/^/    /'
+        ssl_puerto80_restaurar
+    fi
+    PAUSA
+}
+
+ssl_aplicar_adguard(){
+    # AdGuard Home con TLS (DNS-over-TLS interno). Si no arranca, revierte solo.
+    adguard_instalado || return 0
+    [[ -f "$SSL_DIR/fullchain.pem" ]] || return 0
+    local CFG=/opt/AdGuardHome/AdGuardHome.yaml
+    INFO "AdGuard Home: activando TLS..."
+    adguard_escribir_config "$CFG"
+    systemctl restart AdGuardHome 2>/dev/null; sleep 3
+    if adguard_activo; then OK "AdGuard Home con certificado."
+    else
+        WARN "AdGuard no arranco con TLS: se revierte a la config anterior."
+        GHOST_SSL_OFF=1 adguard_escribir_config "$CFG"
+        systemctl restart AdGuardHome 2>/dev/null
+    fi
+    return 0
+}
+
+ssl_aplicar(){
+    [[ -f "$SSL_LIVE/fullchain.pem" ]] || { ERR "Aun no hay certificado (opcion 4)."; PAUSA; return; }
+    echo -e "${CIAN}--- APLICAR A LOS SERVICIOS ---${NC}"
+    ssl_hook_instalar
+    ssl_desplegar force && OK "Stunnel, Hysteria2, Trojan y Webmin actualizados (los que esten instalados)."
+    ssl_aplicar_adguard
+    ssl_enlaces
+    PAUSA
+}
+
+ssl_fp(){ openssl x509 -noout -fingerprint -sha256 -in "$1" 2>/dev/null | cut -d= -f2; }
+
+ssl_enlaces(){
+    local DOM P PASS TROJ
+    DOM=$(ssl_conf_get DOMINIO); [[ -n "$DOM" && -f "$SSL_DIR/fullchain.pem" ]] || return 0
+    echo
+    echo -e " ${AMARILLO}Conecta usando el DOMINIO (no la IP). Certificado valido: no actives 'aceptar invalidos'.${NC}"
+    if [[ -f /etc/stunnel/stunnel.conf ]]; then
+        P=$(awk '/^accept *=/{print $3; exit}' /etc/stunnel/stunnel.conf)
+        echo -e "  Stunnel : host/SNI ${VERDE}$DOM${NC}  puerto SSL ${VERDE}${P:-?}${NC}"
+    fi
+    if [[ -f /etc/hysteria/config.yaml ]]; then
+        P=$(awk '/^listen:/{sub(/^:/,"",$2); print $2; exit}' /etc/hysteria/config.yaml)
+        PASS=$(awk -F'"' '/password:/{print $2; exit}' /etc/hysteria/config.yaml)
+        echo -e "  Hysteria: ${VERDE}hysteria2://$PASS@$DOM:${P:-?}/?sni=$DOM#VPS-JORGEBARRIOS${NC}"
+    fi
+    if [[ -f /etc/vpsjb-trojan/cert.pem ]]; then
+        TROJ=$(python3 - <<'PYEOF' 2>/dev/null
+import json
+try:
+    c = json.load(open("/usr/local/etc/xray/config.json"))
+    for ib in c.get("inbounds", []):
+        if ib.get("protocol") == "trojan":
+            for cl in ib.get("settings", {}).get("clients", []):
+                print(ib.get("port"), cl.get("password", ""))
+except Exception:
+    pass
+PYEOF
+)
+        while read -r P PASS; do
+            [[ -n "$P" ]] && echo -e "  Trojan  : ${VERDE}trojan://$PASS@$DOM:$P?security=tls&sni=$DOM#VPSJB-Trojan${NC}"
+        done <<< "$TROJ"
+    fi
+    if [[ -f /etc/webmin/miniserv.conf ]]; then
+        P=$(grep -o '^port=[0-9]*' /etc/webmin/miniserv.conf 2>/dev/null | cut -d= -f2 | head -1)
+        echo -e "  Webmin  : ${VERDE}https://$DOM:${P:-10000}${NC}"
+    fi
+    if grep -q 'certificate_path: /etc/ghost-ssl' /opt/AdGuardHome/AdGuardHome.yaml 2>/dev/null; then
+        echo -e "  AdGuard : DNS-over-TLS interno en 853 (solo clientes WireGuard), nombre ${VERDE}$DOM${NC}"
+    fi
+}
+
+ssl_estado(){
+    local DOM D FP nsub
+    DOM=$(ssl_conf_get DOMINIO)
+    echo -e "${CIAN}--- ESTADO DOMINIO Y SSL ---${NC}"
+    [[ -n "$DOM" ]] || { INFO "Sin dominio configurado (opcion 1)."; PAUSA; return; }
+    nsub=$(ssl_subs_lista | wc -l)
+    echo -e "  Dominio     : ${VERDE}$DOM${NC}   Subdominios: ${VERDE}$nsub${NC}"
+    D=$(ssl_dias_restantes)
+    if [[ -z "$D" ]]; then WARN "Aun no hay certificado emitido (opcion 4)."; PAUSA; return; fi
+    echo -e "  Certificado : vence en ${VERDE}$D dias${NC}  ($(openssl x509 -issuer -noout -in "$SSL_DIR/fullchain.pem" 2>/dev/null | sed 's/^issuer=//'))"
+    echo -e "  Nombres     : $(openssl x509 -noout -ext subjectAltName -in "$SSL_DIR/fullchain.pem" 2>/dev/null | tail -n +2 | tr -d ' ' | sed 's/DNS://g')"
+    if systemctl is-active --quiet certbot.timer 2>/dev/null; then echo -e "  Renovacion  : ${VERDE}automatica (certbot.timer)${NC}"
+    else WARN "certbot.timer inactivo: la renovacion automatica no corre (systemctl enable --now certbot.timer)."; fi
+    FP=$(ssl_fp "$SSL_DIR/fullchain.pem")
+    echo "  Servicios:"
+    [[ -f /etc/stunnel/stunnel.conf ]]  && echo -e "    Stunnel   : $(ssl_estado_fp "$FP" /etc/stunnel/stunnel.pem)"
+    [[ -f /etc/hysteria/server.crt ]]   && echo -e "    Hysteria2 : $(ssl_estado_fp "$FP" /etc/hysteria/server.crt)"
+    [[ -f /etc/vpsjb-trojan/cert.pem ]] && echo -e "    Trojan    : $(ssl_estado_fp "$FP" /etc/vpsjb-trojan/cert.pem)"
+    if [[ -f /etc/webmin/miniserv.conf ]]; then
+        if grep -q "^certfile=$SSL_DIR/fullchain.pem" /etc/webmin/miniserv.conf; then echo -e "    Webmin    : ${VERDE}aplicado${NC}"
+        else echo -e "    Webmin    : ${AMARILLO}pendiente (opcion 7)${NC}"; fi
+    fi
+    if [[ -d /opt/AdGuardHome ]]; then
+        if grep -q 'certificate_path: /etc/ghost-ssl' /opt/AdGuardHome/AdGuardHome.yaml 2>/dev/null; then echo -e "    AdGuard   : ${VERDE}aplicado${NC}"
+        else echo -e "    AdGuard   : ${AMARILLO}pendiente (opcion 7)${NC}"; fi
+    fi
+    echo -e "  ${GRIS}No usan certificado: Reality, WS-epro, Shadowsocks, OpenVPN, WireGuard, BadVPN, SSH.${NC}"
+    ssl_enlaces
+    PAUSA
+}
+ssl_estado_fp(){
+    # ssl_estado_fp HUELLA_ESPERADA ARCHIVO -> "aplicado" / "pendiente"
+    if [[ "$(ssl_fp "$2")" == "$1" ]]; then echo -e "${VERDE}aplicado${NC}"; else echo -e "${AMARILLO}pendiente (opcion 7)${NC}"; fi
+}
+
+ssl_quitar(){
+    # Restaura los certificados originales de cada servicio y borra TODO lo de Dominio y SSL.
+    local f p PURGE=0 u
+    [[ -d "$SSL_DIR" ]] || return 0
+    [[ -f "$SSL_DIR/certbot-por-panel" ]] && PURGE=1
+    if [[ -d "$SSL_DIR/orig" ]]; then
+        while read -r f; do
+            p="/${f#./}"
+            [[ -d "$(dirname "$p")" ]] || continue            # el servicio ya no esta instalado
+            cp -a "$SSL_DIR/orig/${f#./}" "$p" 2>/dev/null
+        done < <(cd "$SSL_DIR/orig" && find . -type f)
+    fi
+    # Trojan: devuelve el SNI de camuflaje original
+    if [[ -f "$SSL_DIR/trojan-sni.orig" && -f /usr/local/etc/xray/config.json ]]; then
+        python3 - "$(cat "$SSL_DIR/trojan-sni.orig")" <<'PYEOF' 2>/dev/null
+import json, sys
+sni = sys.argv[1]; p = "/usr/local/etc/xray/config.json"
+try:
+    c = json.load(open(p))
+    for ib in c.get("inbounds", []):
+        if ib.get("protocol") == "trojan":
+            ib.setdefault("streamSettings", {}).setdefault("tlsSettings", {})["serverName"] = sni
+    json.dump(c, open(p, "w"), indent=2)
+except Exception:
+    pass
+PYEOF
+    fi
+    # Webmin: devuelve sus lineas keyfile/certfile originales
+    if [[ -f "$SSL_DIR/webmin.orig" && -f /etc/webmin/miniserv.conf ]]; then
+        sed -i '/^keyfile=/d;/^certfile=/d' /etc/webmin/miniserv.conf
+        cat "$SSL_DIR/webmin.orig" >> /etc/webmin/miniserv.conf
+    fi
+    # AdGuard: regenera su config sin bloque TLS
+    if adguard_instalado 2>/dev/null; then GHOST_SSL_OFF=1 adguard_escribir_config /opt/AdGuardHome/AdGuardHome.yaml 2>/dev/null; fi
+    for u in stunnel4 hysteria-server xray webmin AdGuardHome; do ssl_reiniciar "$u"; done
+    command -v certbot >/dev/null 2>&1 && certbot delete --cert-name "$SSL_NAME" --non-interactive >/dev/null 2>&1
+    rm -f "$SSL_HOOK" /run/ghost-ssl-stopped
+    rm -rf "$SSL_DIR"
+    if (( PURGE )); then
+        DEBIAN_FRONTEND=noninteractive apt purge -y certbot >/dev/null 2>&1
+        rm -rf /etc/letsencrypt
+    fi
+    OK "Dominio y SSL removidos; los servicios volvieron a su certificado anterior."
+    vps_log INFO "ssl: removido"
+    return 0
+}
+
+ssl_quitar_menu(){
+    local W
+    echo -e "${ROJO}--- QUITAR DOMINIO Y SSL ---${NC}"
+    echo "  Borra el certificado, los hooks y la lista de subdominios, y devuelve cada servicio a su"
+    echo "  certificado autofirmado anterior. Los registros DNS de Cloudflare no se tocan."
+    read -r -p "  Escribe QUITAR para confirmar (ENTER = cancelar): " W
+    [[ "$W" == "QUITAR" ]] || { INFO "Cancelado."; PAUSA; return; }
+    ssl_quitar
+    PAUSA
+}
+
+menu_ssl(){
+    local DOM DIAS
+    while true; do
+        cabecera
+        SUBTOP "$(T t_sub_ssl)"
+        FR_OPT 1 "🌐 $(T t_ssl_dom)" "" ""
+        FR_OPT 2 "➕ $(T t_ssl_crear)" "" ""
+        FR_OPT 3 "📋 $(T t_ssl_subs)" "" ""
+        FR_OPT 4 "🔒 $(T t_ssl_emitir)" "" ""
+        FR_OPT 5 "🔁 $(T t_ssl_renovar)" "" ""
+        FR_OPT 6 "📊 $(T t_ssl_estado)" "" ""
+        FR_OPT 7 "🔧 $(T t_ssl_aplicar)" "" ""
+        FR_OPT 8 "🧹 $(T t_ssl_quitar)" "" ""
+        FR_OPT 0 "🔙 $(T t_volver)" "" ""
+        DOM=$(ssl_conf_get DOMINIO); DIAS=$(ssl_dias_restantes)
+        if [[ -z "$DOM" ]]; then FR_TXT "  ${GRIS}$(T t_ssl_sin_dom)${NC}"
+        elif [[ -n "$DIAS" ]]; then FR_TXT "  🌐 ${BLANCO}${DOM}${NC} ${GRIS}·${NC} 🔒 ${VERDE}${DIAS} $(T t_ui_days)${NC}"
+        else FR_TXT "  🌐 ${BLANCO}${DOM}${NC} ${GRIS}·${NC} ${AMARILLO}$(T t_ssl_sin_cert)${NC}"; fi
+        FR_BOT
+        PROMPT
+        case "$OP" in
+            1) ssl_dominio_poner ;; 2) ssl_sub_crear ;; 3) ssl_subs_menu ;; 4) ssl_emitir ;;
+            5) ssl_renovar ;; 6) ssl_estado ;; 7) ssl_aplicar ;; 8) ssl_quitar_menu ;;
+            0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
+        esac
+    done
+}
+
 menu_seguridad(){
     while true; do
         cabecera
         SUBTOP "$(T t_sub_seg)"
-        FR_OPT 1 "$(T t_fail2ban)" 5 "$(T t_ver_puertos)"
-        FR_OPT 2 "$(T t_limiter_on)" 6 "$(T t_abrir_puerto)"
-        FR_OPT 3 "$(T t_limiter_off)" 7 "$(T t_banner)"
-        FR_OPT 4 "$(T t_puerto_ssh)" "" ""
+        FR_OPT 1 "🚨 $(T t_fail2ban)" 5 "🔎 $(T t_ver_puertos)"
+        FR_OPT 2 "🚦 $(T t_limiter_on)" 6 "🔓 $(T t_abrir_puerto)"
+        FR_OPT 3 "🛑 $(T t_limiter_off)" 7 "📢 $(T t_banner)"
+        FR_OPT 4 "🔑 $(T t_puerto_ssh)" 8 "🔒 $(T t_ssl)"
         FR_OPT 0 "🔙 $(T t_volver)" "" ""
         FR_BOT
         PROMPT
         case "$OP" in
             1) instalar_fail2ban ;; 2) limiter_aplicar ;; 3) limiter_quitar ;;
-            4) cambiar_puerto_ssh ;; 5) ver_puertos ;; 6) abrir_puerto ;; 7) menu_banner ;;
+            4) cambiar_puerto_ssh ;; 5) ver_puertos ;; 6) abrir_puerto ;; 7) menu_banner ;; 8) menu_ssl ;;
             0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
         esac
     done
@@ -4539,6 +5099,7 @@ desinstalar_ghost(){
     echo "   · Servicios: limiter, CheckUser, cron de vencidos y de auto-corte, contadores iptables"
     echo "   · Banners (OpenSSH Match User, /etc/banner-vps, Dropbear) y auto-menu"
     echo "   · Datos: limites, trafico, usuarios del panel, licencia, idioma, links, logs"
+    echo "   · Dominio y SSL: certificado, hooks de renovacion y lista de subdominios"
     echo "   · Ajustes: sysctl/BBR del panel, jail.local de fail2ban"
     echo "   · El comando ghostpanel (vpsmgr, vps) y este archivo del script"
     echo
@@ -4594,6 +5155,9 @@ desinstalar_ghost(){
     iptables -D OUTPUT -j VPS-TRAFFIC 2>/dev/null
     iptables -F VPS-TRAFFIC 2>/dev/null; iptables -X VPS-TRAFFIC 2>/dev/null
 
+    # 4b) Dominio y SSL: devuelve los certificados originales y borra hooks/certbot (si lo puso el panel)
+    if [[ -d "$SSL_DIR" ]]; then INFO "Quitando Dominio y SSL..."; desinst_run ssl_quitar; fi
+
     # 5) Protocolos instalados por el panel (opcional)
     if (( DO_PROTO )); then
         INFO "Quitando protocolos instalados..."
@@ -4648,6 +5212,7 @@ gate_licencia
 ghost_intro
 ghost_bootstrap
 [[ -f /etc/cron.d/ghost-panel-trafico ]] && trafico_cron_instalar   # mantiene el cron a la par de esta version
+[[ -f "$SSL_DIR/domain.conf" ]] && ssl_hook_instalar             # idem para los hooks de renovacion SSL
 # Comando global: ghostpanel (si el script se ejecuta desde otra ruta, lo instala)
 if [[ "$(readlink -f "$0" 2>/dev/null)" != "$(readlink -f "$VPSMGR_DEST" 2>/dev/null)" ]]; then
     install -m 755 "$(readlink -f "$0")" "$VPSMGR_DEST" 2>/dev/null && {
