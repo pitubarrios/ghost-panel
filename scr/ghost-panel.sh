@@ -3,8 +3,14 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 3.7.8
-#  Cambios 3.7.8:
+#  Version: 3.7.9
+#  Cambios 3.7.9:
+#    - Logo fantasma ASCII con degradado + intro de ~1 s (cualquier tecla la salta)
+#    - Cabecera compacta (~11 lineas) con datos del negocio: usuarios, online, por vencer, bloqueados, trafico
+#    - Colores por seccion, marcos redondeados, servicios 🟢/🔴/⚫, licencia con semaforo
+#    - Temas de color (Herramientas -> Tema) guardados en /etc/ghost-panel.conf (THEME=)
+#    - Banner de clientes con barras de dias y de trafico; prompt 👻 ❯
+#  Cambios 3.7.8:#  Cambios 3.7.8:
 #    - Iconos (emoji) en menus y mensajes; fantasma en cabecera, licencia, salida y banners
 #    - Marcos de la UI: ancho real de emojis (2 columnas) -> bordes alineados en cualquier terminal
 #    - Nueva opcion [9] Desinstalar Ghost Panel (servicios, archivos, config sshd y el propio script)
@@ -42,8 +48,36 @@ ROJO='\033[1;31m'; VERDE='\033[1;32m'; AMARILLO='\033[1;33m'
 AZUL='\033[1;34m'; CIAN='\033[1;36m'; BLANCO='\033[1;37m'
 NC='\033[0m'
 NARANJA='\033[38;5;208m'; GRIS='\033[38;5;245m'; MORADO='\033[38;5;141m'
-BORDE="$GRIS"          # color del marco
-GHOST_VER='3.7.8'
+
+# ---------- TEMAS DE COLOR ----------
+# tema_aplicar NOMBRE fija: borde del marco, titulo, acento del prompt, degradado del logo (4 tonos)
+# y el color de cada opcion del menu principal (9 tonos, 256 colores). Se guarda como THEME=
+# en /etc/ghost-panel.conf. Temas: fantasma (defecto), neon, matrix, naranja.
+GHOST_THEME=fantasma
+TH_LOGO=(); TH_ITEMS=()
+tema_aplicar(){
+    local t="${1:-fantasma}" b ti ac
+    case "$t" in
+        neon)    b=165; ti=51;  ac=46;  TH_LOGO=(201 165 129 51);  TH_ITEMS=(51 201 46 226 39 213 87 208 196) ;;
+        matrix)  b=28;  ti=46;  ac=46;  TH_LOGO=(22 28 34 46);     TH_ITEMS=(46 82 40 118 34 120 46 82 196) ;;
+        naranja) b=130; ti=214; ac=208; TH_LOGO=(196 202 208 220); TH_ITEMS=(220 208 214 202 226 215 209 180 196) ;;
+        *)       t=fantasma; b=98; ti=141; ac=141; TH_LOGO=(141 105 75 45); TH_ITEMS=(51 201 46 208 226 75 213 120 196) ;;
+    esac
+    GHOST_THEME="$t"
+    BORDE="\033[38;5;${b}m"; MORADO="\033[38;5;${ti}m"; ACENTO="\033[1;38;5;${ac}m"
+}
+tema_cargar(){
+    local t=""
+    [[ -r /etc/ghost-panel.conf ]] && t=$(awk -F= '/^THEME=/{print $2; exit}' /etc/ghost-panel.conf)
+    tema_aplicar "$t"
+}
+tema_guardar(){
+    touch /etc/ghost-panel.conf; chmod 600 /etc/ghost-panel.conf
+    sed -i '/^THEME=/d' /etc/ghost-panel.conf
+    echo "THEME=$1" >> /etc/ghost-panel.conf
+}
+tema_cargar
+GHOST_VER='3.7.9'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -256,9 +290,9 @@ TXT_ES[t_update]="Update sistema"; TXT_EN[t_update]="System update"
 TXT_ES[t_reiniciar]="Reiniciar VPS"; TXT_EN[t_reiniciar]="Reboot VPS"
 TXT_ES[t_sub_herr]="HERRAMIENTAS DEL PANEL"; TXT_EN[t_sub_herr]="PANEL TOOLS"
 TXT_ES[t_global]="Comando global"; TXT_EN[t_global]="Global command"
-TXT_ES[t_automenu_on]="Auto-menu login"; TXT_EN[t_automenu_on]="Auto-menu on login"
+TXT_ES[t_automenu_on]="Auto-menu login"; TXT_EN[t_automenu_on]="Menu on login"
 TXT_ES[t_automenu_off]="Quitar auto-menu"; TXT_EN[t_automenu_off]="Remove auto-menu"
-TXT_ES[t_autoupdate]="Auto-update script"; TXT_EN[t_autoupdate]="Self-update script"
+TXT_ES[t_autoupdate]="Auto-actualizar"; TXT_EN[t_autoupdate]="Self-update"
 TXT_ES[t_checkuser]="CheckUser API"; TXT_EN[t_checkuser]="CheckUser API"
 TXT_ES[t_idioma]="Cambiar idioma"; TXT_EN[t_idioma]="Change language"
 TXT_ES[t_sub_backup]="BACKUP / RESTAURAR"; TXT_EN[t_sub_backup]="BACKUP / RESTORE"
@@ -310,6 +344,10 @@ TXT_ES[t_online_req2]="LICENSE_URL vacio. Configuralo o usa GHOST_DEV=1 para pru
 TXT_ES[t_opinv]="Opcion invalida."; TXT_EN[t_opinv]="Invalid option."
 TXT_ES[t_cf_test]="Tunel CDN (test)"; TXT_EN[t_cf_test]="CDN tunnel"
 TXT_ES[t_q_tunnel]="Tunel CDN (cloudflared)"; TXT_EN[t_q_tunnel]="CDN tunnel (cloudflared)"
+TXT_ES[t_ui_on]="online"; TXT_EN[t_ui_on]="online"
+TXT_ES[t_ui_venc]="vencen"; TXT_EN[t_ui_venc]="expiring"
+TXT_ES[t_tema]="Tema de color"; TXT_EN[t_tema]="Color theme"
+TXT_ES[t_sub_tema]="HERRAMIENTAS / Tema"; TXT_EN[t_sub_tema]="TOOLS / Theme"
 TXT_ES[t_desinst]="Desinstalar Ghost Panel"; TXT_EN[t_desinst]="Uninstall Ghost Panel"
 TXT_ES[t_du_titulo]="DESINSTALAR GHOST PANEL"; TXT_EN[t_du_titulo]="UNINSTALL GHOST PANEL"
 TXT_ES[t_du_word]="DESINSTALAR"; TXT_EN[t_du_word]="UNINSTALL"
@@ -955,16 +993,16 @@ ui_init(){
     (( UI_W < 38 )) && UI_W=38
 }
 ui_rep(){ local s; printf -v s '%*s' "$2" ''; printf '%s' "${s// /$1}"; }
-FR_TOP(){ printf '%b\n' "${BORDE}┌$(ui_rep ─ $((UI_W+2)))┐${NC}"; }
+FR_TOP(){ printf '%b\n' "${BORDE}╭$(ui_rep ─ $((UI_W+2)))╮${NC}"; }
 FR_MID(){ printf '%b\n' "${BORDE}├$(ui_rep ─ $((UI_W+2)))┤${NC}"; }
-FR_BOT(){ printf '%b\n' "${BORDE}└$(ui_rep ─ $((UI_W+2)))┘${NC}"; }
+FR_BOT(){ printf '%b\n' "${BORDE}╰$(ui_rep ─ $((UI_W+2)))╯${NC}"; }
 ui_box_top(){
-    # ┌─ TITULO ─────────┐   (titulo en morado dentro del marco)
+    # ╭─ TITULO ─────────╮   (titulo con el color del tema dentro del marco)
     local t=" $1 " n
     ui_fit "$t" 999
     n=$(( UI_W + 1 - UI_FITW ))
     (( n < 1 )) && n=1
-    printf '%b\n' "${BORDE}┌─${NC}${MORADO}${t}${NC}${BORDE}$(ui_rep ─ "$n")┐${NC}"
+    printf '%b\n' "${BORDE}╭─${NC}${MORADO}${t}${NC}${BORDE}$(ui_rep ─ "$n")╮${NC}"
 }
 ui_crumb(){
     if [[ -n "${1:-}" ]]; then printf '%b\n' "  ${GRIS}Inicio ›${NC} ${CIAN}${1}${NC}"
@@ -985,7 +1023,7 @@ ui_cw(){
             (cp >= 0xFFE0  && cp <= 0xFFE6)  || (cp >= 0x1F300 && cp <= 0x1F64F) ||
             (cp >= 0x1F680 && cp <= 0x1F6FF) || (cp >= 0x1F7E0 && cp <= 0x1F7EB) ||
             (cp >= 0x1F900 && cp <= 0x1F9FF) || (cp >= 0x1FA70 && cp <= 0x1FAFF) ||
-            cp == 0x231B || cp == 0x23F0 || cp == 0x26A1 || cp == 0x26C5 || cp == 0x26D4 ||
+            cp == 0x231A || cp == 0x231B || cp == 0x23E9 || cp == 0x23F0 || cp == 0x23F3 || cp == 0x26A1 || cp == 0x26AA || cp == 0x26AB || cp == 0x26C5 || cp == 0x26D4 ||
             cp == 0x2705 || cp == 0x274C || cp == 0x274E || cp == 0x2795 ||
             cp == 0x2B50 || cp == 0x2B55 )); then UI_CW=2
     else UI_CW=1; fi
@@ -1014,15 +1052,17 @@ FR_TXT(){
     done
     printf '%b %s%b%*s %b\n' "${BORDE}│${NC}" "$out" "$NC" "$((W-vis))" "" "${BORDE}│${NC}"
 }
+declare -A UI_KCOL=()   # color por opcion (lo rellena el menu principal con los tonos del tema)
 ui_cell(){
     # ui_cell INDICE ETIQUETA ANCHO -> "[1]  Etiqueta" coloreado, relleno a ANCHO columnas visibles
-    local k="$1" lbl="${2:-}" w="$3" ic="$CIAN" pad txt
+    local k="$1" lbl="${2:-}" w="$3" ic="$CIAN" lc="$BLANCO" pad txt
     [[ "$k" == "0" ]] && ic="$ROJO"
+    [[ -n "${UI_KCOL[$k]:-}" ]] && { ic="${UI_KCOL[$k]}"; lc="${UI_KCOL[$k]}"; }
     txt=$(printf '%-4s' "[$k]")
     ui_fit "$lbl" $(( w - 6 )); lbl="$UI_FIT"
     pad=$(( w - 5 - UI_FITW ))
     (( pad < 0 )) && pad=0
-    printf '%b%s%b %b%s%b%*s' "$ic" "$txt" "$NC" "$BLANCO" "$lbl" "$NC" "$pad" ""
+    printf '%b%s%b %b%s%b%*s' "$ic" "$txt" "$NC" "$lc" "$lbl" "$NC" "$pad" ""
 }
 FR_OPT(){
     local half=$(( UI_W / 2 ))
@@ -1073,62 +1113,141 @@ FILA(){
 }
 
 SUBTOP(){ ui_crumb "$1"; ui_box_top "$1"; }
-PROMPT(){ echo; read -r -p "  $(echo -e "${CIAN}▸${NC}") $(T t_opcion) $(echo -e "${GRIS}›${NC}") " OP; }
+PROMPT(){ echo; read -r -p "  $(echo -e "${ACENTO}👻 ❯${NC}") " OP; }
+limpiar_pantalla(){ clear 2>/dev/null; printf '\033[3J'; }   # tambien borra el scrollback (sin restos arriba)
+
+# --- Logo fantasma: 4 lineas de 7 columnas con el degradado del tema ---
+ghost_logo_linea(){
+    # ghost_logo_linea N (0-3) -> linea N del logo, coloreada con TH_LOGO[N]
+    local c="\033[1;38;5;${TH_LOGO[$1]}m"
+    case "$1" in
+        0) printf '%b ▄███▄ %b' "$c" "$NC" ;;
+        1) printf '%b█ %b● ●%b █%b' "$c" "$BLANCO" "$c" "$NC" ;;
+        2) printf '%b█ ▀▀▀ █%b' "$c" "$NC" ;;
+        3) printf '%b▀▄▀▄▀▄▀%b' "$c" "$NC" ;;
+    esac
+}
+
+ghost_intro(){
+    # Intro de ~1 s al abrir el panel; cualquier tecla la salta. Solo en terminal interactiva.
+    [[ -t 0 && -t 1 ]] || return 0
+    local i k
+    ui_init; limpiar_pantalla
+    printf '\n\n'
+    for i in 0 1 2 3; do
+        printf '   '; ghost_logo_linea "$i"
+        case "$i" in
+            0) printf '   %bG H O S T   P A N E L%b' "$BLANCO" "$NC" ;;
+            1) printf '   %bv%s%b' "$GRIS" "$GHOST_VER" "$NC" ;;
+        esac
+        printf '\n'
+        read -rsn1 -t 0.22 k && return 0
+    done
+    printf '\n   %bcargando...%b\n' "$GRIS" "$NC"
+    read -rsn1 -t 0.25 k
+    return 0
+}
+
+# --- Datos del negocio para la cabecera (cache de 30 s: una pasada por passwd/shadow + contadores) ---
+GS_TS=0; GS_USERS=0; GS_VENC=0; GS_HOY=0; GS_PRONTO=0; GS_BLOQ=0; GS_TRAF="0 MB"
+ghost_stats_refrescar(){
+    local now out t=0 v
+    now=$(date +%s)
+    (( now - GS_TS < 30 )) && return 0
+    GS_TS=$now
+    # usuarios del panel: uid>=1000 y no protegidos. shadow: campo 2 "!..." = bloqueado; campo 8 = vencimiento (dias)
+    out=$(awk -F: -v today=$(( now / 86400 )) -v prot=" ${PROTEGIDOS_NOMBRES:-} " '
+        NR==FNR { if ($3>=1000 && $1!="nobody" && index(prot," "$1" ")==0) u[$1]=1; next }
+        ($1 in u) { n++; if ($2 ~ /^!/) b++
+                    if ($8 != "") { d=$8-today; if (d<0) v++; else if (d==0) h++; else if (d<=3) p++ } }
+        END { print n+0, v+0, h+0, p+0, b+0 }' /etc/passwd /etc/shadow 2>/dev/null)
+    read -r GS_USERS GS_VENC GS_HOY GS_PRONTO GS_BLOQ <<< "${out:-0 0 0 0 0}"
+    trafico_cache_cargar
+    for v in "${TRAF_CACHE[@]:-}"; do t=$(( t + ${v:-0} )); done
+    GS_TRAF=$(fmt_bytes "$t")
+}
+
+ui_mini(){
+    # ui_mini ETIQUETA PORCENTAJE ANCHO -> "RAM ███░░░ 34%"
+    printf '%b%s%b %s %b%3s%%%b' "$GRIS" "$1" "$NC" "$(ui_bar "$2" "$3")" "$BLANCO" "$2" "$NC"
+}
 
 cabecera(){
-    clear
+    limpiar_pantalla
     ui_init
-    local os kern up ram_t="" ram_u="" ram_p=0 cpu dsk_p="" dsk_u="" dsk_t="" ONLINE lic lic_txt
+    local os up ram_t=0 ram_u=0 ram_p=0 cpu dsk_p=0 dsk_u="" dsk_t="" ONLINE lic lic_col lic_txt bw ven_n vc oc bc n
     os=$( (. /etc/os-release 2>/dev/null; echo "${NAME:-Linux} ${VERSION_ID:-}") )
-    kern=$(uname -r)
-    up=$(uptime -p 2>/dev/null); up=${up#up }; [[ -z "$up" ]] && up="n/a"
+    up=$(awk '{s=int($1); d=int(s/86400); h=int((s%86400)/3600); m=int((s%3600)/60);
+               if (d>0) printf "%dd %dh", d, h; else if (h>0) printf "%dh %dm", h, m; else printf "%dm", m}' /proc/uptime 2>/dev/null)
+    [[ -z "$up" ]] && up="n/a"
     read -r ram_t ram_u < <(free -m 2>/dev/null | awk '/Mem:/{print $2, $3}')
     ram_t=${ram_t:-0}; ram_u=${ram_u:-0}
     (( ram_t > 0 )) && ram_p=$(( ram_u * 100 / ram_t ))
     cpu=$(cpu_pct)
     read -r dsk_p dsk_u dsk_t < <(df -P -h / 2>/dev/null | awk 'NR==2{gsub("%","",$5); print $5, $3, $2}')
+    dsk_p=${dsk_p:-0}
     ONLINE=$(online_total)
+    ghost_stats_refrescar
+    # Licencia con semaforo: verde, amarillo <=7 dias, rojo <=3 dias
     lic_txt="${VERDE}${LICENSE_OK:--}${NC}"
     if [[ -n "${LICENSE_EXP:-}" && "${LICENSE_EXP:-0}" != "0" ]]; then
         lic=$(( (LICENSE_EXP - $(date +%s)) / 86400 )); (( lic < 0 )) && lic=0
-        lic_txt="${lic_txt}  ${GRIS}·${NC}  ${AMARILLO}${lic} $(T t_ui_days)${NC}"
+        lic_col=$VERDE; (( lic <= 7 )) && lic_col=$AMARILLO; (( lic <= 3 )) && lic_col=$ROJO
+        lic_txt="${lic_txt} ${GRIS}·${NC} ${lic_col}${lic} $(T t_ui_days)${NC}"
     fi
+    n=$(( UI_W - 14 )); (( n > 30 )) && n=30
     FR_TOP
-    FR_TXT " 👻 ${BLANCO}GHOST PANEL${NC}  ${GRIS}-  v${GHOST_VER}${NC}"
-    ui_sec "$(T t_ui_sys)"
-    ui_kv "OS" "${os}  ${GRIS}·${NC}  kernel ${kern}"
-    ui_kv "Uptime" "$up"
-    ui_sec "$(T t_ui_res)"
-    ui_gauge "RAM" "$ram_p" "${ram_u}M / ${ram_t}M"
-    ui_gauge "CPU" "$cpu"
-    ui_gauge "$(T t_disco)" "${dsk_p:-0}" "${dsk_u:-?} / ${dsk_t:-?}"
-    ui_sec "$(T t_ui_ses)"
-    ui_kv "IP" "${CIAN}$(ip_publica)${NC}"
-    ui_kv "Host" "$(hostname)   ${GRIS}Online${NC} ${VERDE}${ONLINE}${NC}"
-    ui_kv "$(T t_ui_user)" "${BLANCO}$(id -un)${NC}"
-    ui_kv "$(T t_licencia)" "$lic_txt"
-    ui_kv "Webmin" "$(estado_webmin_min)"
-    ui_kv "Servicios" "$(estado_servicios_min)"
+    FR_TXT " $(ghost_logo_linea 0)   ${BLANCO}G H O S T   P A N E L${NC}"
+    FR_TXT " $(ghost_logo_linea 1)   ${GRIS}v${GHOST_VER} · by Jorge Barrios${NC}"
+    FR_TXT " $(ghost_logo_linea 2)   ${MORADO}$(ui_rep ━ "$n")${NC}"
+    FR_TXT " $(ghost_logo_linea 3)   🔑 ${lic_txt}"
+    FR_MID
+    # Sistema
+    if (( UI_W >= 50 )); then
+        FR_TXT "  💻 ${BLANCO}${os}${NC} ${GRIS}·${NC} ${up}   🌍 ${CIAN}$(ip_publica)${NC}"
+    else
+        FR_TXT "  💻 ${BLANCO}${os}${NC} ${GRIS}·${NC} ${up}"
+        FR_TXT "  🌍 ${CIAN}$(ip_publica)${NC}"
+    fi
+    # Recursos: una sola fila con 3 mini-barras (si no caben, vuelven las barras largas)
+    bw=$(( (UI_W - 33) / 3 ))
+    if (( bw >= 4 )); then
+        (( bw > 10 )) && bw=10
+        FR_TXT "  $(ui_mini RAM "$ram_p" "$bw")  $(ui_mini CPU "$cpu" "$bw")  $(ui_mini DSK "$dsk_p" "$bw")"
+    else
+        ui_gauge "RAM" "$ram_p" "${ram_u}M / ${ram_t}M"
+        ui_gauge "CPU" "$cpu"
+        ui_gauge "$(T t_disco)" "$dsk_p" "${dsk_u:-?} / ${dsk_t:-?}"
+    fi
+    # Negocio: usuarios · online · por vencer (<=3 dias o vencidos) · bloqueados · trafico acumulado
+    ven_n=$(( GS_VENC + GS_HOY + GS_PRONTO ))
+    vc=$GRIS; (( GS_PRONTO > 0 )) && vc=$AMARILLO; (( GS_VENC + GS_HOY > 0 )) && vc=$ROJO
+    oc=$GRIS; (( ONLINE > 0 )) && oc=$VERDE
+    bc=$GRIS; (( GS_BLOQ > 0 )) && bc=$ROJO
+    if (( UI_W >= 56 )); then
+        FR_TXT "  👥 ${BLANCO}${GS_USERS}${NC} ${GRIS}·${NC} 🟢 ${oc}${ONLINE}${NC} $(T t_ui_on) ${GRIS}·${NC} ⏳ ${vc}${ven_n}${NC} $(T t_ui_venc) ${GRIS}·${NC} 🚫 ${bc}${GS_BLOQ}${NC} ${GRIS}·${NC} 📈 ${CIAN}${GS_TRAF}${NC}"
+    elif (( UI_W >= 50 )); then
+        FR_TXT "  👥 ${BLANCO}${GS_USERS}${NC} ${GRIS}·${NC} 🟢 ${oc}${ONLINE}${NC} $(T t_ui_on) ${GRIS}·${NC} ⏳ ${vc}${ven_n}${NC} ${GRIS}·${NC} 🚫 ${bc}${GS_BLOQ}${NC} ${GRIS}·${NC} 📈 ${CIAN}${GS_TRAF}${NC}"
+    else
+        FR_TXT "  👥 ${BLANCO}${GS_USERS}${NC} 🟢 ${oc}${ONLINE}${NC} ⏳ ${vc}${ven_n}${NC} 🚫 ${bc}${GS_BLOQ}${NC} 📈 ${CIAN}${GS_TRAF}${NC}"
+    fi
+    FR_TXT "  $(estado_servicios_min)"
     FR_BOT
     echo
 }
 
 
 svc_dot(){
-    # svc_dot "prueba" -> ● o ○ coloreado
-    if eval "$1" >/dev/null 2>&1; then printf '%b' "${VERDE}●${NC}"; else printf '%b' "${GRIS}○${NC}"; fi
+    # svc_dot "cmd-activo" "cmd-instalado" -> 🟢 corriendo | 🔴 instalado pero caido | ⚫ no instalado
+    if eval "$1" >/dev/null 2>&1; then printf '🟢'
+    elif [[ -n "${2:-}" ]] && eval "$2" >/dev/null 2>&1; then printf '🔴'
+    else printf '⚫'; fi
 }
 
 estado_servicios_min(){
-    # Una linea compacta para la cabecera
-    local s=""
-    s+="SSH $(svc_dot 'pgrep -x sshd')"
-    s+="  Xray $(svc_dot 'pgrep -x xray')"
-    s+="  WG $(svc_dot 'systemctl is-active --quiet wg-quick@wg0')"
-    s+="  AG $(svc_dot 'adguard_activo 2>/dev/null || systemctl is-active --quiet AdGuardHome')"
-    s+="  ST $(svc_dot 'pgrep -f stunnel')"
-    s+="  CU $(svc_dot 'systemctl is-active --quiet vps-checkuser')"
-    printf '%s' "$s"
+    # Una linea compacta para la cabecera (un solo espacio entre servicios si la terminal es angosta)
+    local sp=" "; (( UI_W >= 52 )) && sp="  "
+    printf '%s' "SSH $(svc_dot 'pgrep -x sshd' 'true')${sp}Xray $(svc_dot 'pgrep -x xray' '[[ -x /usr/local/bin/xray ]]')${sp}WG $(svc_dot 'systemctl is-active --quiet wg-quick@wg0' '[[ -f /etc/wireguard/wg0.conf ]]')${sp}AG $(svc_dot 'adguard_activo 2>/dev/null || systemctl is-active --quiet AdGuardHome' '[[ -d /opt/AdGuardHome ]]')${sp}ST $(svc_dot 'pgrep -f stunnel' '[[ -f /etc/stunnel/stunnel.conf ]]')${sp}CU $(svc_dot 'systemctl is-active --quiet vps-checkuser' '[[ -f /usr/local/bin/vps-checkuser.py ]]')${sp}WM $(svc_dot 'pgrep -f miniserv' '[[ -d /etc/webmin ]]')"
 }
 
 
@@ -1554,7 +1673,7 @@ xray_stats_todos(){
     # Imprime "usuario up down" (bytes) por cada email Xray; nada si la API no responde.
     local RAW
     command -v xray >/dev/null 2>&1 || return 0
-    RAW=$(xray api statsquery --server=127.0.0.1:10085 2>/dev/null) || return 0
+    RAW=$(timeout 3 xray api statsquery --server=127.0.0.1:10085 2>/dev/null) || return 0
     [[ -n "$RAW" ]] || return 0
     printf '%s' "$RAW" | python3 -c '
 import json, sys, re
@@ -1614,6 +1733,16 @@ trafico_regla_usuario(){
 # Nota: Dropbear solo admite UN banner global (/etc/dropbear/banner), no por usuario.
 BANNERS_DIR='/etc/vps-banners'
 
+banner_barra(){
+    # banner_barra PORCENTAJE "#COLOR" -> barra de 10 segmentos en HTML (relleno coloreado + resto gris).
+    # Si algun cliente no pinta ▰▱, cambia estos dos caracteres (p. ej. por ■ □).
+    local p="${1:-0}" f
+    [[ "$p" =~ ^[0-9]+$ ]] || p=0
+    (( p > 100 )) && p=100
+    f=$(( (p + 5) / 10 ))
+    printf '<font color="%s">%s</font><font color="#555555">%s</font>' "$2" "$(ui_rep ▰ "$f")" "$(ui_rep ▱ $(( 10 - f )))"
+}
+
 banner_fila(){
     # banner_fila "ETIQUETA" "#COLOR" "VALOR" -> una fila <p> con el mismo estilo del banner.
     # OJO: ni etiquetas ni valores deben contener los tokens que HTTP Custom sustituye (USER, EXP, DAYS, WARN).
@@ -1622,7 +1751,7 @@ banner_fila(){
 
 banner_html_para_usuario(){
     # banner_html_para_usuario USUARIO -> imprime HTML con datos reales (1 linea)
-    local U="$1" EXPISO D WARN="" EXP_TXT DAYS_TXT
+    local U="$1" EXPISO D WARN="" EXP_TXT DAYS_TXT DAYS_BAR="" USED_PCT BAR_COL
     local CONN_TXT LIM_GB GB_TXT USED_B USED_TXT LIM_B REST_B REST_TXT="" REST_COLOR="#7CFC00" EXTRA_ROWS
     EXPISO=$(usuario_fecha_cuenta "$U")
     if [[ "$EXPISO" == "never" ]]; then
@@ -1631,6 +1760,10 @@ banner_html_para_usuario(){
     else
         EXP_TXT="$EXPISO"
         D=$(dias_hasta "$EXPISO")
+        # Barra de vigencia: escala de 30 dias (verde >50%, naranja >20%, rojo el resto)
+        USED_PCT=$(( (D < 0 ? 0 : (D > 30 ? 30 : D)) * 100 / 30 ))
+        BAR_COL="#00FF7F"; (( USED_PCT <= 50 )) && BAR_COL="#FF8C00"; (( USED_PCT <= 20 )) && BAR_COL="#FF4444"
+        DAYS_BAR=$(banner_barra "$USED_PCT" "$BAR_COL")
         if [[ "$D" -lt 0 ]]; then
             DAYS_TXT="0"
             WARN="Cuenta vencida"
@@ -1650,11 +1783,16 @@ banner_html_para_usuario(){
         LIM_B=$(( LIM_GB * 1073741824 )); REST_B=$(( LIM_B - USED_B )); (( REST_B < 0 )) && REST_B=0
         REST_TXT=$(fmt_bytes "$REST_B")
         (( REST_B * 10 <= LIM_B )) && REST_COLOR="#FF4444"   # queda 10% o menos -> rojo
+        # Barra de consumo (verde <70%, naranja <90%, rojo desde 90%)
+        USED_PCT=$(( USED_B * 100 / LIM_B )); (( USED_PCT > 100 )) && USED_PCT=100
+        BAR_COL="#00FF7F"; (( USED_PCT >= 70 )) && BAR_COL="#FF8C00"; (( USED_PCT >= 90 )) && BAR_COL="#FF4444"
+        USED_TXT="${USED_TXT} $(banner_barra "$USED_PCT" "$BAR_COL") ${USED_PCT}%"
     else
         GB_TXT="Sin limite"
     fi
     EXTRA_ROWS="$(banner_fila "🔌 LIMITE CONEXIONES" "#00FF7F" "$CONN_TXT")$(banner_fila "📊 TRAFICO USADO" "#DA70D6" "$USED_TXT")$(banner_fila "📦 LIMITE TRAFICO" "#40E0D0" "$GB_TXT")"
     [[ -n "$REST_TXT" ]] && EXTRA_ROWS+="$(banner_fila "🔋 TRAFICO RESTANTE" "$REST_COLOR" "$REST_TXT")"
+    [[ -n "$DAYS_BAR" ]] && DAYS_TXT+=" $DAYS_BAR"
     # Misma plantilla visual, pero con valores reales (sin tokens USER/EXP/DAYS)
     printf '%s' "<p style=\"text-align:center;\"><font color=\"#00FFFF\"><b>═══════════════════════</b></font></p><p style=\"text-align:center;\"><font color=\"#00FF7F\"><b>👻 G H O S T   P A N E L 👻</b></font></p><p style=\"text-align:center;\"><font color=\"#9E9E9E\"><i>--- CONEXION VIP ESTABLE ---</i></font></p><p style=\"text-align:center;\"><font color=\"#00FFFF\"><b>═══════════════════════</b></font></p><p style=\"text-align:center;\"><font color=\"#FFFFFF\"><b>👤 USUARIO : </b></font><font color=\"#00BFFF\"><b>${U}</b></font></p><p style=\"text-align:center;\"><font color=\"#FFFFFF\"><b>📅 VENCIMIENTO : </b></font><font color=\"#FFD700\"><b>${EXP_TXT}</b></font></p><p style=\"text-align:center;\"><font color=\"#FFFFFF\"><b>⏳ RESTANTES : </b></font><font color=\"#FF8C00\"><b>${DAYS_TXT}</b></font></p>${EXTRA_ROWS}<p style=\"text-align:center;\"><font color=\"#555555\">──────────────────────</font></p><p style=\"text-align:center;\"><font color=\"#FF4444\"><b>${WARN}</b></font></p><p style=\"text-align:center;\"><font color=\"#7CFC00\"><i>🚀 Disfruta de la mejor velocidad 🚀</i></font></p><p style=\"text-align:center;\"><font color=\"#00FFFF\"><b>═══════════════════════</b></font></p>"
 }
@@ -1756,7 +1894,7 @@ menu_banner(){
         SUBTOP "$(T t_sub_banner)"
         FR_OPT 1 "$(T t_banner_html)" 3 "$(T t_banner_del)"
         FR_OPT 2 "$(T t_banner_msg)" 4 "$(T t_banner_cu)"
-        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_OPT 0 "🔙 $(T t_volver)" "" ""
         FR_BOT
         PROMPT
         case "$OP" in
@@ -1842,7 +1980,7 @@ menu_webmin(){
         FR_OPT 1 "$(T t_webmin_inst)" 4 "$(T t_cambiar_puerto)"
         FR_OPT 2 "Estado / reiniciar" 5 "$(T t_remover_webmin)"
         FR_OPT 3 "$(T t_abrir_10000)" "" ""
-        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_OPT 0 "🔙 $(T t_volver)" "" ""
         FR_BOT
         PROMPT
         case "$OP" in
@@ -2211,7 +2349,7 @@ auto_update(){
         FR_OPT 1 "Actualizar desde la fuente" "" ""
         FR_OPT 2 "Cambiar fuente (URL raw)" "" ""
         FR_OPT 3 "Instalar desde archivo local" "" ""
-        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_OPT 0 "🔙 $(T t_volver)" "" ""
         FR_BOT
         PROMPT
         case "$OP" in
@@ -2401,7 +2539,7 @@ menu_checkuser(){
         FR_OPT 1 "$(T t_cu_inst)" 4 "$(T t_cu_token)"
         FR_OPT 2 "$(T t_estado_svc)" 5 "$(T t_remover)"
         FR_OPT 3 "$(T t_cu_probar)" "" ""
-        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_OPT 0 "🔙 $(T t_volver)" "" ""
         FR_BOT
         PROMPT
         case "$OP" in
@@ -2728,7 +2866,7 @@ menu_puertos(){
         echo
         FR_TOP
         FR_OPT 1 "Actualizar" 2 "Todos los puertos"
-        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_OPT 0 "🔙 $(T t_volver)" "" ""
         FR_BOT
         PROMPT
         case "$OP" in
@@ -2846,7 +2984,7 @@ menu_trafico(){
         FR_OPT 1 "📶 $(T t_tr_activar)" 4 "🚫 $(T t_tr_cortar)"
         FR_OPT 2 "📈 $(T t_tr_ver)" 5 "🔄 $(T t_tr_reset)"
         FR_OPT 3 "🚦 $(T t_tr_limite)" "" ""
-        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_OPT 0 "🔙 $(T t_volver)" "" ""
         FR_BOT
         PROMPT
         case "$OP" in
@@ -3697,7 +3835,7 @@ menu_adguard(){
         FR_OPT 3 "🔧 $(T t_ad_reparar)" "" ""
         FR_OPT 4 "🔄 $(T t_ad_listas)" "" ""
         FR_OPT 5 "🧹 $(T t_ad_quitar)" "" ""
-        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_OPT 0 "🔙 $(T t_volver)" "" ""
         FR_BOT
         echo -e "  ${GRIS}$(T t_ad_nota1)${NC}"
         echo -e "  ${GRIS}$(T t_ad_nota2)${NC}"
@@ -3726,7 +3864,7 @@ menu_protocolos(){
         FR_OPT 9 "🐴 $(T t_trojan)" 10 "🐉 $(T t_wireguard)"
         FR_OPT 11 "🚫 $(T t_adguard)" 12 "📊 $(T t_estado_prot)"
         FR_OPT 13 "🧹 $(T t_quitar)" 14 "⛅ $(T t_cf_test)"
-        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_OPT 0 "🔙 $(T t_volver)" "" ""
         FR_BOT
         PROMPT
         case "$OP" in
@@ -3755,7 +3893,7 @@ menu_usuarios(){
         FR_OPT 4 "🔒 $(T t_bloquear)" 10 "📡 $(T t_conexiones)"
         FR_OPT 5 "🔄 $(T t_renovar)" 11 "⛔ $(T t_desconectar)"
         FR_OPT 6 "🚦 $(T t_limite)" "" ""
-        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_OPT 0 "🔙 $(T t_volver)" "" ""
         FR_BOT
         PROMPT
         case "$OP" in
@@ -3776,7 +3914,7 @@ menu_seguridad(){
         FR_OPT 2 "$(T t_limiter_on)" 6 "$(T t_abrir_puerto)"
         FR_OPT 3 "$(T t_limiter_off)" 7 "$(T t_banner)"
         FR_OPT 4 "$(T t_puerto_ssh)" "" ""
-        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_OPT 0 "🔙 $(T t_volver)" "" ""
         FR_BOT
         PROMPT
         case "$OP" in
@@ -3796,7 +3934,7 @@ menu_sistema(){
         FR_OPT 3 "$(T t_optimizar)" 7 "$(T t_update)"
         FR_OPT 4 "$(T t_swap)" 8 "$(T t_reiniciar)"
         FR_OPT 9 "$(T t_zram)" "" ""
-        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_OPT 0 "🔙 $(T t_volver)" "" ""
         FR_BOT
         PROMPT
         case "$OP" in
@@ -3808,19 +3946,43 @@ menu_sistema(){
     done
 }
 
+menu_tema(){
+    # Submenu de temas: aplica y guarda al instante (la cabecera se redibuja con los nuevos colores)
+    local m
+    while true; do
+        cabecera
+        SUBTOP "$(T t_sub_tema)"
+        m=""; [[ "$GHOST_THEME" == fantasma ]] && m=" ✅"; FR_OPT 1 "👻 Fantasma · violeta/cian$m" "" ""
+        m=""; [[ "$GHOST_THEME" == neon ]]     && m=" ✅"; FR_OPT 2 "⚡ Neon · verde/magenta$m" "" ""
+        m=""; [[ "$GHOST_THEME" == matrix ]]   && m=" ✅"; FR_OPT 3 "💚 Matrix · verde$m" "" ""
+        m=""; [[ "$GHOST_THEME" == naranja ]]  && m=" ✅"; FR_OPT 4 "🧡 Naranja · fuego$m" "" ""
+        FR_OPT 0 "🔙 $(T t_volver)" "" ""
+        FR_BOT
+        PROMPT
+        case "$OP" in
+            1) tema_aplicar fantasma; tema_guardar fantasma ;;
+            2) tema_aplicar neon;     tema_guardar neon ;;
+            3) tema_aplicar matrix;   tema_guardar matrix ;;
+            4) tema_aplicar naranja;  tema_guardar naranja ;;
+            0) break ;;
+            *) ERR "$(T t_opinv)"; sleep 1 ;;
+        esac
+    done
+}
 menu_herramientas(){
     while true; do
         cabecera
         SUBTOP "$(T t_sub_herr)"
-        FR_OPT 1 "$(T t_global)" 4 "$(T t_autoupdate)"
-        FR_OPT 2 "$(T t_automenu_on)" 5 "$(T t_checkuser)"
-        FR_OPT 3 "$(T t_automenu_off)" 6 "$(T t_idioma)"
-        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_OPT 1 "🌍 $(T t_global)" 4 "🔄 $(T t_autoupdate)"
+        FR_OPT 2 "🚀 $(T t_automenu_on)" 5 "📡 $(T t_checkuser)"
+        FR_OPT 3 "🛑 $(T t_automenu_off)" 6 "🔤 $(T t_idioma)"
+        FR_OPT 7 "🎨 $(T t_tema)" "" ""
+        FR_OPT 0 "🔙 $(T t_volver)" "" ""
         FR_BOT
         PROMPT
         case "$OP" in
             1) instalar_comando_global ;; 2) auto_menu ;; 3) quitar_auto_menu ;;
-            4) auto_update ;; 5) menu_checkuser ;;
+            4) auto_update ;; 5) menu_checkuser ;; 7) menu_tema ;;
             6) rm -f /etc/vps-manager.lang; seleccionar_idioma; OK "Idioma: $IDIOMA / Language: $IDIOMA"; PAUSA ;;
             0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
         esac
@@ -3832,7 +3994,7 @@ menu_backup(){
         cabecera
         SUBTOP "$(T t_sub_backup)"
         FR_OPT 1 "$(T t_backup_crear)" 2 "$(T t_backup_restaurar)"
-        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_OPT 0 "🔙 $(T t_volver)" "" ""
         FR_BOT
         PROMPT
         case "$OP" in
@@ -4141,7 +4303,7 @@ menu_quitar(){
         FR_OPT 3 "Stunnel" 7 "$(T t_trojan)"
         FR_OPT 4 "BadVPN" 8 "$(T t_wireguard)"
         FR_OPT 9 "$(T t_q_tunnel)" "" ""
-        FR_OPT 0 "$(T t_volver)" "" ""
+        FR_OPT 0 "🔙 $(T t_volver)" "" ""
         FR_BOT
         PROMPT
         case "$OP" in
@@ -4400,6 +4562,7 @@ desinstalar_ghost(){
 
 seleccionar_idioma
 gate_licencia
+ghost_intro
 ghost_bootstrap
 # Comando global: ghostpanel (si el script se ejecuta desde otra ruta, lo instala)
 if [[ "$(readlink -f "$0" 2>/dev/null)" != "$(readlink -f "$VPSMGR_DEST" 2>/dev/null)" ]]; then
@@ -4413,6 +4576,7 @@ while true; do
     cabecera
     ui_crumb
     ui_box_top "$(T t_menu_principal)"
+    for _i in 1 2 3 4 5 6 7 8 9; do UI_KCOL[$_i]="\033[1;38;5;${TH_ITEMS[_i-1]}m"; done   # tonos del tema
     FR_OPT 1 "👤 $(T t_usuarios)" 2 "🔌 $(T t_protocolos)"
     FR_OPT 3 "🔰 $(T t_seguridad)" 4 "🔧 $(T t_sistema)"
     FR_OPT 5 "🧰 $(T t_herramientas)" 6 "🌐 $(T t_webmin)"
@@ -4421,6 +4585,7 @@ while true; do
     FR_TXT ""
     FR_OPT 0 "🚪 $(T t_salir)" "" ""
     FR_BOT
+    UI_KCOL=()
     echo -e "  ${GRIS}$(T t_servidor_id) ${VERDE}$(machine_hash)${GRIS}  ·  $(date '+%d/%m/%Y %H:%M')${NC}"
     PROMPT
     case "$OP" in
