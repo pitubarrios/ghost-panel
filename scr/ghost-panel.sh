@@ -4,6 +4,8 @@
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
 #  Version: 3.9.1
+#  Cambios 3.9.1+ (parche):
+#    - Usuarios SSH -> [12] Trafico: enlaza el submenu TRAFICO POR USUARIO (antes existia pero no estaba en ningun menu)
 #  Cambios 3.9.1:
 #    - Banner de clientes rediseñado: lineas proporcionadas, barras en su propia fila, ESTADO de cuenta,
 #      PLAN (GB + dias), alerta automatica (vence / consumo alto / cuota agotada), SOPORTE y hora de actualizacion
@@ -337,6 +339,7 @@ TXT_ES[t_cu_probar]="Probar consulta"; TXT_EN[t_cu_probar]="Test query"
 TXT_ES[t_cu_token]="Ver token y puerto"; TXT_EN[t_cu_token]="Show token & port"
 TXT_ES[t_remover]="Remover"; TXT_EN[t_remover]="Remove"
 TXT_ES[t_sub_trafico]="TRAFICO POR USUARIO"; TXT_EN[t_sub_trafico]="PER-USER TRAFFIC"
+TXT_ES[t_trafico]="Trafico"; TXT_EN[t_trafico]="Traffic"
 TXT_ES[t_tr_activar]="Activar conteo"; TXT_EN[t_tr_activar]="Enable counters"
 TXT_ES[t_tr_ver]="Ver consumo"; TXT_EN[t_tr_ver]="View usage"
 TXT_ES[t_tr_limite]="Limite (GB)"; TXT_EN[t_tr_limite]="Limit (GB)"
@@ -4140,7 +4143,7 @@ menu_usuarios(){
         FR_OPT 3 "🔑 $(T t_clave)" 9 "🧪 $(T t_test)"
         FR_OPT 4 "🔒 $(T t_bloquear)" 10 "📡 $(T t_conexiones)"
         FR_OPT 5 "🔄 $(T t_renovar)" 11 "⛔ $(T t_desconectar)"
-        FR_OPT 6 "🚦 $(T t_limite)" "" ""
+        FR_OPT 6 "🚦 $(T t_limite)" 12 "📈 $(T t_trafico)"
         FR_OPT 0 "🔙 $(T t_volver)" "" ""
         FR_BOT
         PROMPT
@@ -4148,7 +4151,7 @@ menu_usuarios(){
             1) crear_usuario ;;   2) listar_usuarios ;; 3) cambiar_clave ;;
             4) bloquear_usuario ;; 5) renovar_usuario ;; 6) cambiar_limite ;;
             7) eliminar_usuario ;; 8) eliminar_vencidos ;; 9) crear_test_ssh ;;
-            10) conexiones_online ;; 11) matar_conexion ;;
+            10) conexiones_online ;; 11) matar_conexion ;; 12) menu_trafico ;;
             0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
         esac
     done
