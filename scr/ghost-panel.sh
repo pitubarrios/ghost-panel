@@ -3,8 +3,14 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 3.9.0
-#  Cambios 3.9.0:
+#  Version: 3.9.1
+#  Cambios 3.9.1:
+#    - Banner de clientes rediseñado: lineas proporcionadas, barras en su propia fila, ESTADO de cuenta,
+#      PLAN (GB + dias), alerta automatica (vence / consumo alto / cuota agotada), SOPORTE y hora de actualizacion
+#    - Auto-corte con frecuencia elegible (1/5/10 min; por defecto 1) -> el banner nunca tiene mas de 1 min de retraso
+#    - Ver consumo: total SSH+Xray, % y barra, ordenado; Listar usuarios con columna de trafico; alerta en cabecera
+#    - Banner -> [5] Soporte (contacto que ven los clientes; por defecto @JorgeBarrios)
+#  Cambios 3.9.0:#  Cambios 3.9.0:
 #    - Seguridad -> [8] Dominio y SSL: dominio + subdominios (verifica DNS, sin API) y certificado
 #      Let's Encrypt (certbot HTTP-01) desplegado a Stunnel, Hysteria2, Trojan, Webmin y AdGuard Home
 #    - Renovacion automatica con hooks (libera/restaura el puerto 80) y desinstalador integrado
@@ -85,7 +91,7 @@ tema_guardar(){
     echo "THEME=$1" >> /etc/ghost-panel.conf
 }
 tema_cargar
-GHOST_VER='3.9.0'
+GHOST_VER='3.9.1'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -335,8 +341,10 @@ TXT_ES[t_tr_activar]="Activar conteo"; TXT_EN[t_tr_activar]="Enable counters"
 TXT_ES[t_tr_ver]="Ver consumo"; TXT_EN[t_tr_ver]="View usage"
 TXT_ES[t_tr_limite]="Limite (GB)"; TXT_EN[t_tr_limite]="Limit (GB)"
 TXT_ES[t_tr_cortar]="Cortar excedidos"; TXT_EN[t_tr_cortar]="Cut exceeded"
-TXT_ES[t_tr_auto]="Auto-corte 5 min"; TXT_EN[t_tr_auto]="Auto-cut 5 min"
-TXT_ES[t_tr_auto_on]="Auto-corte ACTIVO (cada 5 min: bloquea excedidos y refresca banners)"; TXT_EN[t_tr_auto_on]="Auto-cut ACTIVE (every 5 min: blocks over-quota users, refreshes banners)"
+TXT_ES[t_tr_auto]="Auto-corte"; TXT_EN[t_tr_auto]="Auto-cut"
+TXT_ES[t_tr_auto_on]="Auto-corte ACTIVO · cada"; TXT_EN[t_tr_auto_on]="Auto-cut ACTIVE · every"
+TXT_ES[t_banner_sop]="Soporte en el banner"; TXT_EN[t_banner_sop]="Banner support contact"
+TXT_ES[t_ui_alto]="usuarios al 80%+ de su cuota"; TXT_EN[t_ui_alto]="users at 80%+ of quota"
 TXT_ES[t_tr_auto_off]="Auto-corte inactivo"; TXT_EN[t_tr_auto_off]="Auto-cut inactive"
 TXT_ES[t_ssl]="Dominio y SSL"; TXT_EN[t_ssl]="Domain & SSL"
 TXT_ES[t_sub_ssl]="SEGURIDAD / Dominio y SSL"; TXT_EN[t_sub_ssl]="SECURITY / Domain & SSL"
@@ -685,7 +693,7 @@ purgar_usuario(){
     local U="$1"
     pkill -KILL -u "$U" 2>/dev/null
     xray_usuario del "$U" >/dev/null 2>&1
-    rm -f "/etc/vps-limits/$U" "/etc/vps-trafico/$U" "/etc/vps-users/$U" "/etc/vps-banners/$U"
+    rm -f "/etc/vps-limits/$U" "/etc/vps-trafico/$U" "/etc/vps-users/$U" "/etc/vps-banners/$U" "/etc/vps-plan/$U"
     if [[ "${2:-}" == "keep" ]]; then userdel "$U" >/dev/null 2>&1
     else userdel -r "$U" >/dev/null 2>&1 || userdel -f "$U" >/dev/null 2>&1; fi
     banner_rebuild_match 2>/dev/null || true
@@ -732,7 +740,7 @@ if os.path.isfile(p):
     except Exception:
         pass
 PY
-        rm -f "/etc/vps-limits/$U" "/etc/vps-trafico/$U" "/etc/vps-users/$U"
+        rm -f "/etc/vps-limits/$U" "/etc/vps-trafico/$U" "/etc/vps-users/$U" "/etc/vps-plan/$U"
         userdel -r "$U" 2>/dev/null || userdel "$U" 2>/dev/null
         log "eliminado vencido: $U (vencio $N)"
     fi
@@ -1172,7 +1180,7 @@ ghost_intro(){
 }
 
 # --- Datos del negocio para la cabecera (cache de 30 s: una pasada por passwd/shadow + contadores) ---
-GS_TS=0; GS_USERS=0; GS_VENC=0; GS_HOY=0; GS_PRONTO=0; GS_BLOQ=0; GS_TRAF="0 MB"
+GS_TS=0; GS_USERS=0; GS_VENC=0; GS_HOY=0; GS_PRONTO=0; GS_BLOQ=0; GS_TRAF="0 MB"; GS_ALTO=0
 ghost_stats_refrescar(){
     local now out t=0 v
     now=$(date +%s)
@@ -1188,6 +1196,18 @@ ghost_stats_refrescar(){
     trafico_cache_cargar
     for v in "${TRAF_CACHE[@]:-}"; do t=$(( t + ${v:-0} )); done
     if (( ${#TRAF_CACHE[@]} == 0 )); then GS_TRAF="--"; else GS_TRAF=$(fmt_bytes "$t"); fi   # "--" = contadores sin activar
+    # Usuarios al 80% o mas de su cuota (alerta de la cabecera)
+    GS_ALTO=0
+    if (( ${#TRAF_CACHE[@]} > 0 )); then
+        local f u g
+        for f in /etc/vps-trafico/*; do
+            [[ -f "$f" ]] || continue
+            u=$(basename "$f"); g=$(tr -dc '0-9' 2>/dev/null < "$f"); g=${g:0:6}
+            [[ -n "$g" ]] && (( 10#$g > 0 )) || continue
+            id "$u" >/dev/null 2>&1 || continue
+            (( ${TRAF_CACHE[$u]:-0} * 100 >= 10#$g * 1073741824 * 80 )) && GS_ALTO=$(( GS_ALTO + 1 ))
+        done
+    fi
 }
 
 ui_mini(){
@@ -1255,6 +1275,7 @@ cabecera(){
         FR_TXT "  👥 ${BLANCO}${GS_USERS}${NC} 🟢 ${oc}${ONLINE}${NC} ⏳ ${vc}${ven_n}${NC} 🚫 ${bc}${GS_BLOQ}${NC} 📈 ${CIAN}${GS_TRAF}${NC}"
     fi
     FR_TXT "  $(estado_servicios_min)"
+    (( GS_ALTO > 0 )) && FR_TXT "  🔶 ${AMARILLO}${GS_ALTO} $(T t_ui_alto)${NC}"
     FR_BOT
     echo
 }
@@ -1311,6 +1332,7 @@ crear_usuario(){
     chage -M 99999 -E "$EXPISO" "$USU"
     mkdir -p /etc/vps-limits
     echo "$MAXC" > "/etc/vps-limits/$USU"
+    plan_dias_set "$USU" "$DIAS"        # dias del plan: alimenta la barra de vigencia del banner
     # Cuota de trafico (misma ruta/formato que trafico_limite). Sin limite -> sin archivo.
     if (( GB > 0 )); then
         mkdir -p /etc/vps-trafico
@@ -1382,6 +1404,7 @@ renovar_usuario(){
     if [[ "$ACT" != "never" && "$ACT" > "$BASE" ]]; then BASE="$ACT"; fi
     EXPISO=$(date -d "$BASE +${DIAS} days" +%Y-%m-%d)
     chage -M 99999 -E "$EXPISO" "$USU"
+    plan_dias_set "$USU" "$(dias_hasta "$EXPISO")"   # el plan vigente = dias que quedan tras renovar
     banner_usuario_actualizar "$USU"
     banner_rebuild_match
     vps_log INFO "renovado: $USU hasta $EXPISO"
@@ -1390,9 +1413,11 @@ renovar_usuario(){
 }
 
 listar_usuarios(){
-    echo -e "${CIAN}--- USUARIOS DEL SISTEMA (humanos) ---${NC}"
-    printf "%-16s %-12s %-6s %-7s %-7s %s\n" "USUARIO" "VENCE" "DIAS" "LIMITE" "ONLINE" "ESTADO"
-    local U EXPISO D EST LIM ON
+    echo -e "${CIAN}--- USUARIOS ---${NC}"
+    local U EXPISO D EST LIM ON USED G P TXT COL SIN=0
+    trafico_cache_cargar; TRAF_BATCH=1
+    (( ${#TRAF_CACHE[@]} == 0 )) && SIN=1
+    printf "%-14s %-11s %-4s %-4s %-3s %-9s %s\n" "USUARIO" "VENCE" "DIAS" "CONX" "ON" "TRAFICO" "EST"
     while read -r U; do
         EXPISO=$(usuario_fecha_cuenta "$U")
         if [[ "$EXPISO" == "never" ]]; then D="-"; else D=$(dias_hasta "$EXPISO"); fi
@@ -1400,8 +1425,16 @@ listar_usuarios(){
         if [[ "$EST" == "P" ]]; then EST="${VERDE}OK${NC}"; else EST="${ROJO}LOCK${NC}"; fi
         LIM=$(cat "/etc/vps-limits/$U" 2>/dev/null || echo "-")
         ON=$(usuario_online "$U")
-        printf "%-16s %-12s %-6s %-7s %-7s %b\n" "$U" "$EXPISO" "$D" "$LIM" "$ON" "$EST"
+        # Trafico usado / cuota (rojo desde 90%, amarillo desde 70%); "--" si los contadores no estan activos
+        USED=$(trafico_usuario_bytes "$U"); G=$(tr -dc '0-9' 2>/dev/null < "/etc/vps-trafico/$U"); G=${G:0:6}; COL=""
+        if (( SIN )); then TXT="--"
+        elif [[ -n "$G" ]] && (( 10#$G > 0 )); then
+            P=$(( USED * 100 / (10#$G * 1073741824) )); TXT="$(fmt_corto "$USED")/${G}G"
+            if (( P >= 90 )); then COL=$ROJO; elif (( P >= 70 )); then COL=$AMARILLO; fi
+        else TXT="$(fmt_corto "$USED")"; fi
+        printf "%-14s %-11s %-4s %-4s %-3s %b%-9s%b %b\n" "$U" "$EXPISO" "$D" "$LIM" "$ON" "$COL" "$TXT" "$NC" "$EST"
     done < <(awk -F: '$3>=1000 && $1!="nobody"{print $1}' /etc/passwd)
+    TRAF_BATCH=0
     PAUSA
 }
 
@@ -1487,7 +1520,19 @@ banner_html_http_custom(){
     # Variables en texto plano limpio: USER EXP DAYS WARN (HC las sustituye).
     # Ningun texto fijo contiene USER/EXP/DAYS/WARN (HC reemplaza aunque esten dentro de otra palabra).
     # WARN va solo en su renglon: si viene vacio no queda ningun rotulo huerfano.
-    printf '%s' '<p style="text-align:center;"><font color="#00FFFF"><b>═══════════════════════</b></font></p><p style="text-align:center;"><font color="#00FF7F"><b>👻 G H O S T   P A N E L 👻</b></font></p><p style="text-align:center;"><font color="#9E9E9E"><i>--- CONEXION VIP ESTABLE ---</i></font></p><p style="text-align:center;"><font color="#00FFFF"><b>═══════════════════════</b></font></p><p style="text-align:center;"><font color="#FFFFFF"><b>👤 USUARIO : </b></font><font color="#00BFFF"><b>USER</b></font></p><p style="text-align:center;"><font color="#FFFFFF"><b>📅 VENCIMIENTO : </b></font><font color="#FFD700"><b>EXP</b></font></p><p style="text-align:center;"><font color="#FFFFFF"><b>⏳ RESTANTES : </b></font><font color="#FF8C00"><b>DAYS</b></font></p><p style="text-align:center;"><font color="#555555">──────────────────────</font></p><p style="text-align:center;"><font color="#FF4444"><b>WARN</b></font></p><p style="text-align:center;"><font color="#7CFC00"><i>🚀 Disfruta de la mejor velocidad 🚀</i></font></p><p style="text-align:center;"><font color="#00FFFF"><b>═══════════════════════</b></font></p>'
+    printf '%s' \
+        "$(banner_l_gruesa)" \
+        '<p style="text-align:center;"><font color="#00FF7F"><b>👻 G H O S T   P A N E L 👻</b></font></p>' \
+        '<p style="text-align:center;"><font color="#9E9E9E"><i>--- CONEXION VIP ESTABLE ---</i></font></p>' \
+        "$(banner_l_gruesa)" \
+        "$(banner_fila "👤 USUARIO" "#00BFFF" "USER")" \
+        "$(banner_fila "📅 VENCIMIENTO" "#FFD700" "EXP")" \
+        "$(banner_fila "⏳ RESTANTES" "#FF8C00" "DAYS")" \
+        "$(banner_l_fina)" \
+        '<p style="text-align:center;"><font color="#FF4444"><b>WARN</b></font></p>' \
+        "$(banner_soporte_fila)" \
+        '<p style="text-align:center;"><font color="#7CFC00"><i>🚀 Disfruta de la mejor velocidad 🚀</i></font></p>' \
+        "$(banner_l_gruesa)"
 }
 
 banner_validar_hc(){
@@ -1766,6 +1811,26 @@ banner_barra(){
     printf '<font color="%s">%s</font><font color="#555555">%s</font>' "$2" "$(ui_rep ▰ "$f")" "$(ui_rep ▱ $(( 10 - f )))"
 }
 
+ghost_conf_get(){ awk -F= -v k="$1" '$1==k{sub(/^[^=]*=/,""); print; exit}' /etc/ghost-panel.conf 2>/dev/null; }
+ghost_conf_set(){
+    touch /etc/ghost-panel.conf; chmod 600 /etc/ghost-panel.conf
+    sed -i "/^$1=/d" /etc/ghost-panel.conf
+    echo "$1=$2" >> /etc/ghost-panel.conf
+}
+plan_dias_set(){ mkdir -p /etc/vps-plan; echo "$2" > "/etc/vps-plan/$1"; }   # dias del plan vigente (para la barra de vigencia)
+
+# --- piezas del banner (siempre UNA linea; solo tags permitidos por HTTP Custom) ---
+# Las lineas miden lo mismo (23 caracteres): un poco mas anchas que la fila de texto mas larga, asi el
+# banner "cierra" bien arriba y abajo. Los textos fijos no deben contener USER, EXP, DAYS ni WARN.
+banner_l_gruesa(){ printf '<p style="text-align:center;"><font color="#00FFFF"><b>%s</b></font></p>' "═══════════════════════"; }
+banner_l_fina(){ printf '<p style="text-align:center;"><font color="#555555">%s</font></p>' "───────────────────────"; }
+banner_p(){ printf '<p style="text-align:center;">%s</p>' "$1"; }
+banner_soporte_fila(){
+    local S; S=$(ghost_conf_get SUPPORT); S=${S:-@JorgeBarrios}
+    [[ "$S" == "NONE" ]] && return 0
+    banner_fila "💬 SOPORTE" "#00BFFF" "$S"
+}
+
 banner_fila(){
     # banner_fila "ETIQUETA" "#COLOR" "VALOR" -> una fila <p> con el mismo estilo del banner.
     # OJO: ni etiquetas ni valores deben contener los tokens que HTTP Custom sustituye (USER, EXP, DAYS, WARN).
@@ -1773,51 +1838,80 @@ banner_fila(){
 }
 
 banner_html_para_usuario(){
-    # banner_html_para_usuario USUARIO -> imprime HTML con datos reales (1 linea)
-    local U="$1" EXPISO D WARN="" EXP_TXT DAYS_TXT DAYS_BAR="" USED_PCT BAR_COL
-    local CONN_TXT LIM_GB GB_TXT USED_B USED_TXT LIM_B REST_B REST_TXT="" REST_COLOR="#7CFC00" EXTRA_ROWS
+    # banner_html_para_usuario USUARIO -> HTML con datos reales (UNA linea).
+    # Estado/alerta: VENCIDA y SIN DATOS (sev 3) > POR VENCER (sev 2) > consumo >= 80% (sev 1).
+    local U="$1" EXPISO D="" EXP_TXT DAYS_TXT DAYS_ROW="" PLAN_D PLAN_TXT CONN_TXT PCT_D BAR_COL
+    local LIM_GB="" USED_B USED_TXT LIM_B=0 REST_B REST_TXT="" REST_COLOR="#7CFC00" USED_PCT=0 TRAF_ROWS
+    local ST_ICON="✅" ST_TXT="ACTIVA" ST_COL="#00FF7F" ALERT="" ALERT_COL="#FFD700" SEV=0 ALERT_ROW="" SUP_ROW
     EXPISO=$(usuario_fecha_cuenta "$U")
+    # Dias del plan (se guardan al crear/renovar); sin dato -> escala de 30 dias para la barra
+    PLAN_D=$(tr -dc '0-9' 2>/dev/null < "/etc/vps-plan/$U"); PLAN_D=${PLAN_D:0:5}
+    if [[ -n "$PLAN_D" ]] && (( 10#$PLAN_D > 0 )); then PLAN_D=$((10#$PLAN_D)); else PLAN_D=""; fi
     if [[ "$EXPISO" == "never" ]]; then
-        EXP_TXT="Sin vencimiento"
-        DAYS_TXT="--"
+        EXP_TXT="Sin vencimiento"; DAYS_TXT="--"
     else
-        EXP_TXT="$EXPISO"
-        D=$(dias_hasta "$EXPISO")
-        # Barra de vigencia: escala de 30 dias (verde >50%, naranja >20%, rojo el resto)
-        USED_PCT=$(( (D < 0 ? 0 : (D > 30 ? 30 : D)) * 100 / 30 ))
-        BAR_COL="#00FF7F"; (( USED_PCT <= 50 )) && BAR_COL="#FF8C00"; (( USED_PCT <= 20 )) && BAR_COL="#FF4444"
-        DAYS_BAR=$(banner_barra "$USED_PCT" "$BAR_COL")
-        if [[ "$D" -lt 0 ]]; then
-            DAYS_TXT="0"
-            WARN="Cuenta vencida"
+        EXP_TXT="$EXPISO"; D=$(dias_hasta "$EXPISO")
+        PCT_D=$(( (D < 0 ? 0 : D) * 100 / ${PLAN_D:-30} )); (( PCT_D > 100 )) && PCT_D=100
+        BAR_COL="#00FF7F"; (( PCT_D <= 50 )) && BAR_COL="#FF8C00"; (( PCT_D <= 20 )) && BAR_COL="#FF4444"
+        DAYS_ROW=$(banner_p "$(banner_barra "$PCT_D" "$BAR_COL")")
+        if (( D < 0 )); then
+            DAYS_TXT="0 dias"; SEV=3; ST_ICON="⛔"; ST_TXT="VENCIDA"; ST_COL="#FF4444"
+            ALERT="⛔ Cuenta vencida"; ALERT_COL="#FF4444"
         else
-            DAYS_TXT="$D"
-            (( D <= 3 )) && WARN="Por vencer: quedan ${D} dias"
+            DAYS_TXT="$D dias"; (( D == 1 )) && DAYS_TXT="1 dia"
+            if (( D <= 3 )); then
+                SEV=2; ST_ICON="🔶"; ST_TXT="POR VENCER"; ST_COL="#FFD700"
+                ALERT="🔶 Vence en $DAYS_TXT"; (( D == 0 )) && ALERT="🔶 Vence hoy"
+            fi
         fi
     fi
-    # --- Limite de conexiones: archivo ausente o 0 = sin limite (igual que el limiter) ---
+    # --- Conexiones: archivo ausente o 0 = sin limite (igual que el limiter) ---
     CONN_TXT=$(tr -dc '0-9' 2>/dev/null < "/etc/vps-limits/$U"); CONN_TXT=${CONN_TXT:0:6}
     if [[ -n "$CONN_TXT" ]] && (( 10#$CONN_TXT > 0 )); then CONN_TXT=$((10#$CONN_TXT)); else CONN_TXT="Sin limite"; fi
-    # --- Trafico usado (SSH + Xray) y cuota en GB: archivo ausente o 0 = sin limite ---
+    # --- Trafico (SSH + Xray) y cuota en GB: archivo ausente o 0 = sin limite ---
     USED_B=$(trafico_usuario_bytes "$U"); USED_TXT=$(fmt_bytes "$USED_B")
     LIM_GB=$(tr -dc '0-9' 2>/dev/null < "/etc/vps-trafico/$U"); LIM_GB=${LIM_GB:0:6}
+    TRAF_ROWS=""
     if [[ -n "$LIM_GB" ]] && (( 10#$LIM_GB > 0 )); then
-        LIM_GB=$((10#$LIM_GB)); GB_TXT="${LIM_GB} GB"
+        LIM_GB=$((10#$LIM_GB)); PLAN_TXT="${LIM_GB} GB"
         LIM_B=$(( LIM_GB * 1073741824 )); REST_B=$(( LIM_B - USED_B )); (( REST_B < 0 )) && REST_B=0
         REST_TXT=$(fmt_bytes "$REST_B")
-        (( REST_B * 10 <= LIM_B )) && REST_COLOR="#FF4444"   # queda 10% o menos -> rojo
-        # Barra de consumo (verde <70%, naranja <90%, rojo desde 90%)
         USED_PCT=$(( USED_B * 100 / LIM_B )); (( USED_PCT > 100 )) && USED_PCT=100
         BAR_COL="#00FF7F"; (( USED_PCT >= 70 )) && BAR_COL="#FF8C00"; (( USED_PCT >= 90 )) && BAR_COL="#FF4444"
-        USED_TXT="${USED_TXT} $(banner_barra "$USED_PCT" "$BAR_COL") ${USED_PCT}%"
+        (( REST_B * 10 <= LIM_B )) && REST_COLOR="#FF4444"       # queda 10% o menos -> rojo
+        TRAF_ROWS="$(banner_fila "📊 TRAFICO USADO" "#DA70D6" "$USED_TXT")$(banner_p "$(banner_barra "$USED_PCT" "$BAR_COL") <font color=\"#DA70D6\"><b>${USED_PCT}%</b></font>")$(banner_fila "🔋 TRAFICO RESTANTE" "$REST_COLOR" "$REST_TXT")"
+        if (( USED_B >= LIM_B )); then
+            (( SEV < 3 )) && { SEV=3; ST_ICON="⛔"; ST_TXT="SIN DATOS"; ST_COL="#FF4444"; ALERT="⛔ Cuota agotada"; ALERT_COL="#FF4444"; }
+        elif (( USED_PCT >= 80 && SEV < 1 )); then
+            SEV=1; ALERT="🔶 Consumo al ${USED_PCT}%"; (( USED_PCT >= 90 )) && ALERT_COL="#FF8C00"
+        fi
     else
-        GB_TXT="Sin limite"
+        PLAN_TXT="Sin limite de datos"
+        TRAF_ROWS="$(banner_fila "📊 TRAFICO USADO" "#DA70D6" "$USED_TXT")"
     fi
-    EXTRA_ROWS="$(banner_fila "🔌 LIMITE CONEXIONES" "#00FF7F" "$CONN_TXT")$(banner_fila "📊 TRAFICO USADO" "#DA70D6" "$USED_TXT")$(banner_fila "📦 LIMITE TRAFICO" "#40E0D0" "$GB_TXT")"
-    [[ -n "$REST_TXT" ]] && EXTRA_ROWS+="$(banner_fila "🔋 TRAFICO RESTANTE" "$REST_COLOR" "$REST_TXT")"
-    [[ -n "$DAYS_BAR" ]] && DAYS_TXT+=" $DAYS_BAR"
-    # Misma plantilla visual, pero con valores reales (sin tokens USER/EXP/DAYS)
-    printf '%s' "<p style=\"text-align:center;\"><font color=\"#00FFFF\"><b>═══════════════════════</b></font></p><p style=\"text-align:center;\"><font color=\"#00FF7F\"><b>👻 G H O S T   P A N E L 👻</b></font></p><p style=\"text-align:center;\"><font color=\"#9E9E9E\"><i>--- CONEXION VIP ESTABLE ---</i></font></p><p style=\"text-align:center;\"><font color=\"#00FFFF\"><b>═══════════════════════</b></font></p><p style=\"text-align:center;\"><font color=\"#FFFFFF\"><b>👤 USUARIO : </b></font><font color=\"#00BFFF\"><b>${U}</b></font></p><p style=\"text-align:center;\"><font color=\"#FFFFFF\"><b>📅 VENCIMIENTO : </b></font><font color=\"#FFD700\"><b>${EXP_TXT}</b></font></p><p style=\"text-align:center;\"><font color=\"#FFFFFF\"><b>⏳ RESTANTES : </b></font><font color=\"#FF8C00\"><b>${DAYS_TXT}</b></font></p>${EXTRA_ROWS}<p style=\"text-align:center;\"><font color=\"#555555\">──────────────────────</font></p><p style=\"text-align:center;\"><font color=\"#FF4444\"><b>${WARN}</b></font></p><p style=\"text-align:center;\"><font color=\"#7CFC00\"><i>🚀 Disfruta de la mejor velocidad 🚀</i></font></p><p style=\"text-align:center;\"><font color=\"#00FFFF\"><b>═══════════════════════</b></font></p>"
+    [[ -n "$PLAN_D" ]] && PLAN_TXT+=" · ${PLAN_D} dias"
+    [[ -n "$ALERT" ]] && ALERT_ROW=$(banner_p "<font color=\"$ALERT_COL\"><b>${ALERT}</b></font>")
+    SUP_ROW=$(banner_soporte_fila)
+    printf '%s' \
+        "$(banner_l_gruesa)" \
+        '<p style="text-align:center;"><font color="#00FF7F"><b>👻 G H O S T   P A N E L 👻</b></font></p>' \
+        '<p style="text-align:center;"><font color="#9E9E9E"><i>--- CONEXION VIP ESTABLE ---</i></font></p>' \
+        "$(banner_l_gruesa)" \
+        "$(banner_fila "👤 USUARIO" "#00BFFF" "$U")" \
+        "$(banner_fila "$ST_ICON ESTADO" "$ST_COL" "$ST_TXT")" \
+        "$(banner_fila "📅 VENCIMIENTO" "#FFD700" "$EXP_TXT")" \
+        "$(banner_fila "⏳ RESTANTES" "#FF8C00" "$DAYS_TXT")" \
+        "$DAYS_ROW" \
+        "$(banner_l_fina)" \
+        "$(banner_fila "🔌 LIMITE CONEXIONES" "#00FF7F" "$CONN_TXT")" \
+        "$(banner_fila "📦 PLAN" "#40E0D0" "$PLAN_TXT")" \
+        "$TRAF_ROWS" \
+        "$(banner_l_fina)" \
+        "$ALERT_ROW" \
+        "$SUP_ROW" \
+        "$(banner_p "<font color=\"#9E9E9E\">🕒 Actualizado $(date '+%d/%m %H:%M %Z')</font>")" \
+        '<p style="text-align:center;"><font color="#7CFC00"><i>🚀 Disfruta de la mejor velocidad 🚀</i></font></p>' \
+        "$(banner_l_gruesa)"
 }
 
 banner_usuario_actualizar(){
@@ -1911,12 +2005,34 @@ banner_con_checkuser(){
     PAUSA
 }
 
+banner_soporte_menu(){
+    local cur S re
+    re='^[A-Za-z0-9@._:/+-]{1,40}$'
+    cur=$(ghost_conf_get SUPPORT); cur=${cur:-@JorgeBarrios}
+    echo -e "${CIAN}--- SOPORTE EN EL BANNER ---${NC}"
+    echo "  Lo ven tus clientes al conectar: 💬 SOPORTE : <texto>"
+    echo "  Ej: @TuUsuario   o   wa.me/549XXXXXXXXXX     (sin espacios)"
+    [[ "$cur" == "NONE" ]] && cur="(sin linea de soporte)"
+    read -r -p "  Texto [$cur]  (0 = quitar la linea): " S
+    if [[ -z "$S" ]]; then INFO "Sin cambios."; PAUSA; return; fi
+    if [[ "$S" == "0" ]]; then ghost_conf_set SUPPORT NONE
+    elif [[ "$S" =~ $re ]]; then ghost_conf_set SUPPORT "$S"
+    else ERR "Texto invalido (letras, numeros y @ . _ : / + -; max 40; sin espacios)."; PAUSA; return; fi
+    banner_todos_actualizar >/dev/null 2>&1 || true
+    OK "Soporte actualizado en los banners de cada usuario."
+    INFO "El banner generico (opcion 1) se actualiza al volver a publicarlo."
+    PAUSA
+}
+
 menu_banner(){
     while true; do
         cabecera
         SUBTOP "$(T t_sub_banner)"
-        FR_OPT 1 "$(T t_banner_html)" 3 "$(T t_banner_del)"
-        FR_OPT 2 "$(T t_banner_msg)" 4 "$(T t_banner_cu)"
+        FR_OPT 1 "🎨 $(T t_banner_html)" "" ""
+        FR_OPT 2 "📝 $(T t_banner_msg)" "" ""
+        FR_OPT 3 "🗑 $(T t_banner_del)" "" ""
+        FR_OPT 4 "📡 $(T t_banner_cu)" "" ""
+        FR_OPT 5 "💬 $(T t_banner_sop)" "" ""
         FR_OPT 0 "🔙 $(T t_volver)" "" ""
         FR_BOT
         PROMPT
@@ -1925,6 +2041,7 @@ menu_banner(){
             2) banner_ssh ;;
             3) banner_eliminar ;;
             4) banner_con_checkuser ;;
+            5) banner_soporte_menu ;;
             0) break ;;
             *) ERR "$(T t_opinv)"; sleep 1 ;;
         esac
@@ -2928,36 +3045,41 @@ trafico_activar(){
     PAUSA
 }
 
+fmt_corto(){
+    # fmt_corto BYTES -> "512M" o "2.1G" (columnas angostas)
+    local b="${1:-0}"
+    if (( b < 1073741824 )); then echo "$(( b / 1048576 ))M"
+    else printf '%d.%dG\n' $(( b / 1073741824 )) $(( (b * 10 / 1073741824) % 10 )); fi
+}
+
 trafico_ver(){
     echo -e "${CIAN}--- CONSUMO POR USUARIO ---${NC}"
-    echo -e "${GRIS}SSH (iptables owner) + Xray (Stats API, si esta activa)${NC}"
-    printf "%-16s %-14s %-14s %s\n" "USUARIO" "SSH" "XRAY(up+dn)" "LIMITE(GB)"
-    local U MB LIM XR XUP XDN XT XTMB BYTES UIDN
-    # Mapa SSH desde iptables
-    declare -A SSH_B
-    while read -r BYTES UIDN; do
-        [[ -n "$UIDN" ]] || continue
-        U=$(id -un "$UIDN" 2>/dev/null || echo "uid$UIDN")
-        SSH_B[$U]=$BYTES
-    done < <(iptables -L VPS-TRAFFIC -v -x -n 2>/dev/null | awk '/owner UID match/ {print $2, $NF}')
-
+    echo -e "${GRIS}Total = SSH (iptables) + Xray (Stats API). De mayor a menor consumo.${NC}"
+    local U USED G P TOT=0 FILAS=()
+    trafico_cache_cargar; TRAF_BATCH=1
+    (( ${#TRAF_CACHE[@]} == 0 )) && WARN "Sin contadores: activalos en Trafico -> [1]."
     while read -r U; do
         usuario_protegido "$U" && continue
-        BYTES=${SSH_B[$U]:-0}
-        MB=$(( BYTES / 1048576 ))
-        LIM=$(cat "/etc/vps-trafico/$U" 2>/dev/null || echo "-")
-        XTMB="-"
-        XR=$(xray_stats_usuario "$U" 2>/dev/null || true)
-        if [[ "$XR" == *"|"* ]]; then
-            XUP=${XR%%|*}; XDN=${XR##*|}
-            XT=$(( ${XUP:-0} + ${XDN:-0} ))
-            XTMB="$(( XT / 1048576 )) MB"
-        fi
-        printf "%-16s %7d MB   %-14s %s\n" "$U" "$MB" "$XTMB" "$LIM"
+        USED=$(trafico_usuario_bytes "$U")
+        G=$(tr -dc '0-9' 2>/dev/null < "/etc/vps-trafico/$U"); G=${G:0:6}
+        FILAS+=("$USED|$U|${G:-0}")
+        TOT=$(( TOT + USED ))
     done < <(awk -F: '$3>=1000 && $1!="nobody"{print $1}' /etc/passwd)
+    TRAF_BATCH=0
+    printf "%-14s %-9s %-8s %s\n" "USUARIO" "USADO" "CUOTA" "USO"
+    if (( ${#FILAS[@]} )); then
+        while IFS='|' read -r USED U G; do
+            if (( 10#$G > 0 )); then
+                P=$(( USED * 100 / (10#$G * 1073741824) ))
+                printf "%-14s %-9s %-8s %b %3s%%\n" "$U" "$(fmt_bytes "$USED")" "${G} GB" "$(ui_bar "$P" 8)" "$P"
+            else
+                printf "%-14s %-9s %-8s %s\n" "$U" "$(fmt_bytes "$USED")" "sin limite" "--"
+            fi
+        done < <(printf '%s\n' "${FILAS[@]}" | sort -t'|' -k1,1nr)
+    fi
     echo
-    INFO "SSH = trafico de procesos del UID (tuneles SSH). Xray = stats por email si API :10085 activa."
-    INFO "Reset solo pone a cero contadores iptables (no borra stats de Xray)."
+    echo -e "  Total de todos los usuarios: ${CIAN}$(fmt_bytes "$TOT")${NC}"
+    INFO "Reset pone a cero los contadores iptables (no borra las stats de Xray)."
     banner_todos_actualizar >/dev/null 2>&1 || true   # deja los banners con el consumo actual
     PAUSA
 }
@@ -3033,7 +3155,10 @@ trafico_cron_instalar(){
     # Genera /usr/local/bin/vps-trafico-cron.sh COPIANDO las funciones de este script (declare -f):
     # no duplica codigo, no ejecuta el panel completo (sin validacion de licencia ni menus).
     # Se regenera en cada arranque del panel para que siempre coincida con la version instalada.
-    local FN
+    local FN MIN="${1:-}"
+    # Frecuencia: la pasada por parametro, o la que ya tenia el cron, o 1 minuto
+    [[ -n "$MIN" ]] || MIN=$(trafico_auto_min)
+    [[ "$MIN" =~ ^(1|5|10)$ ]] || MIN=1
     {
         echo '#!/bin/bash'
         echo '# Generado por Ghost Panel (trafico_cron_instalar). No editar: se regenera solo.'
@@ -3043,33 +3168,50 @@ trafico_cron_instalar(){
         echo 'declare -A TRAF_CACHE=(); TRAF_BATCH=0'
         for FN in vps_log usuario_protegido ui_rep fmt_bytes xray_stats_todos trafico_cache_cargar \
                   trafico_usuario_bytes trafico_excedido trafico_bloquear_excedidos usuario_fecha_cuenta \
-                  dias_hasta banner_barra banner_fila banner_html_para_usuario banner_usuario_actualizar \
-                  trafico_auto_ciclo; do
+                  dias_hasta ghost_conf_get banner_barra banner_l_gruesa banner_l_fina banner_p banner_fila \
+                  banner_soporte_fila banner_html_para_usuario banner_usuario_actualizar trafico_auto_ciclo; do
             declare -f "$FN"
         done
         echo 'trafico_auto_ciclo'
     } > /usr/local/bin/vps-trafico-cron.sh
     chmod 755 /usr/local/bin/vps-trafico-cron.sh
-    cat > /etc/cron.d/ghost-panel-trafico <<'TAB'
-SHELL=/bin/bash
-PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
-*/5 * * * * root /usr/local/bin/vps-trafico-cron.sh
-TAB
+    printf 'SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin\n*/%s * * * * root /usr/local/bin/vps-trafico-cron.sh\n' "$MIN" > /etc/cron.d/ghost-panel-trafico
     chmod 644 /etc/cron.d/ghost-panel-trafico
 }
 
+trafico_auto_min(){ awk '/^\*\/[0-9]+ /{sub(/^\*\//,"",$1); print $1; exit}' /etc/cron.d/ghost-panel-trafico 2>/dev/null; }
+
+trafico_auto_pedir_min(){
+    # trafico_auto_pedir_min VARIABLE -> pregunta 1/5/10 minutos (por defecto 1)
+    local _m
+    read -r -p "  Cada cuantos minutos refrescar banners y revisar cuotas? (1/5/10) [1]: " _m
+    [[ "$_m" =~ ^(1|5|10)$ ]] || _m=1
+    printf -v "$1" '%s' "$_m"
+}
+
 trafico_auto_toggle(){
+    local OPC MIN
+    echo -e "${CIAN}--- AUTO-CORTE ---${NC}"
     if [[ -f /etc/cron.d/ghost-panel-trafico ]]; then
-        rm -f /etc/cron.d/ghost-panel-trafico /usr/local/bin/vps-trafico-cron.sh /run/ghost-trafico.lock
-        OK "Auto-corte desactivado (los banners vuelven a actualizarse solo con el panel)."
-        vps_log INFO "auto-corte desactivado"
+        echo "  Activo: cada $(trafico_auto_min) min."
+        echo "  [1] Cambiar frecuencia    [2] Desactivar    [0] Cancelar"
+        read -r -p "  > " OPC
+        case "$OPC" in
+            1) trafico_auto_pedir_min MIN; trafico_cron_instalar "$MIN"
+               OK "Frecuencia: cada $MIN min."; vps_log INFO "auto-corte cada $MIN min" ;;
+            2) rm -f /etc/cron.d/ghost-panel-trafico /usr/local/bin/vps-trafico-cron.sh /run/ghost-trafico.lock
+               OK "Auto-corte desactivado (los banners vuelven a actualizarse solo con el panel)."
+               vps_log INFO "auto-corte desactivado" ;;
+            *) INFO "Sin cambios." ;;
+        esac
     else
-        trafico_cron_instalar
+        trafico_auto_pedir_min MIN
+        trafico_cron_instalar "$MIN"
         /usr/local/bin/vps-trafico-cron.sh >/dev/null 2>&1       # primer ciclo ahora mismo
-        OK "Auto-corte ACTIVO: cada 5 min bloquea a quien exceda su cuota y refresca los banners."
+        OK "Auto-corte ACTIVO: cada $MIN min bloquea a quien exceda su cuota y refresca los banners."
         INFO "Activa antes los contadores (opcion 1) para que el trafico SSH cuente."
         WARN "El bloqueo cierra SSH (usermod -L). Los clientes Xray siguen conectando hasta que los elimines."
-        vps_log INFO "auto-corte activado"
+        vps_log INFO "auto-corte activado cada $MIN min"
     fi
     PAUSA
 }
@@ -3081,7 +3223,7 @@ menu_trafico(){
         FR_OPT 2 "📈 $(T t_tr_ver)" 5 "🔄 $(T t_tr_reset)"
         FR_OPT 3 "🚦 $(T t_tr_limite)" 6 "🤖 $(T t_tr_auto)"
         FR_OPT 0 "🔙 $(T t_volver)" "" ""
-        if [[ -f /etc/cron.d/ghost-panel-trafico ]]; then FR_TXT "  ${VERDE}🤖 $(T t_tr_auto_on)${NC}"
+        if [[ -f /etc/cron.d/ghost-panel-trafico ]]; then FR_TXT "  ${VERDE}🤖 $(T t_tr_auto_on) $(trafico_auto_min) min${NC}"
         else FR_TXT "  ${GRIS}🤖 $(T t_tr_auto_off)${NC}"; fi
         FR_BOT
         PROMPT
@@ -5171,7 +5313,7 @@ desinstalar_ghost(){
 
     # 7) Datos, licencia, config, auto-menu
     INFO "Borrando datos y configuracion..."
-    rm -rf /etc/vps-limits /etc/vps-trafico /etc/vps-users
+    rm -rf /etc/vps-limits /etc/vps-trafico /etc/vps-users /etc/vps-plan
     rm -f /etc/vps-manager.key /etc/vps-manager.lang /etc/vps-license.cache /etc/vps-license.name \
           /etc/ghost-panel.conf /run/vps-ip.cache /root/vps-links.txt /root/wg-client.conf /root/paquetes.txt
     [[ -d /etc/openvpn ]] || rm -f /root/openvpn-install.sh      # si OpenVPN sigue, se conserva su instalador
