@@ -3,7 +3,14 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 3.9.1
+#  Version: 3.9.2
+#  Cambios 3.9.2 (diseño):
+#    - Submenus con cabecera compacta (5 lineas); la completa solo en el menu principal
+#    - Titulo unico "Inicio › SECCION" y submenus pintados con el color de su seccion
+#    - Licencia sin vencimiento -> "∞ vitalicia"; tildes en menus; Desinstalar pasa a Herramientas [8]
+#    - Banner de clientes compacto (13 filas), barras en la misma fila, % con decimal, hora en la zona
+#      horaria elegida (Banner -> [6]) y acentos
+#  Cambios 3.9.1 (+ Tráfico enlazado en Usuarios SSH [12]):
 #  Cambios 3.9.1+ (parche):
 #    - Usuarios SSH -> [12] Trafico: enlaza el submenu TRAFICO POR USUARIO (antes existia pero no estaba en ningun menu)
 #  Cambios 3.9.1:
@@ -93,7 +100,7 @@ tema_guardar(){
     echo "THEME=$1" >> /etc/ghost-panel.conf
 }
 tema_cargar
-GHOST_VER='3.9.1'
+GHOST_VER='3.9.2'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -255,9 +262,9 @@ declare -A TXT_ES TXT_EN
 TXT_ES[t_menu_principal]="PRINCIPAL"; TXT_EN[t_menu_principal]="MAIN"
 TXT_ES[t_ui_sys]="SISTEMA"; TXT_EN[t_ui_sys]="SYSTEM"
 TXT_ES[t_ui_res]="RECURSOS"; TXT_EN[t_ui_res]="RESOURCES"
-TXT_ES[t_ui_ses]="SESION"; TXT_EN[t_ui_ses]="SESSION"
+TXT_ES[t_ui_ses]="SESIÓN"; TXT_EN[t_ui_ses]="SESSION"
 TXT_ES[t_ui_user]="Usuario"; TXT_EN[t_ui_user]="User"
-TXT_ES[t_ui_days]="dias"; TXT_EN[t_ui_days]="days"
+TXT_ES[t_ui_days]="días"; TXT_EN[t_ui_days]="days"
 TXT_ES[t_usuarios]="Usuarios SSH"; TXT_EN[t_usuarios]="SSH Users"
 TXT_ES[t_protocolos]="Protocolos"; TXT_EN[t_protocolos]="Protocols"
 TXT_ES[t_seguridad]="Seguridad"; TXT_EN[t_seguridad]="Security"
@@ -265,10 +272,10 @@ TXT_ES[t_sistema]="Sistema/Recursos"; TXT_EN[t_sistema]="System/Resources"
 TXT_ES[t_herramientas]="Herramientas"; TXT_EN[t_herramientas]="Tools"
 TXT_ES[t_webmin]="Webmin"; TXT_EN[t_webmin]="Webmin"
 TXT_ES[t_backup]="Backup/Restaurar"; TXT_EN[t_backup]="Backup / Restore"
-TXT_ES[t_diagnostico]="Diagnostico"; TXT_EN[t_diagnostico]="Diagnostics"
+TXT_ES[t_diagnostico]="Diagnóstico"; TXT_EN[t_diagnostico]="Diagnostics"
 TXT_ES[t_servidor_id]="Servidor ID"; TXT_EN[t_servidor_id]="Server ID"
 TXT_ES[t_salir]="Salir"; TXT_EN[t_salir]="Exit"
-TXT_ES[t_opcion]="Opcion"; TXT_EN[t_opcion]="Option"
+TXT_ES[t_opcion]="Opción"; TXT_EN[t_opcion]="Option"
 TXT_ES[t_volver]="Volver"; TXT_EN[t_volver]="Back"
 TXT_ES[t_sub_usuarios]="USUARIOS SSH"; TXT_EN[t_sub_usuarios]="SSH USERS"
 TXT_ES[t_crear]="Crear usuario"; TXT_EN[t_crear]="Create user"
@@ -276,7 +283,7 @@ TXT_ES[t_listar]="Listar usuarios"; TXT_EN[t_listar]="List users"
 TXT_ES[t_clave]="Cambiar clave"; TXT_EN[t_clave]="Change password"
 TXT_ES[t_bloquear]="Bloquear/Desbl."; TXT_EN[t_bloquear]="Block/Unblock"
 TXT_ES[t_renovar]="Renovar usuario"; TXT_EN[t_renovar]="Renew user"
-TXT_ES[t_limite]="Cambiar limite"; TXT_EN[t_limite]="Change limit"
+TXT_ES[t_limite]="Cambiar límite"; TXT_EN[t_limite]="Change limit"
 TXT_ES[t_eliminar]="Eliminar usuario"; TXT_EN[t_eliminar]="Delete user"
 TXT_ES[t_vencidos]="Borrar vencidos"; TXT_EN[t_vencidos]="Delete expired"
 TXT_ES[t_test]="Crear test SSH"; TXT_EN[t_test]="Create SSH test"
@@ -306,8 +313,8 @@ TXT_ES[t_update]="Update sistema"; TXT_EN[t_update]="System update"
 TXT_ES[t_reiniciar]="Reiniciar VPS"; TXT_EN[t_reiniciar]="Reboot VPS"
 TXT_ES[t_sub_herr]="HERRAMIENTAS DEL PANEL"; TXT_EN[t_sub_herr]="PANEL TOOLS"
 TXT_ES[t_global]="Comando global"; TXT_EN[t_global]="Global command"
-TXT_ES[t_automenu_on]="Auto-menu login"; TXT_EN[t_automenu_on]="Menu on login"
-TXT_ES[t_automenu_off]="Quitar auto-menu"; TXT_EN[t_automenu_off]="Remove auto-menu"
+TXT_ES[t_automenu_on]="Auto-menú login"; TXT_EN[t_automenu_on]="Menu on login"
+TXT_ES[t_automenu_off]="Quitar auto-menú"; TXT_EN[t_automenu_off]="Remove auto-menu"
 TXT_ES[t_autoupdate]="Auto-actualizar"; TXT_EN[t_autoupdate]="Self-update"
 TXT_ES[t_checkuser]="CheckUser API"; TXT_EN[t_checkuser]="CheckUser API"
 TXT_ES[t_idioma]="Cambiar idioma"; TXT_EN[t_idioma]="Change language"
@@ -338,11 +345,11 @@ TXT_ES[t_cu_inst]="Instalar / reinstalar"; TXT_EN[t_cu_inst]="Install / reinstal
 TXT_ES[t_cu_probar]="Probar consulta"; TXT_EN[t_cu_probar]="Test query"
 TXT_ES[t_cu_token]="Ver token y puerto"; TXT_EN[t_cu_token]="Show token & port"
 TXT_ES[t_remover]="Remover"; TXT_EN[t_remover]="Remove"
-TXT_ES[t_sub_trafico]="TRAFICO POR USUARIO"; TXT_EN[t_sub_trafico]="PER-USER TRAFFIC"
-TXT_ES[t_trafico]="Trafico"; TXT_EN[t_trafico]="Traffic"
+TXT_ES[t_sub_trafico]="TRÁFICO POR USUARIO"; TXT_EN[t_sub_trafico]="PER-USER TRAFFIC"
+TXT_ES[t_trafico]="Tráfico"; TXT_EN[t_trafico]="Traffic"
 TXT_ES[t_tr_activar]="Activar conteo"; TXT_EN[t_tr_activar]="Enable counters"
 TXT_ES[t_tr_ver]="Ver consumo"; TXT_EN[t_tr_ver]="View usage"
-TXT_ES[t_tr_limite]="Limite (GB)"; TXT_EN[t_tr_limite]="Limit (GB)"
+TXT_ES[t_tr_limite]="Límite (GB)"; TXT_EN[t_tr_limite]="Limit (GB)"
 TXT_ES[t_tr_cortar]="Cortar excedidos"; TXT_EN[t_tr_cortar]="Cut exceeded"
 TXT_ES[t_tr_auto]="Auto-corte"; TXT_EN[t_tr_auto]="Auto-cut"
 TXT_ES[t_tr_auto_on]="Auto-corte ACTIVO · cada"; TXT_EN[t_tr_auto_on]="Auto-cut ACTIVE · every"
@@ -359,7 +366,7 @@ TXT_ES[t_ssl_renovar]="Renovar ahora"; TXT_EN[t_ssl_renovar]="Renew now"
 TXT_ES[t_ssl_estado]="Estado y enlaces"; TXT_EN[t_ssl_estado]="Status & links"
 TXT_ES[t_ssl_aplicar]="Aplicar a los servicios"; TXT_EN[t_ssl_aplicar]="Apply to services"
 TXT_ES[t_ssl_quitar]="Quitar Dominio y SSL"; TXT_EN[t_ssl_quitar]="Remove Domain & SSL"
-TXT_ES[t_ssl_sin_dom]="Sin dominio configurado (opcion 1)"; TXT_EN[t_ssl_sin_dom]="No domain set (option 1)"
+TXT_ES[t_ssl_sin_dom]="Sin dominio configurado (opción 1)"; TXT_EN[t_ssl_sin_dom]="No domain set (option 1)"
 TXT_ES[t_ssl_sin_cert]="sin certificado aun"; TXT_EN[t_ssl_sin_cert]="no certificate yet"
 TXT_ES[t_tr_reset]="Reset contadores"; TXT_EN[t_tr_reset]="Reset counters"
 TXT_ES[t_sub_quitar]="QUITAR PROTOCOLOS"; TXT_EN[t_sub_quitar]="REMOVE PROTOCOLS"
@@ -375,9 +382,12 @@ TXT_ES[t_panel_jb]="👻 GHOST PANEL by Jorge Barrios"; TXT_EN[t_panel_jb]="👻
 TXT_ES[t_id_srv]="ID de este servidor"; TXT_EN[t_id_srv]="ID of this server"
 TXT_ES[t_online_req]="VALIDACION ONLINE OBLIGATORIA"; TXT_EN[t_online_req]="ONLINE VALIDATION REQUIRED"
 TXT_ES[t_online_req2]="LICENSE_URL vacio. Configuralo o usa GHOST_DEV=1 para pruebas."; TXT_EN[t_online_req2]="LICENSE_URL empty. Set it or use GHOST_DEV=1 for testing."
-TXT_ES[t_opinv]="Opcion invalida."; TXT_EN[t_opinv]="Invalid option."
+TXT_ES[t_opinv]="Opción inválida."; TXT_EN[t_opinv]="Invalid option."
 TXT_ES[t_cf_test]="Tunel CDN (test)"; TXT_EN[t_cf_test]="CDN tunnel"
 TXT_ES[t_q_tunnel]="Tunel CDN (cloudflared)"; TXT_EN[t_q_tunnel]="CDN tunnel (cloudflared)"
+TXT_ES[t_ui_vital]="∞ vitalicia"; TXT_EN[t_ui_vital]="∞ lifetime"
+TXT_ES[t_desinst_c]="Desinstalar"; TXT_EN[t_desinst_c]="Uninstall"
+TXT_ES[t_banner_tz]="Zona horaria"; TXT_EN[t_banner_tz]="Time zone"
 TXT_ES[t_ui_on]="online"; TXT_EN[t_ui_on]="online"
 TXT_ES[t_ui_venc]="vencen"; TXT_EN[t_ui_venc]="expiring"
 TXT_ES[t_tema]="Tema de color"; TXT_EN[t_tema]="Color theme"
@@ -392,7 +402,7 @@ TXT_ES[t_sub_adguard]="PROTOCOLOS / AdGuard Home"; TXT_EN[t_sub_adguard]="PROTOC
 TXT_ES[t_ad_reparar]="Reparar / reiniciar"; TXT_EN[t_ad_reparar]="Repair / restart"
 TXT_ES[t_ad_nota1]="Bloquea anuncios por DNS solo para clientes WireGuard (DNS=10.66.0.1)."; TXT_EN[t_ad_nota1]="DNS ad-blocking for WireGuard clients only (DNS=10.66.0.1)."
 TXT_ES[t_ad_nota2]="No aplica a HTTP Custom/SSH. Puerto 53 NO se publica a Internet."; TXT_EN[t_ad_nota2]="Does not apply to HTTP Custom/SSH. Port 53 is NOT exposed to the Internet."
-TXT_ES[t_nu_gb]="Limite de trafico en GB (0 = sin limite) [0]:"; TXT_EN[t_nu_gb]="Traffic limit in GB (0 = unlimited) [0]:"
+TXT_ES[t_nu_gb]="Límite de tráfico en GB (0 = sin límite) [0]:"; TXT_EN[t_nu_gb]="Traffic limit in GB (0 = unlimited) [0]:"
 TXT_ES[t_ad_inst]="Instalar AdGuard Home"; TXT_EN[t_ad_inst]="Install AdGuard Home"
 TXT_ES[t_ad_estado]="Estado / panel web"; TXT_EN[t_ad_estado]="Status / web UI"
 TXT_ES[t_ad_quitar]="Quitar AdGuard"; TXT_EN[t_ad_quitar]="Remove AdGuard"
@@ -1036,7 +1046,7 @@ ui_box_top(){
     ui_fit "$t" 999
     n=$(( UI_W + 1 - UI_FITW ))
     (( n < 1 )) && n=1
-    printf '%b\n' "${BORDE}╭─${NC}${MORADO}${t}${NC}${BORDE}$(ui_rep ─ "$n")╮${NC}"
+    printf '%b\n' "${BORDE}╭─${NC}${UI_ACC:-$MORADO}${t}${NC}${BORDE}$(ui_rep ─ "$n")╮${NC}"
 }
 ui_crumb(){
     if [[ -n "${1:-}" ]]; then printf '%b\n' "  ${GRIS}Inicio ›${NC} ${CIAN}${1}${NC}"
@@ -1086,11 +1096,13 @@ FR_TXT(){
     done
     printf '%b %s%b%*s %b\n' "${BORDE}│${NC}" "$out" "$NC" "$((W-vis))" "" "${BORDE}│${NC}"
 }
-declare -A UI_KCOL=()   # color por opcion (lo rellena el menu principal con los tonos del tema)
+declare -A UI_KCOL=()
+UI_ACC=""   # color de la seccion activa (lo fija el menu principal al entrar a un submenu)   # color por opcion (lo rellena el menu principal con los tonos del tema)
 ui_cell(){
     # ui_cell INDICE ETIQUETA ANCHO -> "[1]  Etiqueta" coloreado, relleno a ANCHO columnas visibles
     local k="$1" lbl="${2:-}" w="$3" ic="$CIAN" lc="$BLANCO" pad txt
-    [[ "$k" == "0" ]] && ic="$ROJO"
+    [[ -n "${UI_ACC:-}" ]] && { ic="$UI_ACC"; lc="$UI_ACC"; }      # submenu: color de su seccion
+    [[ "$k" == "0" ]] && { ic="$ROJO"; lc="$BLANCO"; }               # Volver/Salir siempre rojo
     [[ -n "${UI_KCOL[$k]:-}" ]] && { ic="${UI_KCOL[$k]}"; lc="${UI_KCOL[$k]}"; }
     txt=$(printf '%-4s' "[$k]")
     ui_fit "$lbl" $(( w - 6 )); lbl="$UI_FIT"
@@ -1146,8 +1158,19 @@ FILA(){
     fi
 }
 
-SUBTOP(){ ui_crumb "$1"; ui_box_top "$1"; }
+SUBTOP(){ ui_box_top "Inicio › $1"; }   # una sola linea: ruta + seccion dentro del marco
 PROMPT(){ echo; read -r -p "  $(echo -e "${ACENTO}👻 ❯${NC}") " OP; }
+seccion(){
+    # seccion N FUNCION -> abre el submenu con el color de su seccion (TH_ITEMS del tema)
+    UI_ACC="\033[1;38;5;${TH_ITEMS[$1-1]}m"
+    "${@:2}"
+    UI_ACC=""
+}
+ghost_fecha(){
+    # Fecha/hora del pie del menu en la zona horaria elegida (Banner -> Zona horaria); si no, la del VPS
+    local tz; tz=$(ghost_conf_get TZ_VISTA)
+    if [[ -n "$tz" && -f "/usr/share/zoneinfo/$tz" ]]; then TZ="$tz" date '+%d/%m/%Y %H:%M'; else date '+%d/%m/%Y %H:%M'; fi
+}
 limpiar_pantalla(){ clear 2>/dev/null; printf '\033[3J'; }   # tambien borra el scrollback (sin restos arriba)
 
 # --- Logo fantasma: 4 lineas de 7 columnas con el degradado del tema ---
@@ -1218,10 +1241,63 @@ ui_mini(){
     printf '%b%s%b %s %b%3s%%%b' "$GRIS" "$1" "$NC" "$(ui_bar "$2" "$3")" "$BLANCO" "$2" "$NC"
 }
 
+cab_licencia_txt(){
+    # Licencia con semaforo: verde, amarillo <=7 dias, rojo <=3 dias; "∞ vitalicia" si dura mas de 10 años
+    local lic lic_col txt="${VERDE}${LICENSE_OK:--}${NC}"
+    if [[ -n "${LICENSE_EXP:-}" && "${LICENSE_EXP:-0}" != "0" ]]; then
+        lic=$(( (LICENSE_EXP - $(date +%s)) / 86400 )); (( lic < 0 )) && lic=0
+        if (( lic > 3650 )); then
+            txt="${txt} ${GRIS}·${NC} ${VERDE}$(T t_ui_vital)${NC}"
+        else
+            lic_col=$VERDE; (( lic <= 7 )) && lic_col=$AMARILLO; (( lic <= 3 )) && lic_col=$ROJO
+            txt="${txt} ${GRIS}·${NC} ${lic_col}${lic} $(T t_ui_days)${NC}"
+        fi
+    fi
+    printf '%s' "$txt"
+}
+
+cab_negocio(){
+    # cab_negocio ONLINE -> fila del negocio: usuarios · online · por vencer · bloqueados · trafico
+    local ONLINE="$1" ven_n vc oc bc
+    ven_n=$(( GS_VENC + GS_HOY + GS_PRONTO ))
+    vc=$GRIS; (( GS_PRONTO > 0 )) && vc=$AMARILLO; (( GS_VENC + GS_HOY > 0 )) && vc=$ROJO
+    oc=$GRIS; (( ONLINE > 0 )) && oc=$VERDE
+    bc=$GRIS; (( GS_BLOQ > 0 )) && bc=$ROJO
+    if (( UI_W >= 56 )); then
+        FR_TXT "  👥 ${BLANCO}${GS_USERS}${NC} ${GRIS}·${NC} 🟢 ${oc}${ONLINE}${NC} $(T t_ui_on) ${GRIS}·${NC} ⏳ ${vc}${ven_n}${NC} $(T t_ui_venc) ${GRIS}·${NC} 🚫 ${bc}${GS_BLOQ}${NC} ${GRIS}·${NC} 📈 ${CIAN}${GS_TRAF}${NC}"
+    elif (( UI_W >= 50 )); then
+        FR_TXT "  👥 ${BLANCO}${GS_USERS}${NC} ${GRIS}·${NC} 🟢 ${oc}${ONLINE}${NC} $(T t_ui_on) ${GRIS}·${NC} ⏳ ${vc}${ven_n}${NC} ${GRIS}·${NC} 🚫 ${bc}${GS_BLOQ}${NC} ${GRIS}·${NC} 📈 ${CIAN}${GS_TRAF}${NC}"
+    else
+        FR_TXT "  👥 ${BLANCO}${GS_USERS}${NC} 🟢 ${oc}${ONLINE}${NC} ⏳ ${vc}${ven_n}${NC} 🚫 ${bc}${GS_BLOQ}${NC} 📈 ${CIAN}${GS_TRAF}${NC}"
+    fi
+}
+
 cabecera(){
+    # CAB_FULL=1 cabecera -> completa (solo menu principal). Sin la variable -> compacta (submenus).
+    if [[ "${CAB_FULL:-0}" == 1 ]]; then cabecera_completa; else cabecera_mini; fi
+}
+
+cabecera_mini(){
+    # 5 lineas: titulo+licencia, negocio, servicios (y alerta de cuotas si hay). Deja sitio al menu y al teclado.
+    local ONLINE
     limpiar_pantalla
     ui_init
-    local os up ram_t=0 ram_u=0 ram_p=0 cpu dsk_p=0 dsk_u="" dsk_t="" ONLINE lic lic_col lic_txt bw ven_n vc oc bc n
+    ONLINE=$(online_total)
+    ghost_stats_refrescar
+    FR_TOP
+    # Con terminal angosta se omite la version para que la licencia no se corte
+    if (( UI_W >= 52 )); then FR_TXT " 👻 ${BLANCO}GHOST PANEL${NC} ${GRIS}v${GHOST_VER}${NC} 🔑 $(cab_licencia_txt)"
+    else FR_TXT " 👻 ${BLANCO}GHOST PANEL${NC} 🔑 $(cab_licencia_txt)"; fi
+    cab_negocio "$ONLINE"
+    FR_TXT "  $(estado_servicios_min)"
+    (( GS_ALTO > 0 )) && FR_TXT "  🔶 ${AMARILLO}${GS_ALTO} $(T t_ui_alto)${NC}"
+    FR_BOT
+}
+
+cabecera_completa(){
+    limpiar_pantalla
+    ui_init
+    local os up ram_t=0 ram_u=0 ram_p=0 cpu dsk_p=0 dsk_u="" dsk_t="" ONLINE lic_txt bw n
     os=$( (. /etc/os-release 2>/dev/null; echo "${NAME:-Linux} ${VERSION_ID:-}") )
     up=$(awk '{s=int($1); d=int(s/86400); h=int((s%86400)/3600); m=int((s%3600)/60);
                if (d>0) printf "%dd %dh", d, h; else if (h>0) printf "%dh %dm", h, m; else printf "%dm", m}' /proc/uptime 2>/dev/null)
@@ -1234,13 +1310,7 @@ cabecera(){
     dsk_p=${dsk_p:-0}
     ONLINE=$(online_total)
     ghost_stats_refrescar
-    # Licencia con semaforo: verde, amarillo <=7 dias, rojo <=3 dias
-    lic_txt="${VERDE}${LICENSE_OK:--}${NC}"
-    if [[ -n "${LICENSE_EXP:-}" && "${LICENSE_EXP:-0}" != "0" ]]; then
-        lic=$(( (LICENSE_EXP - $(date +%s)) / 86400 )); (( lic < 0 )) && lic=0
-        lic_col=$VERDE; (( lic <= 7 )) && lic_col=$AMARILLO; (( lic <= 3 )) && lic_col=$ROJO
-        lic_txt="${lic_txt} ${GRIS}·${NC} ${lic_col}${lic} $(T t_ui_days)${NC}"
-    fi
+    lic_txt=$(cab_licencia_txt)
     n=$(( UI_W - 14 )); (( n > 30 )) && n=30
     FR_TOP
     FR_TXT " $(ghost_logo_linea 0)   ${BLANCO}G H O S T   P A N E L${NC}"
@@ -1265,18 +1335,7 @@ cabecera(){
         ui_gauge "CPU" "$cpu"
         ui_gauge "$(T t_disco)" "$dsk_p" "${dsk_u:-?} / ${dsk_t:-?}"
     fi
-    # Negocio: usuarios · online · por vencer (<=3 dias o vencidos) · bloqueados · trafico acumulado
-    ven_n=$(( GS_VENC + GS_HOY + GS_PRONTO ))
-    vc=$GRIS; (( GS_PRONTO > 0 )) && vc=$AMARILLO; (( GS_VENC + GS_HOY > 0 )) && vc=$ROJO
-    oc=$GRIS; (( ONLINE > 0 )) && oc=$VERDE
-    bc=$GRIS; (( GS_BLOQ > 0 )) && bc=$ROJO
-    if (( UI_W >= 56 )); then
-        FR_TXT "  👥 ${BLANCO}${GS_USERS}${NC} ${GRIS}·${NC} 🟢 ${oc}${ONLINE}${NC} $(T t_ui_on) ${GRIS}·${NC} ⏳ ${vc}${ven_n}${NC} $(T t_ui_venc) ${GRIS}·${NC} 🚫 ${bc}${GS_BLOQ}${NC} ${GRIS}·${NC} 📈 ${CIAN}${GS_TRAF}${NC}"
-    elif (( UI_W >= 50 )); then
-        FR_TXT "  👥 ${BLANCO}${GS_USERS}${NC} ${GRIS}·${NC} 🟢 ${oc}${ONLINE}${NC} $(T t_ui_on) ${GRIS}·${NC} ⏳ ${vc}${ven_n}${NC} ${GRIS}·${NC} 🚫 ${bc}${GS_BLOQ}${NC} ${GRIS}·${NC} 📈 ${CIAN}${GS_TRAF}${NC}"
-    else
-        FR_TXT "  👥 ${BLANCO}${GS_USERS}${NC} 🟢 ${oc}${ONLINE}${NC} ⏳ ${vc}${ven_n}${NC} 🚫 ${bc}${GS_BLOQ}${NC} 📈 ${CIAN}${GS_TRAF}${NC}"
-    fi
+    cab_negocio "$ONLINE"
     FR_TXT "  $(estado_servicios_min)"
     (( GS_ALTO > 0 )) && FR_TXT "  🔶 ${AMARILLO}${GS_ALTO} $(T t_ui_alto)${NC}"
     FR_BOT
@@ -1526,11 +1585,10 @@ banner_html_http_custom(){
     printf '%s' \
         "$(banner_l_gruesa)" \
         '<p style="text-align:center;"><font color="#00FF7F"><b>👻 G H O S T   P A N E L 👻</b></font></p>' \
-        '<p style="text-align:center;"><font color="#9E9E9E"><i>--- CONEXION VIP ESTABLE ---</i></font></p>' \
+        '<p style="text-align:center;"><font color="#9E9E9E"><i>--- CONEXIÓN VIP ESTABLE ---</i></font></p>' \
         "$(banner_l_gruesa)" \
-        "$(banner_fila "👤 USUARIO" "#00BFFF" "USER")" \
-        "$(banner_fila "📅 VENCIMIENTO" "#FFD700" "EXP")" \
-        "$(banner_fila "⏳ RESTANTES" "#FF8C00" "DAYS")" \
+        "$(banner_p "$(banner_seg "#FFFFFF" "👤 ")$(banner_seg "#00BFFF" "USER")")" \
+        "$(banner_p "$(banner_seg "#FFFFFF" "📅 ")$(banner_seg "#FFD700" "EXP")$(banner_sep)$(banner_seg "#FFFFFF" "⏳ ")$(banner_seg "#FF8C00" "DAYS")$(banner_seg "#FFFFFF" " días")")" \
         "$(banner_l_fina)" \
         '<p style="text-align:center;"><font color="#FF4444"><b>WARN</b></font></p>' \
         "$(banner_soporte_fila)" \
@@ -1805,13 +1863,31 @@ trafico_regla_usuario(){
 BANNERS_DIR='/etc/vps-banners'
 
 banner_barra(){
-    # banner_barra PORCENTAJE "#COLOR" -> barra de 10 segmentos en HTML (relleno coloreado + resto gris).
+    # banner_barra PORCENTAJE "#COLOR" [SEGMENTOS=10] -> barra en HTML (relleno coloreado + resto gris).
     # Si algun cliente no pinta ▰▱, cambia estos dos caracteres (p. ej. por ■ □).
-    local p="${1:-0}" f
+    local p="${1:-0}" n="${3:-10}" f
     [[ "$p" =~ ^[0-9]+$ ]] || p=0
     (( p > 100 )) && p=100
-    f=$(( (p + 5) / 10 ))
-    printf '<font color="%s">%s</font><font color="#555555">%s</font>' "$2" "$(ui_rep ▰ "$f")" "$(ui_rep ▱ $(( 10 - f )))"
+    f=$(( (p * n + 50) / 100 ))
+    printf '<font color="%s">%s</font><font color="#555555">%s</font>' "$2" "$(ui_rep ▰ "$f")" "$(ui_rep ▱ $(( n - f )))"
+}
+banner_seg(){ printf '<font color="%s"><b>%s</b></font>' "$1" "$2"; }      # banner_seg "#COLOR" "texto"
+banner_sep(){ printf '<font color="#555555"> · </font>'; }
+banner_hora(){
+    # HH:MM en la zona elegida (Banner -> Zona horaria). Sin zona elegida agrega la del VPS: "UTC" o "UTC-3".
+    local tz z h m lbl; tz=$(ghost_conf_get TZ_VISTA)
+    if [[ -n "$tz" && -f "/usr/share/zoneinfo/$tz" ]]; then TZ="$tz" date '+%H:%M'; return 0; fi
+    z=$(date +%z); lbl="UTC"
+    if [[ "$z" != "+0000" ]]; then
+        h=$(( 10#${z:1:2} )); m=${z:3:2}; lbl="UTC${z:0:1}${h}"; [[ "$m" != "00" ]] && lbl+=":$m"
+    fi
+    echo "$(date +%H:%M) $lbl"
+}
+banner_soporte_txt(){
+    # Texto de soporte configurado (vacio si se quito la linea)
+    local S; S=$(ghost_conf_get SUPPORT); S=${S:-@JorgeBarrios}
+    [[ "$S" == "NONE" ]] && return 0
+    printf '%s' "$S"
 }
 
 ghost_conf_get(){ awk -F= -v k="$1" '$1==k{sub(/^[^=]*=/,""); print; exit}' /etc/ghost-panel.conf 2>/dev/null; }
@@ -1823,15 +1899,15 @@ ghost_conf_set(){
 plan_dias_set(){ mkdir -p /etc/vps-plan; echo "$2" > "/etc/vps-plan/$1"; }   # dias del plan vigente (para la barra de vigencia)
 
 # --- piezas del banner (siempre UNA linea; solo tags permitidos por HTTP Custom) ---
-# Las lineas miden lo mismo (23 caracteres): un poco mas anchas que la fila de texto mas larga, asi el
+# Las lineas miden lo mismo (27 caracteres): un poco mas anchas que la fila de texto mas larga, asi el
 # banner "cierra" bien arriba y abajo. Los textos fijos no deben contener USER, EXP, DAYS ni WARN.
-banner_l_gruesa(){ printf '<p style="text-align:center;"><font color="#00FFFF"><b>%s</b></font></p>' "═══════════════════════"; }
-banner_l_fina(){ printf '<p style="text-align:center;"><font color="#555555">%s</font></p>' "───────────────────────"; }
+banner_l_gruesa(){ printf '<p style="text-align:center;"><font color="#00FFFF"><b>%s</b></font></p>' "═══════════════════════════"; }
+banner_l_fina(){ printf '<p style="text-align:center;"><font color="#555555">%s</font></p>' "───────────────────────────"; }
 banner_p(){ printf '<p style="text-align:center;">%s</p>' "$1"; }
 banner_soporte_fila(){
-    local S; S=$(ghost_conf_get SUPPORT); S=${S:-@JorgeBarrios}
-    [[ "$S" == "NONE" ]] && return 0
-    banner_fila "💬 SOPORTE" "#00BFFF" "$S"
+    local S; S=$(banner_soporte_txt)
+    [[ -n "$S" ]] && banner_p "$(banner_seg "#FFFFFF" "💬 ")$(banner_seg "#00BFFF" "$S")"
+    return 0
 }
 
 banner_fila(){
@@ -1841,78 +1917,84 @@ banner_fila(){
 }
 
 banner_html_para_usuario(){
-    # banner_html_para_usuario USUARIO -> HTML con datos reales (UNA linea).
+    # banner_html_para_usuario USUARIO -> HTML compacto con datos reales (UNA linea, 13 filas).
     # Estado/alerta: VENCIDA y SIN DATOS (sev 3) > POR VENCER (sev 2) > consumo >= 80% (sev 1).
-    local U="$1" EXPISO D="" EXP_TXT DAYS_TXT DAYS_ROW="" PLAN_D PLAN_TXT CONN_TXT PCT_D BAR_COL
-    local LIM_GB="" USED_B USED_TXT LIM_B=0 REST_B REST_TXT="" REST_COLOR="#7CFC00" USED_PCT=0 TRAF_ROWS
-    local ST_ICON="✅" ST_TXT="ACTIVA" ST_COL="#00FF7F" ALERT="" ALERT_COL="#FFD700" SEV=0 ALERT_ROW="" SUP_ROW
+    # Solo tags permitidos por HTTP Custom; ningun texto fijo contiene USER, EXP, DAYS ni WARN.
+    local U="$1" EXPISO D="" PLAN_D PCT_D BAR_COL DAYS_TXT EXP_FMT CONN_TXT LIM_GB USED_B USED_TXT
+    local LIM_B=0 REST_B REST_TXT REST_COLOR="#7CFC00" USED_PCT=0 PCT10=0 PCT_TXT SUP HORA
+    local ST_ICON="✅" ST_TXT="ACTIVA" ST_COL="#00FF7F" ALERT="" ALERT_COL="#FFD700" SEV=0
+    local R_VIG R_PLAN R_TRAF R_REST="" R_ALERT="" R_SUP B W="#FFFFFF"
     EXPISO=$(usuario_fecha_cuenta "$U")
     # Dias del plan (se guardan al crear/renovar); sin dato -> escala de 30 dias para la barra
     PLAN_D=$(tr -dc '0-9' 2>/dev/null < "/etc/vps-plan/$U"); PLAN_D=${PLAN_D:0:5}
     if [[ -n "$PLAN_D" ]] && (( 10#$PLAN_D > 0 )); then PLAN_D=$((10#$PLAN_D)); else PLAN_D=""; fi
+    # --- Vigencia ---
     if [[ "$EXPISO" == "never" ]]; then
-        EXP_TXT="Sin vencimiento"; DAYS_TXT="--"
+        R_VIG=$(banner_p "$(banner_seg "$W" "📅 ")$(banner_seg "#FFD700" "Sin vencimiento")")
     else
-        EXP_TXT="$EXPISO"; D=$(dias_hasta "$EXPISO")
+        EXP_FMT="${EXPISO:8:2}/${EXPISO:5:2}/${EXPISO:0:4}"; D=$(dias_hasta "$EXPISO")
         PCT_D=$(( (D < 0 ? 0 : D) * 100 / ${PLAN_D:-30} )); (( PCT_D > 100 )) && PCT_D=100
         BAR_COL="#00FF7F"; (( PCT_D <= 50 )) && BAR_COL="#FF8C00"; (( PCT_D <= 20 )) && BAR_COL="#FF4444"
-        DAYS_ROW=$(banner_p "$(banner_barra "$PCT_D" "$BAR_COL")")
+        B=$(banner_barra "$PCT_D" "$BAR_COL" 6)
         if (( D < 0 )); then
-            DAYS_TXT="0 dias"; SEV=3; ST_ICON="⛔"; ST_TXT="VENCIDA"; ST_COL="#FF4444"
+            DAYS_TXT="0 días"; SEV=3; ST_ICON="⛔"; ST_TXT="VENCIDA"; ST_COL="#FF4444"
             ALERT="⛔ Cuenta vencida"; ALERT_COL="#FF4444"
         else
-            DAYS_TXT="$D dias"; (( D == 1 )) && DAYS_TXT="1 dia"
+            DAYS_TXT="$D días"; (( D == 1 )) && DAYS_TXT="1 día"
             if (( D <= 3 )); then
                 SEV=2; ST_ICON="🔶"; ST_TXT="POR VENCER"; ST_COL="#FFD700"
                 ALERT="🔶 Vence en $DAYS_TXT"; (( D == 0 )) && ALERT="🔶 Vence hoy"
             fi
         fi
+        R_VIG=$(banner_p "$(banner_seg "$W" "📅 ")$(banner_seg "#FFD700" "$EXP_FMT")$(banner_sep)$(banner_seg "$W" "⏳ ")$(banner_seg "#FF8C00" "$DAYS_TXT") $B")
     fi
     # --- Conexiones: archivo ausente o 0 = sin limite (igual que el limiter) ---
     CONN_TXT=$(tr -dc '0-9' 2>/dev/null < "/etc/vps-limits/$U"); CONN_TXT=${CONN_TXT:0:6}
-    if [[ -n "$CONN_TXT" ]] && (( 10#$CONN_TXT > 0 )); then CONN_TXT=$((10#$CONN_TXT)); else CONN_TXT="Sin limite"; fi
+    if [[ -n "$CONN_TXT" ]] && (( 10#$CONN_TXT > 0 )); then
+        CONN_TXT=$((10#$CONN_TXT)); if (( CONN_TXT == 1 )); then CONN_TXT="1 conexión"; else CONN_TXT="$CONN_TXT conexiones"; fi
+    else CONN_TXT="conexiones sin límite"; fi
     # --- Trafico (SSH + Xray) y cuota en GB: archivo ausente o 0 = sin limite ---
     USED_B=$(trafico_usuario_bytes "$U"); USED_TXT=$(fmt_bytes "$USED_B")
     LIM_GB=$(tr -dc '0-9' 2>/dev/null < "/etc/vps-trafico/$U"); LIM_GB=${LIM_GB:0:6}
-    TRAF_ROWS=""
     if [[ -n "$LIM_GB" ]] && (( 10#$LIM_GB > 0 )); then
-        LIM_GB=$((10#$LIM_GB)); PLAN_TXT="${LIM_GB} GB"
-        LIM_B=$(( LIM_GB * 1073741824 )); REST_B=$(( LIM_B - USED_B )); (( REST_B < 0 )) && REST_B=0
+        LIM_GB=$((10#$LIM_GB)); LIM_B=$(( LIM_GB * 1073741824 )); REST_B=$(( LIM_B - USED_B )); (( REST_B < 0 )) && REST_B=0
         REST_TXT=$(fmt_bytes "$REST_B")
         USED_PCT=$(( USED_B * 100 / LIM_B )); (( USED_PCT > 100 )) && USED_PCT=100
+        # Porcentaje con un decimal por debajo del 10% (50 MB de 10 GB -> 0.5%, no "0%")
+        PCT10=$(( USED_B * 1000 / LIM_B ))
+        if (( USED_B == 0 )); then PCT_TXT="0%"
+        elif (( PCT10 < 100 )); then (( PCT10 < 1 )) && PCT10=1; PCT_TXT="$(( PCT10 / 10 )).$(( PCT10 % 10 ))%"
+        else PCT_TXT="${USED_PCT}%"; fi
         BAR_COL="#00FF7F"; (( USED_PCT >= 70 )) && BAR_COL="#FF8C00"; (( USED_PCT >= 90 )) && BAR_COL="#FF4444"
         (( REST_B * 10 <= LIM_B )) && REST_COLOR="#FF4444"       # queda 10% o menos -> rojo
-        TRAF_ROWS="$(banner_fila "📊 TRAFICO USADO" "#DA70D6" "$USED_TXT")$(banner_p "$(banner_barra "$USED_PCT" "$BAR_COL") <font color=\"#DA70D6\"><b>${USED_PCT}%</b></font>")$(banner_fila "🔋 TRAFICO RESTANTE" "$REST_COLOR" "$REST_TXT")"
+        R_PLAN=$(banner_p "$(banner_seg "$W" "📦 ")$(banner_seg "#40E0D0" "${LIM_GB} GB")$(banner_sep)$(banner_seg "$W" "🔌 ")$(banner_seg "#00FF7F" "$CONN_TXT")")
+        R_TRAF=$(banner_p "$(banner_seg "$W" "📊 ")$(banner_seg "#DA70D6" "$USED_TXT")$(banner_seg "$W" " de ")$(banner_seg "#40E0D0" "${LIM_GB} GB") $(banner_barra "$USED_PCT" "$BAR_COL" 6) $(banner_seg "#DA70D6" "$PCT_TXT")")
+        R_REST=$(banner_p "$(banner_seg "$W" "🔋 Restante ")$(banner_seg "$REST_COLOR" "$REST_TXT")")
         if (( USED_B >= LIM_B )); then
             (( SEV < 3 )) && { SEV=3; ST_ICON="⛔"; ST_TXT="SIN DATOS"; ST_COL="#FF4444"; ALERT="⛔ Cuota agotada"; ALERT_COL="#FF4444"; }
         elif (( USED_PCT >= 80 && SEV < 1 )); then
             SEV=1; ALERT="🔶 Consumo al ${USED_PCT}%"; (( USED_PCT >= 90 )) && ALERT_COL="#FF8C00"
         fi
     else
-        PLAN_TXT="Sin limite de datos"
-        TRAF_ROWS="$(banner_fila "📊 TRAFICO USADO" "#DA70D6" "$USED_TXT")"
+        R_PLAN=$(banner_p "$(banner_seg "$W" "📦 ")$(banner_seg "#40E0D0" "Datos sin límite")$(banner_sep)$(banner_seg "$W" "🔌 ")$(banner_seg "#00FF7F" "$CONN_TXT")")
+        R_TRAF=$(banner_p "$(banner_seg "$W" "📊 ")$(banner_seg "#DA70D6" "$USED_TXT usados")")
     fi
-    [[ -n "$PLAN_D" ]] && PLAN_TXT+=" · ${PLAN_D} dias"
-    [[ -n "$ALERT" ]] && ALERT_ROW=$(banner_p "<font color=\"$ALERT_COL\"><b>${ALERT}</b></font>")
-    SUP_ROW=$(banner_soporte_fila)
+    [[ -n "$ALERT" ]] && R_ALERT=$(banner_p "$(banner_seg "$ALERT_COL" "$ALERT")")
+    SUP=$(banner_soporte_txt); HORA=$(banner_hora)
+    if [[ -n "$SUP" ]]; then
+        R_SUP=$(banner_p "$(banner_seg "$W" "💬 ")$(banner_seg "#00BFFF" "$SUP")$(banner_sep)<font color=\"#9E9E9E\">🕒 ${HORA}</font>")
+    else
+        R_SUP=$(banner_p "<font color=\"#9E9E9E\">🕒 ${HORA}</font>")
+    fi
     printf '%s' \
         "$(banner_l_gruesa)" \
         '<p style="text-align:center;"><font color="#00FF7F"><b>👻 G H O S T   P A N E L 👻</b></font></p>' \
-        '<p style="text-align:center;"><font color="#9E9E9E"><i>--- CONEXION VIP ESTABLE ---</i></font></p>' \
+        '<p style="text-align:center;"><font color="#9E9E9E"><i>--- CONEXIÓN VIP ESTABLE ---</i></font></p>' \
         "$(banner_l_gruesa)" \
-        "$(banner_fila "👤 USUARIO" "#00BFFF" "$U")" \
-        "$(banner_fila "$ST_ICON ESTADO" "$ST_COL" "$ST_TXT")" \
-        "$(banner_fila "📅 VENCIMIENTO" "#FFD700" "$EXP_TXT")" \
-        "$(banner_fila "⏳ RESTANTES" "#FF8C00" "$DAYS_TXT")" \
-        "$DAYS_ROW" \
+        "$(banner_p "$(banner_seg "$W" "👤 ")$(banner_seg "#00BFFF" "$U")$(banner_sep)$(banner_seg "$ST_COL" "$ST_ICON $ST_TXT")")" \
+        "$R_VIG" "$R_PLAN" "$R_TRAF" "$R_REST" \
         "$(banner_l_fina)" \
-        "$(banner_fila "🔌 LIMITE CONEXIONES" "#00FF7F" "$CONN_TXT")" \
-        "$(banner_fila "📦 PLAN" "#40E0D0" "$PLAN_TXT")" \
-        "$TRAF_ROWS" \
-        "$(banner_l_fina)" \
-        "$ALERT_ROW" \
-        "$SUP_ROW" \
-        "$(banner_p "<font color=\"#9E9E9E\">🕒 Actualizado $(date '+%d/%m %H:%M %Z')</font>")" \
+        "$R_ALERT" "$R_SUP" \
         '<p style="text-align:center;"><font color="#7CFC00"><i>🚀 Disfruta de la mejor velocidad 🚀</i></font></p>' \
         "$(banner_l_gruesa)"
 }
@@ -2027,6 +2109,34 @@ banner_soporte_menu(){
     PAUSA
 }
 
+banner_tz_menu(){
+    local cur OPC TZN i re lista=(America/Argentina/Buenos_Aires America/Mexico_City America/Bogota America/Lima America/Santiago America/Sao_Paulo America/New_York Europe/Madrid UTC)
+    re='^[A-Za-z0-9_+/-]{1,40}$'
+    cur=$(ghost_conf_get TZ_VISTA)
+    echo -e "${CIAN}--- ZONA HORARIA ---${NC}"
+    echo "  Hora que ven tus clientes en el banner y que muestra el panel."
+    echo "  Ahora: ${cur:-la del VPS ($(date +%Z))}"
+    echo
+    i=0; for TZN in "${lista[@]}"; do i=$((i+1)); printf '  %b[%d]%b %s\n' "$CIAN" "$i" "$NC" "$TZN"; done
+    printf '  %b[10]%b Otra (escribirla)\n  %b[0]%b Usar la del VPS\n' "$CIAN" "$NC" "$ROJO" "$NC"
+    read -r -p "  > " OPC
+    case "$OPC" in
+        0) ghost_conf_set TZ_VISTA ""; TZN="" ;;
+        10) read -r -p "  Zona (ej: America/Lima): " TZN ;;
+        [1-9]) TZN="${lista[$((OPC-1))]}" ;;
+        *) INFO "Sin cambios."; PAUSA; return ;;
+    esac
+    if [[ -n "$TZN" ]]; then
+        if [[ ! "$TZN" =~ $re || ! -f "/usr/share/zoneinfo/$TZN" ]]; then
+            ERR "Zona no valida (o falta el paquete tzdata)."; PAUSA; return
+        fi
+        ghost_conf_set TZ_VISTA "$TZN"
+    fi
+    banner_todos_actualizar >/dev/null 2>&1 || true
+    OK "Zona horaria: ${TZN:-la del VPS}. Ahora el banner muestra $(banner_hora)."
+    PAUSA
+}
+
 menu_banner(){
     while true; do
         cabecera
@@ -2036,6 +2146,7 @@ menu_banner(){
         FR_OPT 3 "🗑 $(T t_banner_del)" "" ""
         FR_OPT 4 "📡 $(T t_banner_cu)" "" ""
         FR_OPT 5 "💬 $(T t_banner_sop)" "" ""
+        FR_OPT 6 "🕒 $(T t_banner_tz)" "" ""
         FR_OPT 0 "🔙 $(T t_volver)" "" ""
         FR_BOT
         PROMPT
@@ -2045,6 +2156,7 @@ menu_banner(){
             3) banner_eliminar ;;
             4) banner_con_checkuser ;;
             5) banner_soporte_menu ;;
+            6) banner_tz_menu ;;
             0) break ;;
             *) ERR "$(T t_opinv)"; sleep 1 ;;
         esac
@@ -3171,8 +3283,9 @@ trafico_cron_instalar(){
         echo 'declare -A TRAF_CACHE=(); TRAF_BATCH=0'
         for FN in vps_log usuario_protegido ui_rep fmt_bytes xray_stats_todos trafico_cache_cargar \
                   trafico_usuario_bytes trafico_excedido trafico_bloquear_excedidos usuario_fecha_cuenta \
-                  dias_hasta ghost_conf_get banner_barra banner_l_gruesa banner_l_fina banner_p banner_fila \
-                  banner_soporte_fila banner_html_para_usuario banner_usuario_actualizar trafico_auto_ciclo; do
+                  dias_hasta ghost_conf_get banner_barra banner_seg banner_sep banner_hora banner_l_gruesa banner_l_fina \
+                  banner_p banner_fila banner_soporte_txt banner_soporte_fila banner_html_para_usuario \
+                  banner_usuario_actualizar trafico_auto_ciclo; do
             declare -f "$FN"
         done
         echo 'trafico_auto_ciclo'
@@ -4764,13 +4877,15 @@ menu_herramientas(){
         FR_OPT 1 "🌍 $(T t_global)" 4 "🔄 $(T t_autoupdate)"
         FR_OPT 2 "🚀 $(T t_automenu_on)" 5 "📡 $(T t_checkuser)"
         FR_OPT 3 "🛑 $(T t_automenu_off)" 6 "🔤 $(T t_idioma)"
-        FR_OPT 7 "🎨 $(T t_tema)" "" ""
+        UI_KCOL[8]="$ROJO"     # Desinstalar siempre en rojo
+        FR_OPT 7 "🎨 $(T t_tema)" 8 "🔥 $(T t_desinst_c)"
+        UI_KCOL=()
         FR_OPT 0 "🔙 $(T t_volver)" "" ""
         FR_BOT
         PROMPT
         case "$OP" in
             1) instalar_comando_global ;; 2) auto_menu ;; 3) quitar_auto_menu ;;
-            4) auto_update ;; 5) menu_checkuser ;; 7) menu_tema ;;
+            4) auto_update ;; 5) menu_checkuser ;; 7) menu_tema ;; 8) desinstalar_ghost ;;
             6) rm -f /etc/vps-manager.lang; seleccionar_idioma; OK "Idioma: $IDIOMA / Language: $IDIOMA"; PAUSA ;;
             0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
         esac
@@ -5367,31 +5482,28 @@ if [[ "$(readlink -f "$0" 2>/dev/null)" != "$(readlink -f "$VPSMGR_DEST" 2>/dev/
 fi
 
 while true; do
-    cabecera
-    ui_crumb
+    CAB_FULL=1 cabecera
     ui_box_top "$(T t_menu_principal)"
     for _i in 1 2 3 4 5 6 7 8 9; do UI_KCOL[$_i]="\033[1;38;5;${TH_ITEMS[_i-1]}m"; done   # tonos del tema
     FR_OPT 1 "👤 $(T t_usuarios)" 2 "🔌 $(T t_protocolos)"
     FR_OPT 3 "🔰 $(T t_seguridad)" 4 "🔧 $(T t_sistema)"
     FR_OPT 5 "🧰 $(T t_herramientas)" 6 "🌐 $(T t_webmin)"
     FR_OPT 7 "💾 $(T t_backup)" 8 "🩺 $(T t_diagnostico)"
-    FR_OPT 9 "🔥 $(T t_desinst)" "" ""
     FR_TXT ""
     FR_OPT 0 "🚪 $(T t_salir)" "" ""
     FR_BOT
     UI_KCOL=()
-    echo -e "  ${GRIS}$(T t_servidor_id) ${VERDE}$(machine_hash)${GRIS}  ·  $(date '+%d/%m/%Y %H:%M')${NC}"
+    echo -e "  ${GRIS}$(T t_servidor_id) ${VERDE}$(machine_hash)${GRIS}  ·  $(ghost_fecha)${NC}"
     PROMPT
     case "$OP" in
-        1) menu_usuarios ;;
-        2) menu_protocolos ;;
-        3) menu_seguridad ;;
-        4) menu_sistema ;;
-        5) menu_herramientas ;;
-        6) menu_webmin ;;
-        7) menu_backup ;;
-        8) diagnostico ;;
-        9) desinstalar_ghost ;;
+        1) seccion 1 menu_usuarios ;;
+        2) seccion 2 menu_protocolos ;;
+        3) seccion 3 menu_seguridad ;;
+        4) seccion 4 menu_sistema ;;
+        5) seccion 5 menu_herramientas ;;
+        6) seccion 6 menu_webmin ;;
+        7) seccion 7 menu_backup ;;
+        8) seccion 8 diagnostico ;;
         0) echo -e "👻 ${VERDE}Hasta luego!${NC}"; exit 0 ;;
         *) ERR "$(T t_opinv)"; sleep 1 ;;
     esac
