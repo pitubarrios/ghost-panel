@@ -3,7 +3,12 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 3.9.2
+#  Version: 3.9.3
+#  Cambios 3.9.3:
+#    - Banner: la hora SOLO se muestra si se eligio zona horaria (antes mostraba UTC a los clientes);
+#      el panel la pregunta una vez al abrir y se cambia en Banner -> [6] Zona horaria
+#    - Banner: el titulo ya no se ve "GHOSTPANEL" (HTML colapsaba los espacios) -> "G H O S T · P A N E L"
+#  Cambios 3.9.2 (diseño):
 #  Cambios 3.9.2 (diseño):
 #    - Submenus con cabecera compacta (5 lineas); la completa solo en el menu principal
 #    - Titulo unico "Inicio › SECCION" y submenus pintados con el color de su seccion
@@ -100,7 +105,7 @@ tema_guardar(){
     echo "THEME=$1" >> /etc/ghost-panel.conf
 }
 tema_cargar
-GHOST_VER='3.9.2'
+GHOST_VER='3.9.3'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -1584,7 +1589,7 @@ banner_html_http_custom(){
     # WARN va solo en su renglon: si viene vacio no queda ningun rotulo huerfano.
     printf '%s' \
         "$(banner_l_gruesa)" \
-        '<p style="text-align:center;"><font color="#00FF7F"><b>👻 G H O S T   P A N E L 👻</b></font></p>' \
+        '<p style="text-align:center;"><font color="#00FF7F"><b>👻 G H O S T · P A N E L 👻</b></font></p>' \
         '<p style="text-align:center;"><font color="#9E9E9E"><i>--- CONEXIÓN VIP ESTABLE ---</i></font></p>' \
         "$(banner_l_gruesa)" \
         "$(banner_p "$(banner_seg "#FFFFFF" "👤 ")$(banner_seg "#00BFFF" "USER")")" \
@@ -1874,14 +1879,20 @@ banner_barra(){
 banner_seg(){ printf '<font color="%s"><b>%s</b></font>' "$1" "$2"; }      # banner_seg "#COLOR" "texto"
 banner_sep(){ printf '<font color="#555555"> · </font>'; }
 banner_hora(){
-    # HH:MM en la zona elegida (Banner -> Zona horaria). Sin zona elegida agrega la del VPS: "UTC" o "UTC-3".
+    # HH:MM en la zona elegida (Banner -> Zona horaria). Sin zona elegida NO devuelve nada: mostrar a los
+    # clientes la hora UTC del VPS confunde mas que ayuda. "VPS" = hora del VPS con su etiqueta (UTC, UTC-3...).
     local tz z h m lbl; tz=$(ghost_conf_get TZ_VISTA)
-    if [[ -n "$tz" && -f "/usr/share/zoneinfo/$tz" ]]; then TZ="$tz" date '+%H:%M'; return 0; fi
-    z=$(date +%z); lbl="UTC"
-    if [[ "$z" != "+0000" ]]; then
-        h=$(( 10#${z:1:2} )); m=${z:3:2}; lbl="UTC${z:0:1}${h}"; [[ "$m" != "00" ]] && lbl+=":$m"
-    fi
-    echo "$(date +%H:%M) $lbl"
+    case "$tz" in
+        "") ;;
+        VPS)
+            z=$(date +%z); lbl="UTC"
+            if [[ "$z" != "+0000" ]]; then
+                h=$(( 10#${z:1:2} )); m=${z:3:2}; lbl="UTC${z:0:1}${h}"; [[ "$m" != "00" ]] && lbl+=":$m"
+            fi
+            echo "$(date +%H:%M) $lbl" ;;
+        *) [[ -f "/usr/share/zoneinfo/$tz" ]] && TZ="$tz" date '+%H:%M' ;;
+    esac
+    return 0
 }
 banner_soporte_txt(){
     # Texto de soporte configurado (vacio si se quito la linea)
@@ -1980,15 +1991,17 @@ banner_html_para_usuario(){
         R_TRAF=$(banner_p "$(banner_seg "$W" "📊 ")$(banner_seg "#DA70D6" "$USED_TXT usados")")
     fi
     [[ -n "$ALERT" ]] && R_ALERT=$(banner_p "$(banner_seg "$ALERT_COL" "$ALERT")")
-    SUP=$(banner_soporte_txt); HORA=$(banner_hora)
-    if [[ -n "$SUP" ]]; then
+    SUP=$(banner_soporte_txt); HORA=$(banner_hora); R_SUP=""
+    if [[ -n "$SUP" && -n "$HORA" ]]; then
         R_SUP=$(banner_p "$(banner_seg "$W" "💬 ")$(banner_seg "#00BFFF" "$SUP")$(banner_sep)<font color=\"#9E9E9E\">🕒 ${HORA}</font>")
-    else
+    elif [[ -n "$SUP" ]]; then
+        R_SUP=$(banner_p "$(banner_seg "$W" "💬 ")$(banner_seg "#00BFFF" "$SUP")")
+    elif [[ -n "$HORA" ]]; then
         R_SUP=$(banner_p "<font color=\"#9E9E9E\">🕒 ${HORA}</font>")
     fi
     printf '%s' \
         "$(banner_l_gruesa)" \
-        '<p style="text-align:center;"><font color="#00FF7F"><b>👻 G H O S T   P A N E L 👻</b></font></p>' \
+        '<p style="text-align:center;"><font color="#00FF7F"><b>👻 G H O S T · P A N E L 👻</b></font></p>' \
         '<p style="text-align:center;"><font color="#9E9E9E"><i>--- CONEXIÓN VIP ESTABLE ---</i></font></p>' \
         "$(banner_l_gruesa)" \
         "$(banner_p "$(banner_seg "$W" "👤 ")$(banner_seg "#00BFFF" "$U")$(banner_sep)$(banner_seg "$ST_COL" "$ST_ICON $ST_TXT")")" \
@@ -2114,27 +2127,44 @@ banner_tz_menu(){
     re='^[A-Za-z0-9_+/-]{1,40}$'
     cur=$(ghost_conf_get TZ_VISTA)
     echo -e "${CIAN}--- ZONA HORARIA ---${NC}"
-    echo "  Hora que ven tus clientes en el banner y que muestra el panel."
-    echo "  Ahora: ${cur:-la del VPS ($(date +%Z))}"
+    echo "  Hora que ven tus clientes en el banner y que muestra el pie del panel."
+    case "$cur" in
+        "")  echo "  Ahora: sin elegir (el banner NO muestra la hora)" ;;
+        VPS) echo "  Ahora: hora del VPS ($(date +%Z))" ;;
+        *)   echo "  Ahora: $cur" ;;
+    esac
     echo
     i=0; for TZN in "${lista[@]}"; do i=$((i+1)); printf '  %b[%d]%b %s\n' "$CIAN" "$i" "$NC" "$TZN"; done
-    printf '  %b[10]%b Otra (escribirla)\n  %b[0]%b Usar la del VPS\n' "$CIAN" "$NC" "$ROJO" "$NC"
+    printf '  %b[10]%b Otra (escribirla)\n  %b[0]%b Usar la hora del VPS (%s)\n' "$CIAN" "$NC" "$ROJO" "$NC" "$(date +%Z)"
     read -r -p "  > " OPC
     case "$OPC" in
-        0) ghost_conf_set TZ_VISTA ""; TZN="" ;;
+        0) TZN="VPS" ;;
         10) read -r -p "  Zona (ej: America/Lima): " TZN ;;
         [1-9]) TZN="${lista[$((OPC-1))]}" ;;
         *) INFO "Sin cambios."; PAUSA; return ;;
     esac
-    if [[ -n "$TZN" ]]; then
+    if [[ "$TZN" != "VPS" ]]; then
         if [[ ! "$TZN" =~ $re || ! -f "/usr/share/zoneinfo/$TZN" ]]; then
             ERR "Zona no valida (o falta el paquete tzdata)."; PAUSA; return
         fi
-        ghost_conf_set TZ_VISTA "$TZN"
     fi
+    ghost_conf_set TZ_VISTA "$TZN"
     banner_todos_actualizar >/dev/null 2>&1 || true
-    OK "Zona horaria: ${TZN:-la del VPS}. Ahora el banner muestra $(banner_hora)."
+    OK "Zona horaria: $TZN. En el banner se ve: $(banner_hora)"
     PAUSA
+}
+
+ghost_tz_primera_vez(){
+    # Una sola vez: pregunta la zona horaria que veran los clientes (el banner no muestra hora hasta elegirla)
+    [[ -t 0 && -t 1 ]] || return 0
+    [[ -n "$(ghost_conf_get TZ_VISTA)" || -n "$(ghost_conf_get TZ_ASKED)" ]] && return 0
+    ghost_conf_set TZ_ASKED 1
+    limpiar_pantalla
+    echo -e "${AMARILLO}Hora del banner${NC}"
+    echo "  El VPS usa hora UTC y tus clientes no. Elige la zona horaria que veran en su banner."
+    echo "  (Se cambia cuando quieras en Herramientas/Seguridad -> Banner -> Zona horaria)"
+    echo
+    banner_tz_menu
 }
 
 menu_banner(){
@@ -5471,6 +5501,7 @@ seleccionar_idioma
 gate_licencia
 ghost_intro
 ghost_bootstrap
+ghost_tz_primera_vez
 [[ -f /etc/cron.d/ghost-panel-trafico ]] && trafico_cron_instalar   # mantiene el cron a la par de esta version
 [[ -f "$SSL_DIR/domain.conf" ]] && ssl_hook_instalar             # idem para los hooks de renovacion SSL
 # Comando global: ghostpanel (si el script se ejecuta desde otra ruta, lo instala)
