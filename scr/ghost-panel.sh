@@ -3,7 +3,14 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 3.9.4
+#  Version: 3.10.0
+#  Cambios 3.10.0:
+#    - Corte completo al superar cuota: bloquea cuenta Linux + elimina cliente de Xray (VLESS/VMess/Trojan)
+#    - Nueva opcion Trafico [7] Desbloquear por cuota: desbloquea + sube GB + re-agrega a Xray + resetea contador del usuario
+#    - Notificaciones Telegram / Discord / WhatsApp (CallMeBot) al auto-cortar por cuota (config en Trafico -> [8])
+#    - Historial de consumo diario por usuario (Trafico -> [9]); se registra en cada ciclo de auto-corte
+#    - Reset de contador individual (Trafico -> [5] ahora pregunta global o por usuario)
+#    - Banner y logs indican claramente "CUOTA AGOTADA - contacta al administrador"
 #  Cambios 3.9.4:
 #    - Al eliminar usuario: se borra la regla iptables del UID (evita heredar consumo al recrear)
 #    - Al crear usuario: se re-crea la regla iptables con contador en cero (UID reutilizado)
@@ -110,7 +117,7 @@ tema_guardar(){
     echo "THEME=$1" >> /etc/ghost-panel.conf
 }
 tema_cargar
-GHOST_VER='3.9.4'
+GHOST_VER='3.10.0'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -379,6 +386,9 @@ TXT_ES[t_ssl_quitar]="Quitar Dominio y SSL"; TXT_EN[t_ssl_quitar]="Remove Domain
 TXT_ES[t_ssl_sin_dom]="Sin dominio configurado (opción 1)"; TXT_EN[t_ssl_sin_dom]="No domain set (option 1)"
 TXT_ES[t_ssl_sin_cert]="sin certificado aun"; TXT_EN[t_ssl_sin_cert]="no certificate yet"
 TXT_ES[t_tr_reset]="Reset contadores"; TXT_EN[t_tr_reset]="Reset counters"
+TXT_ES[t_tr_desbloq]="Desbloquear por cuota"; TXT_EN[t_tr_desbloq]="Unlock by quota"
+TXT_ES[t_tr_notif]="Notificaciones cuota"; TXT_EN[t_tr_notif]="Quota notifications"
+TXT_ES[t_tr_hist]="Historial consumo"; TXT_EN[t_tr_hist]="Usage history"
 TXT_ES[t_sub_quitar]="QUITAR PROTOCOLOS"; TXT_EN[t_sub_quitar]="REMOVE PROTOCOLS"
 TXT_ES[t_q_xray]="Xray completo"; TXT_EN[t_q_xray]="Xray (full)"
 TXT_ES[t_panel]="Panel de administracion"; TXT_EN[t_panel]="Administration panel"
@@ -722,7 +732,7 @@ purgar_usuario(){
     if [[ -n "${UIDN:-}" ]] && iptables -L VPS-TRAFFIC -n >/dev/null 2>&1; then
         while iptables -D VPS-TRAFFIC -m owner --uid-owner "$UIDN" -j RETURN 2>/dev/null; do :; done
     fi
-    rm -f "/etc/vps-limits/$U" "/etc/vps-trafico/$U" "/etc/vps-users/$U" "/etc/vps-banners/$U" "/etc/vps-plan/$U"
+    rm -f "/etc/vps-limits/$U" "/etc/vps-trafico/$U" "/etc/vps-users/$U" "/etc/vps-banners/$U" "/etc/vps-plan/$U" "/etc/vps-cuota-agotada/$U"
     if [[ "${2:-}" == "keep" ]]; then userdel "$U" >/dev/null 2>&1
     else userdel -r "$U" >/dev/null 2>&1 || userdel -f "$U" >/dev/null 2>&1; fi
     banner_rebuild_match 2>/dev/null || true
@@ -769,7 +779,7 @@ if os.path.isfile(p):
     except Exception:
         pass
 PY
-        rm -f "/etc/vps-limits/$U" "/etc/vps-trafico/$U" "/etc/vps-users/$U" "/etc/vps-plan/$U"
+        rm -f "/etc/vps-limits/$U" "/etc/vps-trafico/$U" "/etc/vps-users/$U" "/etc/vps-plan/$U" "/etc/vps-cuota-agotada/$U" "/etc/vps-cuota-agotada/$U"
         userdel -r "$U" 2>/dev/null || userdel "$U" 2>/dev/null
         log "eliminado vencido: $U (vencio $N)"
     fi
@@ -1997,8 +2007,8 @@ banner_html_para_usuario(){
         R_PLAN=$(banner_p "$(banner_seg "$W" "📦 ")$(banner_seg "#40E0D0" "${LIM_GB} GB")$(banner_sep)$(banner_seg "$W" "🔌 ")$(banner_seg "#00FF7F" "$CONN_TXT")")
         R_TRAF=$(banner_p "$(banner_seg "$W" "📊 ")$(banner_seg "#DA70D6" "$USED_TXT")$(banner_seg "$W" " de ")$(banner_seg "#40E0D0" "${LIM_GB} GB") $(banner_barra "$USED_PCT" "$BAR_COL" 6) $(banner_seg "#DA70D6" "$PCT_TXT")")
         R_REST=$(banner_p "$(banner_seg "$W" "🔋 Restante ")$(banner_seg "$REST_COLOR" "$REST_TXT")")
-        if (( USED_B >= LIM_B )); then
-            (( SEV < 3 )) && { SEV=3; ST_ICON="⛔"; ST_TXT="SIN DATOS"; ST_COL="#FF4444"; ALERT="⛔ Cuota agotada"; ALERT_COL="#FF4444"; }
+        if (( USED_B >= LIM_B )) || [[ -f "/etc/vps-cuota-agotada/$U" ]]; then
+            (( SEV < 3 )) && { SEV=3; ST_ICON="⛔"; ST_TXT="CUOTA AGOTADA"; ST_COL="#FF4444"; ALERT="⛔ CUOTA AGOTADA - contactá al administrador"; ALERT_COL="#FF4444"; }
         elif (( USED_PCT >= 80 && SEV < 1 )); then
             SEV=1; ALERT="🔶 Consumo al ${USED_PCT}%"; (( USED_PCT >= 90 )) && ALERT_COL="#FF8C00"
         fi
@@ -3266,45 +3276,150 @@ trafico_excedido(){
     (( $(trafico_usuario_bytes "$1") >= 10#$G * 1073741824 ))
 }
 
+trafico_marcar_cuota(){
+    # Marca al usuario como bloqueado por cuota (archivo de estado + log)
+    mkdir -p /etc/vps-cuota-agotada
+    echo "$(date +%s)|$2" > "/etc/vps-cuota-agotada/$1" 2>/dev/null
+    chmod 600 "/etc/vps-cuota-agotada/$1" 2>/dev/null || true
+}
+
+trafico_limpiar_marca_cuota(){
+    rm -f "/etc/vps-cuota-agotada/$1" 2>/dev/null
+}
+
+trafico_esta_por_cuota(){
+    [[ -f "/etc/vps-cuota-agotada/$1" ]]
+}
+
+# ---- Notificaciones (Telegram / Discord / WhatsApp CallMeBot) ----
+notif_enviar(){
+    # notif_enviar "mensaje"
+    local MSG="$1" URL TOKEN CHAT HOOK PHONE APIKEY
+    # Telegram
+    TOKEN=$(ghost_conf_get TG_TOKEN)
+    CHAT=$(ghost_conf_get TG_CHAT)
+    if [[ -n "$TOKEN" && -n "$CHAT" ]]; then
+        curl -fsS --max-time 8 -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT}" --data-urlencode "text=${MSG}" -d "parse_mode=HTML" >/dev/null 2>&1 || true
+    fi
+    # Discord webhook
+    HOOK=$(ghost_conf_get DISCORD_HOOK)
+    if [[ -n "$HOOK" ]]; then
+        curl -fsS --max-time 8 -H "Content-Type: application/json" \
+            -d "{\"content\":$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$MSG")}" \
+            "$HOOK" >/dev/null 2>&1 || true
+    fi
+    # WhatsApp via CallMeBot (phone=54911...&apikey=...)
+    PHONE=$(ghost_conf_get WA_PHONE)
+    APIKEY=$(ghost_conf_get WA_APIKEY)
+    if [[ -n "$PHONE" && -n "$APIKEY" ]]; then
+        curl -fsS --max-time 8 --get "https://api.callmebot.com/whatsapp.php" \
+            --data-urlencode "phone=${PHONE}" --data-urlencode "apikey=${APIKEY}" \
+            --data-urlencode "text=${MSG}" >/dev/null 2>&1 || true
+    fi
+}
+
+trafico_notif_corte(){
+    # trafico_notif_corte USUARIO GB_USADOS
+    local U="$1" G="$2" IP SOP
+    IP=$(ip_publica 2>/dev/null || echo "?")
+    SOP=$(ghost_conf_get SUPPORT); SOP=${SOP:-@JorgeBarrios}
+    notif_enviar "🚫 <b>CUOTA AGOTADA</b>
+Usuario: <code>${U}</code>
+Limite: ${G} GB
+Servidor: ${IP}
+Contacto soporte: ${SOP}
+El usuario fue bloqueado (SSH + Xray)."
+}
+
+# ---- Historial diario de consumo ----
+# HIST_DIR se define localmente en trafico_hist_*
+trafico_hist_registrar(){
+    # Registra snapshot diario por usuario (se llama desde auto-ciclo)
+    local U USED HOY HDIR='/var/log/ghost-trafico-hist'
+    HOY=$(date +%Y-%m-%d)
+    mkdir -p "$HDIR"
+    for U in "${!TRAF_CACHE[@]}"; do
+        USED=${TRAF_CACHE[$U]:-0}
+        if [[ -f "$HDIR/$U" ]] && grep -q "^${HOY}|" "$HDIR/$U" 2>/dev/null; then
+            sed -i "s#^${HOY}|.*#${HOY}|${USED}#" "$HDIR/$U"
+        else
+            echo "${HOY}|${USED}" >> "$HDIR/$U"
+        fi
+        tail -n 60 "$HDIR/$U" > "$HDIR/$U.tmp" 2>/dev/null && mv "$HDIR/$U.tmp" "$HDIR/$U"
+    done
+}
+
+trafico_hist_ver(){
+    local U DIAS=14 FECHA BYTES HDIR='/var/log/ghost-trafico-hist'
+    echo -e "${CIAN}--- HISTORIAL DE CONSUMO ---${NC}"
+    pedir_usuario_ok U || { PAUSA; return; }
+    if [[ ! -f "$HDIR/$U" ]]; then
+        WARN "Sin historial para $U (se genera con el auto-corte activo)."
+        PAUSA; return
+    fi
+    echo -e "  Ultimos registros de ${BLANCO}$U${NC}:"
+    printf "  %-12s  %s\n" "FECHA" "CONSUMO"
+    tail -n "$DIAS" "$HDIR/$U" | while IFS='|' read -r FECHA BYTES; do
+        printf "  %-12s  %s\n" "$FECHA" "$(fmt_bytes "$BYTES")"
+    done
+    PAUSA
+}
+
 trafico_bloquear_excedidos(){
-    # Bloquea (usermod -L + cierra sesiones) a quien supero su cuota; imprime "USUARIO GB" por cada
-    # bloqueo nuevo. Llamar con la cache cargada (trafico_cache_cargar; TRAF_BATCH=1).
+    # Bloquea cuenta Linux + elimina de Xray + marca estado + notifica.
+    # Imprime "USUARIO GB" por cada bloqueo nuevo.
+    # Llamar con la cache cargada (trafico_cache_cargar; TRAF_BATCH=1).
     local F U G
     for F in /etc/vps-trafico/*; do
         [[ -f "$F" ]] || continue
         U=$(basename "$F"); id "$U" >/dev/null 2>&1 || continue
         usuario_protegido "$U" && continue
         trafico_excedido "$U" || continue
-        passwd -S "$U" 2>/dev/null | grep -q ' L ' && continue      # ya estaba bloqueado
-        G=$(tr -dc '0-9' 2>/dev/null < "$F")
-        usermod -L "$U" 2>/dev/null; pkill -u "$U" 2>/dev/null
+        # ya bloqueado por cuota o por passwd -L
+        if trafico_esta_por_cuota "$U"; then continue; fi
+        if passwd -S "$U" 2>/dev/null | awk '{print $2}' | grep -q '^L'; then
+            # estaba bloqueado manualmente; igual marcamos por cuota si excedio
+            :
+        fi
+        G=$(tr -dc '0-9' 2>/dev/null < "$F"); G=${G:0:6}
+        # 1) Bloquear cuenta Linux y matar sesiones
+        usermod -L "$U" 2>/dev/null
+        pkill -KILL -u "$U" 2>/dev/null
+        # 2) Quitar de Xray (VLESS / VMess / Trojan)
+        xray_usuario del "$U" >/dev/null 2>&1
+        # 3) Marcar estado
+        trafico_marcar_cuota "$U" "${G:-0}"
+        # 4) Notificar
+        trafico_notif_corte "$U" "${G:-?}"
         echo "$U ${G:-?}"
     done
 }
 
 trafico_cortar(){
     local CORTADOS=0 U G
-    trafico_cache_cargar; TRAF_BATCH=1            # una sola lectura de contadores para todos
+    trafico_cache_cargar; TRAF_BATCH=1
     while read -r U G; do
         [[ -n "$U" ]] || continue
-        INFO "$U supero su limite (${G}GB) y fue bloqueado."
-        vps_log INFO "cuota excedida, bloqueado: $U (${G}GB)"
+        INFO "$U supero su limite (${G}GB) → bloqueado (SSH + Xray)."
+        vps_log INFO "cuota excedida, bloqueado completo: $U (${G}GB)"
         CORTADOS=$((CORTADOS+1))
     done < <(trafico_bloquear_excedidos)
     TRAF_BATCH=0
-    [[ $CORTADOS -eq 0 ]] && OK "Nadie supero su limite." || OK "Bloqueados: $CORTADOS."
+    [[ $CORTADOS -eq 0 ]] && OK "Nadie supero su limite." || OK "Bloqueados (SSH+Xray): $CORTADOS."
     banner_todos_actualizar >/dev/null 2>&1 || true
     PAUSA
 }
 
-# ---- Auto-corte: un ciclo = bloquear excedidos + regenerar banners (corre desde cron) ----
+# ---- Auto-corte: un ciclo = bloquear excedidos + historial + regenerar banners ----
 trafico_auto_ciclo(){
     local U G
     trafico_cache_cargar; TRAF_BATCH=1
     while read -r U G; do
         [[ -n "$U" ]] || continue
-        vps_log INFO "auto-corte: $U supero ${G}GB, bloqueado"
+        vps_log INFO "auto-corte: $U supero ${G}GB, bloqueado (SSH+Xray)"
     done < <(trafico_bloquear_excedidos)
+    trafico_hist_registrar
     while read -r U; do
         usuario_protegido "$U" && continue
         banner_usuario_actualizar "$U"
@@ -3328,8 +3443,11 @@ trafico_cron_instalar(){
         declare -p BANNERS_DIR LOG_PANEL PROTEGIDOS_NOMBRES
         echo 'declare -A TRAF_CACHE=(); TRAF_BATCH=0'
         for FN in vps_log usuario_protegido ui_rep fmt_bytes xray_stats_todos trafico_cache_cargar \
-                  trafico_usuario_bytes trafico_excedido trafico_bloquear_excedidos usuario_fecha_cuenta \
-                  dias_hasta ghost_conf_get banner_barra banner_seg banner_sep banner_hora banner_l_gruesa banner_l_fina \
+                  trafico_usuario_bytes trafico_excedido trafico_bloquear_excedidos trafico_marcar_cuota \
+                  trafico_esta_por_cuota trafico_notif_corte notif_enviar trafico_hist_registrar \
+                  xray_usuario xray_recargar xray_ensure_api xray_config_perms xray_grupo \
+                  usuario_fecha_cuenta dias_hasta ghost_conf_get ip_publica \
+                  banner_barra banner_seg banner_sep banner_hora banner_l_gruesa banner_l_fina \
                   banner_p banner_fila banner_soporte_txt banner_soporte_fila banner_html_para_usuario \
                   banner_usuario_actualizar trafico_auto_ciclo; do
             declare -f "$FN"
@@ -3372,31 +3490,168 @@ trafico_auto_toggle(){
         /usr/local/bin/vps-trafico-cron.sh >/dev/null 2>&1       # primer ciclo ahora mismo
         OK "Auto-corte ACTIVO: cada $MIN min bloquea a quien exceda su cuota y refresca los banners."
         INFO "Activa antes los contadores (opcion 1) para que el trafico SSH cuente."
-        WARN "El bloqueo cierra SSH (usermod -L). Los clientes Xray siguen conectando hasta que los elimines."
+        INFO "El bloqueo ahora cierra SSH y elimina al usuario de Xray (VLESS/VMess/Trojan)."
         vps_log INFO "auto-corte activado cada $MIN min"
     fi
     PAUSA
 }
+trafico_reset_usuario(){
+    # Pone a cero el contador iptables de UN usuario (borra y recrea la regla del UID)
+    local U="$1" UIDN
+    UIDN=$(id -u "$U" 2>/dev/null) || return 1
+    if ! iptables -L VPS-TRAFFIC -n >/dev/null 2>&1; then
+        ERR "Cadena VPS-TRAFFIC no activa."; return 1
+    fi
+    while iptables -D VPS-TRAFFIC -m owner --uid-owner "$UIDN" -j RETURN 2>/dev/null; do :; done
+    iptables -A VPS-TRAFFIC -m owner --uid-owner "$UIDN" -j RETURN 2>/dev/null || true
+    OK "Contador iptables de $U en cero."
+    return 0
+}
+
 trafico_reset(){
-    # Pone a cero los contadores iptables (SSH). Las stats de Xray viven en memoria y
-    # solo se limpian reiniciando el servicio (o con API de reset si estuviera disponible).
+    # Reset global o individual
+    local OPC U SN
     echo -e "${CIAN}--- RESET CONTADORES ---${NC}"
-    echo "  · iptables (SSH): se ponen a cero para TODOS los usuarios de la cadena VPS-TRAFFIC."
-    echo "  · Xray: las stats por email solo se limpian reiniciando Xray (opcional abajo)."
-    read -r -p "  Continuar con reset de iptables? (s/n): " SN
-    if [[ "$SN" != "s" && "$SN" != "S" ]]; then INFO "Cancelado."; PAUSA; return; fi
-    if iptables -L VPS-TRAFFIC -n >/dev/null 2>&1; then
-        iptables -Z VPS-TRAFFIC 2>/dev/null && OK "Contadores iptables en cero." || ERR "No se pudo hacer iptables -Z."
-    else
-        WARN "Cadena VPS-TRAFFIC no activa (activa contadores en Tráfico -> [1])."
-    fi
-    if systemctl is-active --quiet xray 2>/dev/null || pgrep -x xray >/dev/null 2>&1; then
-        read -r -p "  ¿Reiniciar Xray para limpiar también sus stats? (s/n): " SN
-        if [[ "$SN" == "s" || "$SN" == "S" ]]; then
-            systemctl restart xray 2>/dev/null && OK "Xray reiniciado (stats a cero)." || ERR "No se pudo reiniciar Xray."
-        fi
-    fi
+    echo "  [1] Reset GLOBAL (todos los usuarios)"
+    echo "  [2] Reset de UN usuario"
+    echo "  [0] Cancelar"
+    read -r -p "  > " OPC
+    case "$OPC" in
+        1)
+            echo "  · iptables (SSH): se ponen a cero para TODOS."
+            echo "  · Xray: stats en memoria; solo se limpian reiniciando el servicio."
+            read -r -p "  Continuar con reset GLOBAL de iptables? (s/n): " SN
+            [[ "$SN" == "s" || "$SN" == "S" ]] || { INFO "Cancelado."; PAUSA; return; }
+            if iptables -L VPS-TRAFFIC -n >/dev/null 2>&1; then
+                iptables -Z VPS-TRAFFIC 2>/dev/null && OK "Contadores iptables en cero." || ERR "No se pudo hacer iptables -Z."
+            else
+                WARN "Cadena VPS-TRAFFIC no activa (activa contadores en Tráfico -> [1])."
+            fi
+            if systemctl is-active --quiet xray 2>/dev/null || pgrep -x xray >/dev/null 2>&1; then
+                read -r -p "  ¿Reiniciar Xray para limpiar también sus stats? (s/n): " SN
+                if [[ "$SN" == "s" || "$SN" == "S" ]]; then
+                    systemctl restart xray 2>/dev/null && OK "Xray reiniciado (stats a cero)." || ERR "No se pudo reiniciar Xray."
+                fi
+            fi
+            ;;
+        2)
+            pedir_usuario_ok U || { PAUSA; return; }
+            trafico_reset_usuario "$U"
+            INFO "Nota: las stats de Xray de este usuario solo se limpian reiniciando Xray (global)."
+            read -r -p "  ¿Reiniciar Xray ahora? (s/n): " SN
+            if [[ "$SN" == "s" || "$SN" == "S" ]]; then
+                systemctl restart xray 2>/dev/null && OK "Xray reiniciado." || ERR "No se pudo reiniciar Xray."
+            fi
+            ;;
+        *) INFO "Cancelado." ;;
+    esac
     banner_todos_actualizar >/dev/null 2>&1 || true
+    PAUSA
+}
+
+trafico_desbloquear_cuota(){
+    # Desbloquea un usuario cortado por cuota: usermod -U + re-agrega a Xray + opcional subir GB + reset contador
+    local U G NEWG SN
+    echo -e "${CIAN}--- DESBLOQUEAR POR CUOTA ---${NC}"
+    # Listar los que estan marcados por cuota
+    if compgen -G "/etc/vps-cuota-agotada/*" >/dev/null; then
+        echo "  Usuarios con cuota agotada:"
+        for F in /etc/vps-cuota-agotada/*; do
+            [[ -f "$F" ]] || continue
+            printf "    · %s\n" "$(basename "$F")"
+        done
+        echo
+    else
+        INFO "No hay usuarios marcados por cuota agotada."
+    fi
+    pedir_usuario_ok U || { PAUSA; return; }
+    if ! trafico_esta_por_cuota "$U" && ! passwd -S "$U" 2>/dev/null | awk '{print $2}' | grep -q '^L'; then
+        WARN "$U no parece bloqueado por cuota ni por passwd -L."
+        read -r -p "  Continuar de todos modos? (s/n): " SN
+        [[ "$SN" == "s" || "$SN" == "S" ]] || { PAUSA; return; }
+    fi
+    G=$(tr -dc '0-9' 2>/dev/null < "/etc/vps-trafico/$U"); G=${G:0:6}; G=${G:-0}
+    echo -e "  Cuota actual: ${BLANCO}${G} GB${NC}"
+    read -r -p "  Nueva cuota en GB (Enter = mantener $G, 0 = sin limite): " NEWG
+    if [[ -z "$NEWG" ]]; then NEWG=$G; fi
+    if ! [[ "$NEWG" =~ ^[0-9]{1,6}$ ]]; then ERR "Valor invalido."; PAUSA; return; fi
+    NEWG=$((10#$NEWG))
+    # 1) Desbloquear cuenta
+    usermod -U "$U" 2>/dev/null && OK "Cuenta $U desbloqueada." || ERR "No se pudo desbloquear $U."
+    # 2) Actualizar cuota
+    if (( NEWG > 0 )); then
+        mkdir -p /etc/vps-trafico
+        echo "$NEWG" > "/etc/vps-trafico/$U"
+        OK "Nueva cuota: ${NEWG} GB"
+    else
+        rm -f "/etc/vps-trafico/$U"
+        OK "Sin limite de trafico."
+    fi
+    # 3) Re-agregar a Xray
+    xray_usuario add "$U" >/dev/null 2>&1 && OK "Usuario re-agregado a Xray." || WARN "No se pudo re-agregar a Xray (¿Xray instalado?)."
+    # 4) Reset contador del usuario
+    trafico_reset_usuario "$U" 2>/dev/null || true
+    # 5) Limpiar marca
+    trafico_limpiar_marca_cuota "$U"
+    # 6) Banner
+    banner_usuario_actualizar "$U" >/dev/null 2>&1 || true
+    banner_rebuild_match 2>/dev/null || true
+    vps_log INFO "desbloqueado por cuota: $U (nueva cuota ${NEWG}GB)"
+    OK "Listo. $U puede volver a conectar (SSH + Xray)."
+    PAUSA
+}
+
+trafico_notif_config(){
+    local OPC CUR
+    echo -e "${CIAN}--- NOTIFICACIONES DE CUOTA ---${NC}"
+    echo "  Se envian al auto-cortar o al cortar manualmente por cuota."
+    echo
+    echo "  [1] Telegram (bot token + chat_id)"
+    echo "  [2] Discord (webhook URL)"
+    echo "  [3] WhatsApp CallMeBot (telefono + apikey)"
+    echo "  [4] Probar envio"
+    echo "  [5] Ver configuracion actual"
+    echo "  [0] Volver"
+    read -r -p "  > " OPC
+    case "$OPC" in
+        1)
+            CUR=$(ghost_conf_get TG_TOKEN)
+            read -r -p "  Bot Token${CUR:+ [$CUR]}: " T; T=${T:-$CUR}
+            CUR=$(ghost_conf_get TG_CHAT)
+            read -r -p "  Chat ID${CUR:+ [$CUR]}: " C; C=${C:-$CUR}
+            [[ -n "$T" ]] && ghost_conf_set TG_TOKEN "$T"
+            [[ -n "$C" ]] && ghost_conf_set TG_CHAT "$C"
+            OK "Telegram configurado."
+            ;;
+        2)
+            CUR=$(ghost_conf_get DISCORD_HOOK)
+            read -r -p "  Webhook URL${CUR:+ [ya configurado]}: " H
+            [[ -n "$H" ]] && ghost_conf_set DISCORD_HOOK "$H" && OK "Discord configurado." || INFO "Sin cambios."
+            ;;
+        3)
+            echo "  CallMeBot: obtene apikey en https://www.callmebot.com/blog/free-api-whatsapp-messages/"
+            CUR=$(ghost_conf_get WA_PHONE)
+            read -r -p "  Telefono con codigo pais (ej 54911xxxxxxx)${CUR:+ [$CUR]}: " P; P=${P:-$CUR}
+            CUR=$(ghost_conf_get WA_APIKEY)
+            read -r -p "  API Key${CUR:+ [$CUR]}: " K; K=${K:-$CUR}
+            [[ -n "$P" ]] && ghost_conf_set WA_PHONE "$P"
+            [[ -n "$K" ]] && ghost_conf_set WA_APIKEY "$K"
+            OK "WhatsApp CallMeBot configurado."
+            ;;
+        4)
+            INFO "Enviando mensaje de prueba..."
+            notif_enviar "🧪 Prueba Ghost Panel — notificaciones de cuota OK ($(date '+%F %T'))"
+            OK "Enviado (si no llega, revisa token/webhook/apikey)."
+            ;;
+        5)
+            echo "  Telegram token : $(ghost_conf_get TG_TOKEN | sed 's/./*/g' 2>/dev/null || echo '(vacio)')"
+            echo "  Telegram chat  : $(ghost_conf_get TG_CHAT || echo '(vacio)')"
+            echo "  Discord webhook: $(ghost_conf_get DISCORD_HOOK | head -c 40; echo ...)"
+            echo "  WhatsApp phone : $(ghost_conf_get WA_PHONE || echo '(vacio)')"
+            echo "  WhatsApp apikey: $(ghost_conf_get WA_APIKEY | sed 's/./*/g' 2>/dev/null || echo '(vacio)')"
+            ;;
+        *) ;;
+    esac
     PAUSA
 }
 
@@ -3407,18 +3662,23 @@ menu_trafico(){
         FR_OPT 1 "📶 $(T t_tr_activar)" 4 "🚫 $(T t_tr_cortar)"
         FR_OPT 2 "📈 $(T t_tr_ver)" 5 "🔄 $(T t_tr_reset)"
         FR_OPT 3 "🚦 $(T t_tr_limite)" 6 "🤖 $(T t_tr_auto)"
+        FR_OPT 7 "🔓 $(T t_tr_desbloq)" 8 "📣 $(T t_tr_notif)"
+        FR_OPT 9 "📅 $(T t_tr_hist)" "" ""
         FR_OPT 0 "🔙 $(T t_volver)" "" ""
         if [[ -f /etc/cron.d/ghost-panel-trafico ]]; then FR_TXT "  ${VERDE}🤖 $(T t_tr_auto_on) $(trafico_auto_min) min${NC}"
         else FR_TXT "  ${GRIS}🤖 $(T t_tr_auto_off)${NC}"; fi
         FR_BOT
         PROMPT
         case "$OP" in
-            6) trafico_auto_toggle ;;
             1) trafico_activar ;;
             2) trafico_ver ;;
             3) trafico_limite ;;
             4) trafico_cortar ;;
             5) trafico_reset ;;
+            6) trafico_auto_toggle ;;
+            7) trafico_desbloquear_cuota ;;
+            8) trafico_notif_config ;;
+            9) trafico_hist_ver ;;
             0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
         esac
     done
@@ -5500,7 +5760,7 @@ desinstalar_ghost(){
 
     # 7) Datos, licencia, config, auto-menu
     INFO "Borrando datos y configuracion..."
-    rm -rf /etc/vps-limits /etc/vps-trafico /etc/vps-users /etc/vps-plan
+    rm -rf /etc/vps-limits /etc/vps-trafico /etc/vps-users /etc/vps-plan /etc/vps-cuota-agotada /var/log/ghost-trafico-hist
     rm -f /etc/vps-manager.key /etc/vps-manager.lang /etc/vps-license.cache /etc/vps-license.name \
           /etc/ghost-panel.conf /run/vps-ip.cache /root/vps-links.txt /root/wg-client.conf /root/paquetes.txt
     [[ -d /etc/openvpn ]] || rm -f /root/openvpn-install.sh      # si OpenVPN sigue, se conserva su instalador
