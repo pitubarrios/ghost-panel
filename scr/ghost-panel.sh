@@ -3,7 +3,12 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 3.9.3
+#  Version: 3.9.4
+#  Cambios 3.9.4:
+#    - Al eliminar usuario: se borra la regla iptables del UID (evita heredar consumo al recrear)
+#    - Al crear usuario: se re-crea la regla iptables con contador en cero (UID reutilizado)
+#    - Implementada trafico_reset (antes el menu la llamaba y no existia)
+#    - Reset: iptables -Z VPS-TRAFFIC + opcion de reiniciar Xray para limpiar stats por email
 #  Cambios 3.9.3:
 #    - Banner: la hora SOLO se muestra si se eligio zona horaria (antes mostraba UTC a los clientes);
 #      el panel la pregunta una vez al abrir y se cambia en Banner -> [6] Zona horaria
@@ -105,7 +110,7 @@ tema_guardar(){
     echo "THEME=$1" >> /etc/ghost-panel.conf
 }
 tema_cargar
-GHOST_VER='3.9.3'
+GHOST_VER='3.9.4'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -707,10 +712,16 @@ xray_config_perms(){
 }
 
 purgar_usuario(){
-    # purgar_usuario USUARIO [keep]  -> borra usuario + limites + trafico + clientes xray.
-    local U="$1"
+    # purgar_usuario USUARIO [keep]  -> borra usuario + limites + trafico + clientes xray + regla iptables.
+    local U="$1" UIDN
+    UIDN=$(id -u "$U" 2>/dev/null) || true
     pkill -KILL -u "$U" 2>/dev/null
     xray_usuario del "$U" >/dev/null 2>&1
+    # Quitar regla iptables del UID (y con ella los bytes acumulados). Si no, al recrear
+    # el mismo nombre/UID el banner heredaba el consumo anterior.
+    if [[ -n "${UIDN:-}" ]] && iptables -L VPS-TRAFFIC -n >/dev/null 2>&1; then
+        while iptables -D VPS-TRAFFIC -m owner --uid-owner "$UIDN" -j RETURN 2>/dev/null; do :; done
+    fi
     rm -f "/etc/vps-limits/$U" "/etc/vps-trafico/$U" "/etc/vps-users/$U" "/etc/vps-banners/$U" "/etc/vps-plan/$U"
     if [[ "${2:-}" == "keep" ]]; then userdel "$U" >/dev/null 2>&1
     else userdel -r "$U" >/dev/null 2>&1 || userdel -f "$U" >/dev/null 2>&1; fi
@@ -1410,6 +1421,11 @@ crear_usuario(){
         GB_TXT="Sin limite"
     fi
     trafico_regla_usuario "$USU"       # si el conteo iptables esta activo, el usuario nuevo ya cuenta
+    # Asegurar contador en 0: si se reutiliza el UID, borra y vuelve a crear la regla (bytes a cero).
+    if UIDN=$(id -u "$USU" 2>/dev/null) && iptables -L VPS-TRAFFIC -n >/dev/null 2>&1; then
+        while iptables -D VPS-TRAFFIC -m owner --uid-owner "$UIDN" -j RETURN 2>/dev/null; do :; done
+        iptables -A VPS-TRAFFIC -m owner --uid-owner "$UIDN" -j RETURN 2>/dev/null || true
+    fi
     xray_usuario add "$USU"
     # Banner personalizado con nombre/vencimiento/dias (sin configurar nada en la app)
     banner_usuario_actualizar "$USU"
@@ -3361,6 +3377,29 @@ trafico_auto_toggle(){
     fi
     PAUSA
 }
+trafico_reset(){
+    # Pone a cero los contadores iptables (SSH). Las stats de Xray viven en memoria y
+    # solo se limpian reiniciando el servicio (o con API de reset si estuviera disponible).
+    echo -e "${CIAN}--- RESET CONTADORES ---${NC}"
+    echo "  · iptables (SSH): se ponen a cero para TODOS los usuarios de la cadena VPS-TRAFFIC."
+    echo "  · Xray: las stats por email solo se limpian reiniciando Xray (opcional abajo)."
+    read -r -p "  Continuar con reset de iptables? (s/n): " SN
+    if [[ "$SN" != "s" && "$SN" != "S" ]]; then INFO "Cancelado."; PAUSA; return; fi
+    if iptables -L VPS-TRAFFIC -n >/dev/null 2>&1; then
+        iptables -Z VPS-TRAFFIC 2>/dev/null && OK "Contadores iptables en cero." || ERR "No se pudo hacer iptables -Z."
+    else
+        WARN "Cadena VPS-TRAFFIC no activa (activa contadores en Tráfico -> [1])."
+    fi
+    if systemctl is-active --quiet xray 2>/dev/null || pgrep -x xray >/dev/null 2>&1; then
+        read -r -p "  ¿Reiniciar Xray para limpiar también sus stats? (s/n): " SN
+        if [[ "$SN" == "s" || "$SN" == "S" ]]; then
+            systemctl restart xray 2>/dev/null && OK "Xray reiniciado (stats a cero)." || ERR "No se pudo reiniciar Xray."
+        fi
+    fi
+    banner_todos_actualizar >/dev/null 2>&1 || true
+    PAUSA
+}
+
 menu_trafico(){
     while true; do
         cabecera
