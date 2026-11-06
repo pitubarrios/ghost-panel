@@ -3,7 +3,13 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 3.10.0
+#  Version: 3.10.1
+#  Cambios 3.10.1:
+#    - Resultados en "fichas": solo lineas horizontales (═) arriba y abajo, titulo centrado y filas
+#      "Etiqueta   valor" alineadas, SIN bordes laterales ni relleno -> al copiar y pegar sale limpio
+#    - Crear usuario: ficha USUARIO CREADO (usuario, contraseña, IP, puerto, fechas, limites, estado)
+#      y CheckUser en su propia linea (antes todo iba en una sola linea y se partia)
+#    - Renovar / bloquear / eliminar / listar usuarios usan el mismo formato
 #  Cambios 3.10.0:
 #    - Corte completo al superar cuota: bloquea cuenta Linux + elimina cliente de Xray (VLESS/VMess/Trojan)
 #    - Nueva opcion Trafico [7] Desbloquear por cuota: desbloquea + sube GB + re-agrega a Xray + resetea contador del usuario
@@ -117,7 +123,7 @@ tema_guardar(){
     echo "THEME=$1" >> /etc/ghost-panel.conf
 }
 tema_cargar
-GHOST_VER='3.10.0'
+GHOST_VER='3.10.1'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -1176,6 +1182,30 @@ OK(){ echo -e "  ${VERDE}✅${NC} $1"; }
 ERR(){ echo -e "  ${ROJO}❌${NC} $1"; }
 INFO(){ echo -e "  ${CIAN}●${NC} $1"; }
 WARN(){ echo -e "  ${AMARILLO}🔶${NC} $1"; }
+
+# ---------- FICHAS: resultado listo para copiar y pegar ----------
+# Solo lineas horizontales arriba y abajo, SIN bordes laterales ni relleno al final: al copiar y
+# pegar (WhatsApp, Telegram, notas...) cada fila sale limpia y alineada. Emojis con ancho corregido.
+FICHA_ET=22   # columnas reservadas para la etiqueta
+ficha_abrir(){
+    # ficha_abrir "TITULO" [COLOR]
+    local t="$1" col="${2:-${UI_ACC:-$MORADO}}" pad
+    ui_init
+    ui_fit "$t" "$UI_W"
+    pad=$(( (UI_W - UI_FITW) / 2 ))
+    echo
+    printf '%b\n' "${BORDE}$(ui_rep ═ "$UI_W")${NC}"
+    printf '%*s%b%s%b\n' "$pad" "" "$col" "$UI_FIT" "$NC"
+    printf '%b\n' "${BORDE}$(ui_rep ═ "$UI_W")${NC}"
+}
+ficha_fila(){
+    # ficha_fila "Etiqueta" "valor" [COLOR_VALOR]   (el valor va con %s: claves con \ o % salen intactas)
+    local pad
+    ui_fit "$1:" "$FICHA_ET"
+    pad=$(( FICHA_ET - UI_FITW ))
+    printf '%b%s%*s%b %b%s%b\n' "$GRIS" "$UI_FIT" "$pad" "" "$NC" "${3:-$BLANCO}" "$2" "$NC"
+}
+ficha_cerrar(){ printf '%b\n' "${BORDE}$(ui_rep ═ "$UI_W")${NC}"; }
 FILA(){
     if [[ -n "$3" ]]; then
         printf " ${AZUL}[%-2s]${NC} %-26s ${AZUL}[%-2s]${NC} %s\n" "$1" "$2" "$3" "$4"
@@ -1443,14 +1473,24 @@ crear_usuario(){
     # Asegurar CheckUser (opcional, por si la app lo usa)
     checkuser_auto_activar
     vps_log INFO "usuario creado: $USU (${DIAS}d, limite $MAXC, trafico $GB_TXT)"
-    OK "Usuario '$USU' creado. Vence: $EXPISO"
-    echo -e "  Usuario: ${VERDE}$USU${NC}   Clave: ${VERDE}$CLAVE${NC}   Limite: $MAXC   Trafico: $GB_TXT"
-    echo -e "  IP: $(ip_publica)  |  Puerto SSH: $(sshd_puerto_actual)"
+    ficha_abrir "👻 USUARIO CREADO"
+    ficha_fila "Usuario"           "$USU" "$VERDE"
+    ficha_fila "Contraseña"        "$CLAVE" "$VERDE"
+    ficha_fila "IP / Host"         "$(ip_publica)"
+    ficha_fila "Puerto SSH"        "$(sshd_puerto_actual)"
+    ficha_fila "Fecha de creación" "$(date '+%F %T')"
+    ficha_fila "Días de validez"   "$DIAS"
+    ficha_fila "Fecha de vencim."  "$EXPISO"
+    ficha_fila "Límite conexiones" "$MAXC"
+    ficha_fila "Límite de tráfico" "$GB_TXT"
+    ficha_fila "Estado"            "ACTIVO" "$VERDE"
+    ficha_cerrar
     if [[ -f /etc/vps-checkuser.conf ]]; then
         local _P _T
         _P=$(awk -F= '/^PORT=/{print $2}' /etc/vps-checkuser.conf 2>/dev/null)
         _T=$(awk -F= '/^TOKEN=/{print $2}' /etc/vps-checkuser.conf 2>/dev/null)
-        echo -e "  CheckUser: ${CIAN}http://$(ip_publica):${_P}/checkuser.php?user=$USU&token=${_T}${NC}"
+        # el enlace va en su propia linea y sin sangria: no rompe la ficha y se copia completo
+        printf '%bCheckUser:%b\n%s\n' "$GRIS" "$NC" "http://$(ip_publica):${_P}/checkuser.php?user=$USU&token=${_T}"
     fi
     PAUSA
 }
@@ -1468,7 +1508,10 @@ eliminar_usuario(){
     read -r -p "Borrar tambien su /home? (s/n): " SN
     if purgar_usuario "$USU" "$([[ "$SN" == "s" ]] || echo keep)"; then
         vps_log INFO "usuario eliminado: $USU"
-        OK "Usuario '$USU' eliminado."
+        ficha_abrir "❌ USUARIO ELIMINADO" "$ROJO"
+        ficha_fila "Usuario" "$USU" "$ROJO"
+        ficha_fila "Carpeta /home" "$([[ "$SN" == "s" ]] && echo borrada || echo conservada)"
+        ficha_cerrar
     else
         ERR "No se pudo eliminar '$USU'."
     fi
@@ -1479,9 +1522,17 @@ bloquear_usuario(){
     local USU
     pedir_usuario_ok USU || { PAUSA; return; }
     if passwd -S "$USU" 2>/dev/null | awk '{print $2}' | grep -q '^L'; then
-        usermod -U "$USU"; OK "'$USU' DESBLOQUEADO."; vps_log INFO "desbloqueado: $USU"
+        usermod -U "$USU"; vps_log INFO "desbloqueado: $USU"
+        ficha_abrir "🔓 USUARIO DESBLOQUEADO" "$VERDE"
+        ficha_fila "Usuario" "$USU" "$VERDE"
+        ficha_fila "Estado" "ACTIVO" "$VERDE"
+        ficha_cerrar
     else
-        usermod -L "$USU"; pkill -KILL -u "$USU" 2>/dev/null; OK "'$USU' BLOQUEADO."; vps_log INFO "bloqueado: $USU"
+        usermod -L "$USU"; pkill -KILL -u "$USU" 2>/dev/null; vps_log INFO "bloqueado: $USU"
+        ficha_abrir "🔒 USUARIO BLOQUEADO" "$ROJO"
+        ficha_fila "Usuario" "$USU" "$ROJO"
+        ficha_fila "Estado" "BLOQUEADO" "$ROJO"
+        ficha_cerrar
     fi
     PAUSA
 }
@@ -1501,12 +1552,17 @@ renovar_usuario(){
     banner_usuario_actualizar "$USU"
     banner_rebuild_match
     vps_log INFO "renovado: $USU hasta $EXPISO"
-    OK "'$USU' renovado por ${DIAS} dias (vence: $EXPISO)."
+    ficha_abrir "🔄 USUARIO RENOVADO"
+    ficha_fila "Usuario"          "$USU" "$VERDE"
+    ficha_fila "Días agregados"   "$DIAS"
+    ficha_fila "Nuevo vencim."    "$EXPISO"
+    ficha_fila "Días restantes"   "$(dias_hasta "$EXPISO")"
+    ficha_cerrar
     PAUSA
 }
 
 listar_usuarios(){
-    echo -e "${CIAN}--- USUARIOS ---${NC}"
+    ficha_abrir "👥 USUARIOS"
     local U EXPISO D EST LIM ON USED G P TXT COL SIN=0
     trafico_cache_cargar; TRAF_BATCH=1
     (( ${#TRAF_CACHE[@]} == 0 )) && SIN=1
@@ -1528,6 +1584,7 @@ listar_usuarios(){
         printf "%-14s %-11s %-4s %-4s %-3s %b%-9s%b %b\n" "$U" "$EXPISO" "$D" "$LIM" "$ON" "$COL" "$TXT" "$NC" "$EST"
     done < <(awk -F: '$3>=1000 && $1!="nobody"{print $1}' /etc/passwd)
     TRAF_BATCH=0
+    ficha_cerrar
     PAUSA
 }
 
