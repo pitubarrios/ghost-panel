@@ -5,7 +5,7 @@
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
 #  Version: 3.10.1
 #  Cambios 3.10.1:
-#    - Resultados en "fichas": solo lineas horizontales (═) arriba y abajo, titulo centrado y filas
+#    - Resultados en "fichas": UNA linea (─) arriba con el titulo dentro y otra abajo, filas
 #      "Etiqueta   valor" alineadas, SIN bordes laterales ni relleno -> al copiar y pegar sale limpio
 #    - Crear usuario: ficha USUARIO CREADO (usuario, contraseña, IP, puerto, fechas, limites, estado)
 #      y CheckUser en su propia linea (antes todo iba en una sola linea y se partia)
@@ -1188,15 +1188,14 @@ WARN(){ echo -e "  ${AMARILLO}🔶${NC} $1"; }
 # pegar (WhatsApp, Telegram, notas...) cada fila sale limpia y alineada. Emojis con ancho corregido.
 FICHA_ET=22   # columnas reservadas para la etiqueta
 ficha_abrir(){
-    # ficha_abrir "TITULO" [COLOR]
-    local t="$1" col="${2:-${UI_ACC:-$MORADO}}" pad
+    # ficha_abrir "TITULO" [COLOR] -> una sola linea ─ TITULO ─────  (mismo ancho que los marcos del panel)
+    local t=" $1 " col="${2:-${UI_ACC:-$MORADO}}" n
     ui_init
-    ui_fit "$t" "$UI_W"
-    pad=$(( (UI_W - UI_FITW) / 2 ))
+    ui_fit "$t" $(( UI_W + 2 ))
+    n=$(( UI_W + 3 - UI_FITW ))
+    (( n < 1 )) && n=1
     echo
-    printf '%b\n' "${BORDE}$(ui_rep ═ "$UI_W")${NC}"
-    printf '%*s%b%s%b\n' "$pad" "" "$col" "$UI_FIT" "$NC"
-    printf '%b\n' "${BORDE}$(ui_rep ═ "$UI_W")${NC}"
+    printf '%b\n' "${BORDE}─${NC}${col}${UI_FIT}${NC}${BORDE}$(ui_rep ─ "$n")${NC}"
 }
 ficha_fila(){
     # ficha_fila "Etiqueta" "valor" [COLOR_VALOR]   (el valor va con %s: claves con \ o % salen intactas)
@@ -1205,7 +1204,29 @@ ficha_fila(){
     pad=$(( FICHA_ET - UI_FITW ))
     printf '%b%s%*s%b %b%s%b\n' "$GRIS" "$UI_FIT" "$pad" "" "$NC" "${3:-$BLANCO}" "$2" "$NC"
 }
-ficha_cerrar(){ printf '%b\n' "${BORDE}$(ui_rep ═ "$UI_W")${NC}"; }
+ficha_texto(){ printf '%b%s%b\n' "${2:-$BLANCO}" "$1" "$NC"; }   # linea libre (sin etiqueta), p. ej. un enlace
+ficha_cerrar(){ printf '%b\n' "${BORDE}$(ui_rep ─ $((UI_W+4)))${NC}"; }
+ficha_ok(){
+    # ficha_ok "TITULO" "Etiqueta" "valor" ["Etiqueta2" "valor2" ...]  -> ficha completa verde
+    local t="$1"; shift
+    ficha_abrir "$t" "$VERDE"
+    while (( $# >= 2 )); do ficha_fila "$1" "$2"; shift 2; done
+    ficha_cerrar
+}
+ficha_aviso(){
+    # igual que ficha_ok pero con titulo amarillo (avisos / pasos que requieren atencion)
+    local t="$1"; shift
+    ficha_abrir "$t" "$AMARILLO"
+    while (( $# >= 2 )); do ficha_fila "$1" "$2"; shift 2; done
+    ficha_cerrar
+}
+ficha_mal(){
+    # igual que ficha_ok pero con titulo rojo (fallos que merecen detalle)
+    local t="$1"; shift
+    ficha_abrir "$t" "$ROJO"
+    while (( $# >= 2 )); do ficha_fila "$1" "$2"; shift 2; done
+    ficha_cerrar
+}
 FILA(){
     if [[ -n "$3" ]]; then
         printf " ${AZUL}[%-2s]${NC} %-26s ${AZUL}[%-2s]${NC} %s\n" "$1" "$2" "$3" "$4"
@@ -1498,7 +1519,10 @@ crear_usuario(){
 cambiar_clave(){
     local USU
     pedir_usuario_ok USU || { PAUSA; return; }
-    passwd "$USU" && { OK "Clave actualizada."; vps_log INFO "clave cambiada: $USU"; }
+    if passwd "$USU"; then
+        vps_log INFO "clave cambiada: $USU"
+        ficha_ok "🔑 CLAVE ACTUALIZADA" "Usuario" "$USU" "Estado" "ACTIVO"
+    fi
     PAUSA
 }
 
@@ -1589,10 +1613,10 @@ listar_usuarios(){
 }
 
 conexiones_online(){
-    echo -e "${CIAN}--- CONEXIONES ONLINE (SSH / Dropbear, incluye tuneles) ---${NC}"
+    ficha_abrir "📡 CONEXIONES ONLINE (SSH / Dropbear, incluye túneles)"
     sesiones_por_usuario
-    echo
-    echo -e "${CIAN}Total sesiones de usuarios:${NC} $(online_total)"
+    ficha_fila "Total sesiones" "$(online_total)" "$CIAN"
+    ficha_cerrar
     PAUSA
 }
 
@@ -1601,7 +1625,7 @@ matar_conexion(){
     conexiones_online_rapido
     pedir_usuario_ok USU || { PAUSA; return; }
     if pgrep -u "$USU" >/dev/null 2>&1; then
-        pkill -KILL -u "$USU" 2>/dev/null && OK "Sesiones de '$USU' cerradas."
+        pkill -KILL -u "$USU" 2>/dev/null && ficha_ok "⛔ CONEXIONES CERRADAS" "Usuario" "$USU" "Estado" "Sesiones cerradas"
     else
         ERR "Sin sesiones activas."
     fi
@@ -1613,13 +1637,14 @@ conexiones_online_rapido(){ sesiones_por_usuario; echo; }
 # SISTEMA / RED
 # ------------------------------------------------------------
 monitoreo(){
-    echo -e "${CIAN}--- MONITOREO ---${NC}"
+    ficha_abrir "📊 MONITOREO"
     echo -e "Uptime : $(uptime)"
     free -h | sed 's/^/         /'
     echo
     df -h / /home 2>/dev/null | sed 's/^/         /'
     echo
     ss -tunap 2>/dev/null | awk 'NR>1{print $1, $5, $7}' | head -20
+    ficha_cerrar
     PAUSA
 }
 
@@ -1633,14 +1658,14 @@ net.ipv4.tcp_congestion_control=bbr
 EOF
     modprobe tcp_bbr 2>/dev/null; echo "tcp_bbr" > /etc/modules-load.d/bbr.conf 2>/dev/null
     sysctl --system >/dev/null 2>&1
-    OK "Optimizacion aplicada (BBR + swappiness=10)."
+    ficha_ok "⚡ OPTIMIZACIÓN APLICADA" "Congestión TCP" "BBR" "Swappiness" "10" "Cache pressure" "50"
     PAUSA
 }
 
 update_sistema(){
     INFO "Actualizando paquetes..."
     apt update && apt upgrade -y
-    OK "Sistema actualizado."
+    ficha_ok "📦 SISTEMA ACTUALIZADO" "Estado" "Paquetes al día" "Fecha" "$(date '+%F %T')"
     PAUSA
 }
 
@@ -1654,7 +1679,7 @@ backup_basico(){
     ( umask 077; tar czf "$FILE" --exclude='etc/ssl/private' /etc /root/paquetes.txt 2>/dev/null ); RC=$?
     if [[ $RC -le 1 && -s "$FILE" ]]; then
         chmod 600 "$FILE"
-        OK "Backup creado: $FILE ($(du -h "$FILE" | cut -f1))"
+        ficha_ok "💾 BACKUP CREADO" "Archivo" "$FILE" "Tamaño" "$(du -h "$FILE" | cut -f1)" "Incluye" "/etc + lista de paquetes"
     else
         rm -f "$FILE"; ERR "Fallo el backup (tar codigo $RC)."
     fi
@@ -1807,8 +1832,8 @@ banner_publicar(){
     banner_activar_en_dropbear
     msg="Banner publicado en OpenSSH (/etc/banner-vps)"
     [[ -f /etc/dropbear/banner ]] && msg="Banner publicado en OpenSSH y Dropbear"
-    OK "$msg"
     vps_log INFO "banner publicado (${SZ} bytes)"
+    ficha_ok "🎨 BANNER PUBLICADO" "Destino" "${msg#Banner publicado en }" "Tamaño" "${SZ} bytes"
 }
 
 banner_dinamico_html(){
@@ -1863,7 +1888,7 @@ banner_eliminar(){
     fi
     dropbear_presente && { systemctl restart dropbear 2>/dev/null || service dropbear restart 2>/dev/null || true; }
     vps_log INFO "banner eliminado"
-    OK "Banner eliminado."
+    ficha_ok "🗑 BANNER ELIMINADO" "OpenSSH" "sin banner" "Dropbear" "sin banner"
     PAUSA
 }
 
@@ -2172,15 +2197,15 @@ banner_con_checkuser(){
     checkuser_escribir_py
     systemctl restart vps-checkuser 2>/dev/null || true
     sleep 1
-    OK "CheckUser reiniciado (expiration / days_left / warning / limit / online)."
     local P T IP U
     P=$(awk -F= '/^PORT=/{print $2}' /etc/vps-checkuser.conf 2>/dev/null)
     T=$(awk -F= '/^TOKEN=/{print $2}' /etc/vps-checkuser.conf 2>/dev/null)
     IP=$(ip_publica)
-    echo -e " URL CheckUser: ${BLANCO}http://$IP:${P:-8080}/checkuser.php?user=USUARIO&token=$T${NC}"
+    ficha_ok "📡 CHECKUSER REINICIADO" "Estado" "corriendo" "Puerto" "${P:-8080}/tcp" "Campos" "expiration / days_left / warning / limit / online"
+    printf '%bURL CheckUser:%b\n%s\n' "$GRIS" "$NC" "http://$IP:${P:-8080}/checkuser.php?user=USUARIO&token=$T"
     U=$(awk -F: '$3>=1000 && $1!="nobody"{print $1; exit}' /etc/passwd)
     if [[ -n "$U" ]]; then
-        echo -e " Prueba con '${U}':"
+        printf '%bPrueba con %s:%b\n' "$GRIS" "$U" "$NC"
         curl -s --max-time 4 "http://127.0.0.1:${P:-8080}/checkuser.php?user=$U&token=$T"; echo
     fi
     PAUSA
@@ -2200,7 +2225,7 @@ banner_soporte_menu(){
     elif [[ "$S" =~ $re ]]; then ghost_conf_set SUPPORT "$S"
     else ERR "Texto invalido (letras, numeros y @ . _ : / + -; max 40; sin espacios)."; PAUSA; return; fi
     banner_todos_actualizar >/dev/null 2>&1 || true
-    OK "Soporte actualizado en los banners de cada usuario."
+    ficha_ok "💬 SOPORTE ACTUALIZADO" "Texto" "$(ghost_conf_get SUPPORT)" "Banners" "de cada usuario"
     INFO "El banner generico (opcion 1) se actualiza al volver a publicarlo."
     PAUSA
 }
@@ -2233,7 +2258,7 @@ banner_tz_menu(){
     fi
     ghost_conf_set TZ_VISTA "$TZN"
     banner_todos_actualizar >/dev/null 2>&1 || true
-    OK "Zona horaria: $TZN. En el banner se ve: $(banner_hora)"
+    ficha_ok "🕒 ZONA HORARIA" "Zona" "$TZN" "En el banner" "$(banner_hora)"
     PAUSA
 }
 
@@ -2317,17 +2342,10 @@ instalar_webmin(){
     systemctl enable --now webmin 2>/dev/null || /etc/webmin/start >/dev/null 2>&1
     sleep 1
     local WP; WP=$(grep -o '^port=[0-9]*' /etc/webmin/miniserv.conf 2>/dev/null | cut -d= -f2 | head -1); WP=${WP:-10000}
-    if pgrep -f miniserv >/dev/null 2>&1; then
-        OK "Webmin ACTIVO en puerto $WP."
-    else
-        ERR "Webmin quedo detenido. Proba con la opcion 2 (Estado / reiniciar) del menu."
-    fi
-    echo
+    pgrep -f miniserv >/dev/null 2>&1 || ERR "Webmin quedo detenido. Proba con la opcion 2 (Estado / reiniciar) del menu."
     local IP; IP=$(ip_publica)
-    OK "Webmin instalado."
-    echo -e " Acceso  : ${VERDE}https://${IP}:10000${NC}"
-    echo -e " Usuario : ${VERDE}root${NC} (o cualquier usuario con sudo)"
-    echo -e " ${AMARILLO}Nota: si es una VM remota, acepta el aviso de certificado autofirmado.${NC}"
+    ficha_ok "💻 WEBMIN INSTALADO" "Acceso" "https://${IP}:${WP}" "Usuario" "root (o cualquier usuario con sudo)"
+    INFO "Si es una VM remota, acepta el aviso de certificado autofirmado."
     PAUSA
 }
 
@@ -2337,7 +2355,7 @@ remover_webmin(){
     apt purge -y webmin 2>/dev/null
     rm -f /etc/apt/sources.list.d/webmin.list /usr/share/keyrings/webmin.gpg
     apt update -y >/dev/null 2>&1
-    OK "Webmin removido."
+    ficha_ok "🗑 WEBMIN REMOVIDO" "Estado" "desinstalado"
     PAUSA
 }
 
@@ -2357,16 +2375,16 @@ menu_webmin(){
                sleep 1
                if pgrep -f miniserv >/dev/null 2>&1; then
                    local WP; WP=$(grep -o '^port=[0-9]*' /etc/webmin/miniserv.conf 2>/dev/null | cut -d= -f2 | head -1); WP=${WP:-10000}
-                   OK "Webmin corriendo en puerto $WP."
+                   ficha_ok "💻 WEBMIN ACTIVO" "Puerto" "$WP" "Estado" "corriendo"
                else
                    ERR "Webmin no levanto (¿sin systemd ni /etc/webmin/start?)."
                fi
                PAUSA ;;
-            3) ufw allow 10000/tcp 2>/dev/null && OK "Puerto abierto." || ERR "UFW no activo."; PAUSA ;;
+            3) ufw allow 10000/tcp 2>/dev/null && ficha_ok "🔓 PUERTO ABIERTO" "Puerto" "10000/tcp" "Firewall" "UFW" || ERR "UFW no activo."; PAUSA ;;
             4) if ! pedir_puerto P "Nuevo puerto Webmin: " "" tcp; then PAUSA; continue; fi
                sed -i "s/^port=.*/port=$P/;s/^listen=.*/listen=$P/" /etc/webmin/miniserv.conf 2>/dev/null
                ufw allow "$P/tcp" >/dev/null 2>&1
-               systemctl restart webmin 2>/dev/null && OK "Puerto cambiado a $P." || ERR "Webmin no instalado."
+               systemctl restart webmin 2>/dev/null && ficha_ok "💻 PUERTO WEBMIN CAMBIADO" "Puerto nuevo" "$P/tcp" "Estado" "reiniciado" || ERR "Webmin no instalado."
                PAUSA ;;
             5) remover_webmin ;;
             0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
@@ -2386,8 +2404,7 @@ instalar_comando_global(){
         # Alias en bashrc
         grep -q "alias ghostpanel=" /root/.bashrc 2>/dev/null || echo "alias ghostpanel='/usr/local/bin/ghostpanel'" >> /root/.bashrc
         grep -q "alias vps=" /root/.bashrc 2>/dev/null || echo "alias vps='/usr/local/bin/ghostpanel'" >> /root/.bashrc
-        OK "Instalado. Entra al panel con: ${VERDE}ghostpanel${NC}"
-        INFO "Tambien funcionan: vpsmgr  |  vps"
+        ficha_ok "💻 COMANDO INSTALADO" "Comando" "ghostpanel" "Alias" "vpsmgr  |  vps" "Ruta" "$DEST"
     else
         ERR "No se pudo instalar en $DEST (permisos?)."
     fi
@@ -2450,9 +2467,8 @@ LSVC
     systemctl daemon-reload
     systemctl enable --now vps-limiter >/dev/null 2>&1
     if systemctl is-active --quiet vps-limiter 2>/dev/null; then
-        OK "Limiter activo. Usuarios con limite: $(ls /etc/vps-limits/ 2>/dev/null | tr '\n' ' ')"
-        INFO "Corta las sesiones MAS NUEVAS cuando el usuario supera su maximo (revisa cada 4 s)."
-        INFO "Con Dropbear solo se cuentan sesiones con shell; con OpenSSH tambien los tuneles."
+        ficha_ok "🚦 LIMITER ACTIVO" "Estado" "ACTIVO" "Usuarios con límite" "$(ls /etc/vps-limits/ 2>/dev/null | wc -l)" "Revisa cada" "4 segundos" "Acción" "corta las sesiones MÁS NUEVAS"
+        INFO "Con Dropbear solo se cuentan sesiones con shell; con OpenSSH también los túneles."
     else
         ERR "El limiter no levanto. Revisa: journalctl -u vps-limiter"
     fi
@@ -2464,7 +2480,7 @@ limiter_quitar(){
     rm -f /etc/systemd/system/vps-limiter.service
     systemctl daemon-reload 2>/dev/null
     limiter_quitar_forcecommand
-    OK "Limiter desactivado."
+    ficha_ok "🛑 LIMITER DESACTIVADO" "Estado" "desactivado"
     PAUSA
 }
 
@@ -2480,7 +2496,7 @@ maxretry = 5
 bantime  = 1h
 F2BEOF
     systemctl enable --now fail2ban 2>/dev/null
-    OK "Fail2ban activo: 5 intentos fallidos = baneo de 1 hora."
+    ficha_ok "🚨 FAIL2BAN ACTIVO" "Protege" "SSH" "Intentos fallidos" "5" "Baneo" "1 hora"
     PAUSA
 }
 
@@ -2498,9 +2514,10 @@ cambiar_puerto_ssh(){
     sshd_recargar
     sleep 1
     if ss -tln 2>/dev/null | awk 'NR>1{print $4}' | grep -qE "[:.]${P}$"; then
-        OK "Puerto SSH: $P. ${AMARILLO}Abri otra terminal y proba conectarte ANTES de cerrar esta.${NC}"
-        INFO "Si usas Stunnel/WS-epro, reinstalalos para que apunten al nuevo puerto."
         vps_log INFO "puerto ssh -> $P"
+        ficha_ok "🔑 PUERTO SSH CAMBIADO" "Puerto nuevo" "$P/tcp" "Firewall" "abierto en UFW"
+        WARN "Abre otra terminal y prueba conectarte ANTES de cerrar esta."
+        INFO "Si usas Stunnel/WS-epro, reinstálalos para que apunten al nuevo puerto."
     else
         ERR "sshd no escucha en $P. Revisa: sshd -T | grep -i ^port"
     fi
@@ -2508,15 +2525,16 @@ cambiar_puerto_ssh(){
 }
 
 ver_puertos(){
-    echo -e "${CIAN}--- PUERTOS ESCUCHANDO (TCP) ---${NC}"
+    ficha_abrir "🔎 PUERTOS ESCUCHANDO (TCP)"
     ss -tlnp 2>/dev/null | head -25
-    echo
-    echo -e "${CIAN}--- UFW (firewall) ---${NC}"
+    ficha_cerrar
+    ficha_abrir "🛡 UFW (firewall)"
     if command -v ufw >/dev/null 2>&1; then
         ufw status verbose 2>/dev/null | head -20
     else
         echo "UFW no instalado."
     fi
+    ficha_cerrar
     PAUSA
 }
 
@@ -2533,8 +2551,11 @@ abrir_puerto(){
         read -r -p "UFW no esta activo. Activarlo ahora? (s/n): " SN
         [[ "$SN" == "s" ]] && { ufw --force enable; INFO "UFW activado."; }
     fi
-    ufw allow "$P/$PROTO" >/dev/null 2>&1 && OK "Puerto $P/$PROTO abierto."
-    ufw status 2>/dev/null | grep -E "^$P/" || ERR "No se confirmo la regla."
+    if ufw allow "$P/$PROTO" >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qE "^$P/"; then
+        ficha_ok "🔓 PUERTO ABIERTO" "Puerto" "$P/$PROTO" "Firewall" "UFW"
+    else
+        ERR "No se confirmo la regla."
+    fi
     PAUSA
 }
 
@@ -2550,7 +2571,7 @@ cambiar_limite(){
     mkdir -p /etc/vps-limits
     echo "$M" > "/etc/vps-limits/$USU"
     banner_usuario_actualizar "$USU"   # el banner refleja el nuevo limite de conexiones
-    OK "Limite de '$USU' actualizado a $M sesiones."
+    ficha_ok "🚦 LÍMITE ACTUALIZADO" "Usuario" "$USU" "Máx. sesiones" "$([[ "$M" == 0 ]] && echo "sin límite" || echo "$M")"
     PAUSA
 }
 
@@ -2571,9 +2592,14 @@ crear_test_ssh(){
     mkdir -p /etc/vps-limits; echo "$MAXC" > "/etc/vps-limits/$USU"
     xray_usuario add "$USU"
     vps_log INFO "test creado: $USU"
-    OK "Usuario de prueba creado:"
-    echo -e "  Usuario: ${VERDE}$USU${NC}   Clave: ${VERDE}$CLAVE${NC}"
-    echo -e "  ${AMARILLO}Vence manana. IP: $(ip_publica)  Puerto: $(sshd_puerto_actual)${NC}"
+    ficha_abrir "🧪 USUARIO DE PRUEBA CREADO"
+    ficha_fila "Usuario"           "$USU" "$VERDE"
+    ficha_fila "Contraseña"        "$CLAVE" "$VERDE"
+    ficha_fila "IP / Host"         "$(ip_publica)"
+    ficha_fila "Puerto SSH"        "$(sshd_puerto_actual)"
+    ficha_fila "Vencimiento"       "$(date -d '+1 day' +%F) (mañana)"
+    ficha_fila "Límite conexiones" "$MAXC"
+    ficha_cerrar
     PAUSA
 }
 
@@ -2592,7 +2618,8 @@ eliminar_vencidos(){
             fi
         fi
     done < <(awk -F: '$3>=1000 && $1!="nobody"{print $1}' /etc/passwd)
-    [[ $BORRADOS -eq 0 ]] && OK "No hay usuarios vencidos." || OK "Eliminados $BORRADOS usuarios vencidos."
+    if [[ $BORRADOS -eq 0 ]]; then ficha_ok "🧹 USUARIOS VENCIDOS" "Eliminados" "0 (no hay vencidos)"
+    else ficha_ok "🧹 USUARIOS VENCIDOS" "Eliminados" "$BORRADOS"; fi
     PAUSA
 }
 
@@ -2606,31 +2633,31 @@ mantenimiento(){
     find /var/log -name "*.gz" -mtime +7 -delete 2>/dev/null
     systemctl enable --now fstrim.timer >/dev/null 2>&1
     INFO "TRIM semanal: $(systemctl is-enabled fstrim.timer 2>/dev/null || echo "no aplica en este entorno")"
-    OK "Listo: paquetes huerfanos, logs viejos, /tmp y backups (conservo los ultimos 3)."
+    ficha_ok "🧹 MANTENIMIENTO LISTO" "Limpiado" "paquetes huérfanos, logs, /tmp" "Backups" "se conservan los últimos 3"
     PAUSA
 }
 
 auto_menu(){
     if grep -q "VPS-JB-AUTOMENU-INICIO" "$HOME/.bashrc" 2>/dev/null; then
-        OK "El auto-menu ya estaba activo."; PAUSA; return
+        ficha_ok "📌 AUTO-MENÚ" "Estado" "ya estaba activo"; PAUSA; return
     fi
     cat >> "$HOME/.bashrc" <<'AMEOF'
 # VPS-JB-AUTOMENU-INICIO
 case "$-" in *i*) [ -x /usr/local/bin/ghostpanel ] && /usr/local/bin/ghostpanel ;; esac
 # VPS-JB-AUTOMENU-FIN
 AMEOF
-    OK "Auto-menu activo: la proxima vez que root inicie sesion (SSH o consola), el menu abre solo."
+    ficha_ok "📌 AUTO-MENÚ ACTIVADO" "Estado" "activo" "Efecto" "el menú abre al iniciar sesión root"
     PAUSA
 }
 
 quitar_auto_menu(){
     sed -i '/VPS-JB-AUTOMENU-INICIO/,/VPS-JB-AUTOMENU-FIN/d' "$HOME/.bashrc" 2>/dev/null
-    OK "Auto-menu desactivado."
+    ficha_ok "📌 AUTO-MENÚ DESACTIVADO" "Estado" "desactivado"
     PAUSA
 }
 
 diagnostico(){
-    echo -e "${CIAN}--- DIAGNOSTICO DEL SERVIDOR ---${NC}"
+    ficha_abrir "🩺 DIAGNÓSTICO DEL SERVIDOR"
     local RAM_P DISCO_P LOAD ADV=0
     RAM_P=$(free | awk '/Mem/{printf "%d", $3*100/$2}')
     DISCO_P=$(df -h / | awk 'NR==2{gsub(/%/,"",$5); print $5}')
@@ -2642,6 +2669,7 @@ diagnostico(){
     pgrep -f miniserv >/dev/null 2>&1 || echo -e " ${AMARILLO}-${NC} Webmin no corre (menu Webmin)."
     lastb -i 2>/dev/null | head -5 | grep -q . && echo -e " ${AMARILLO}-${NC} Intentos de login fallidos recientes: conviene Fail2ban (Seguridad -> Fail2ban)."
     [[ $ADV -eq 0 ]] && echo -e " ${VERDE}OK${NC} Sin alertas graves."
+    ficha_cerrar
     PAUSA
 }
 
@@ -2651,7 +2679,7 @@ cambiar_hostname(){
     [[ -z "$H" || "$H" =~ [^a-zA-Z0-9.-] ]] && { ERR "Hostname invalido."; PAUSA; return; }
     hostnamectl set-hostname "$H" 2>/dev/null || { ERR "No se pudo cambiar."; PAUSA; return; }
     sed -i "s/127.0.1.1.*/127.0.1.1\t$H/" /etc/hosts 2>/dev/null
-    OK "Hostname cambiado a '$H'. Se ve completo en la proxima sesion."
+    ficha_ok "🏷 HOSTNAME CAMBIADO" "Hostname nuevo" "$H" "Se ve completo" "en la próxima sesión"
     PAUSA
 }
 
@@ -2676,13 +2704,18 @@ ghost_instalar_script(){
     RUN="${GHOST_SELF:-$(readlink -f "$0" 2>/dev/null)}"
     mkdir -p /root/backups; chmod 700 /root/backups
     BK="/root/backups/ghost-panel-v${CV}-$(date +%F_%H%M%S).sh"
-    if [[ -n "$RUN" && -f "$RUN" ]]; then cp -a "$RUN" "$BK" 2>/dev/null && INFO "Respaldo: $BK"; fi
+    if [[ -n "$RUN" && -f "$RUN" ]]; then cp -a "$RUN" "$BK" 2>/dev/null; fi
     # install borra y recrea el destino: no corrompe el script que bash esta leyendo
     install -m 755 "$F" "$DEST" || { ERR "No se pudo escribir $DEST"; return 1; }
-    OK "Instalado en $DEST (v${NV:-?})"
+    ficha_abrir "⬆ PANEL ACTUALIZADO" "$VERDE"
+    ficha_fila "Versión anterior" "v${CV}"
+    ficha_fila "Versión nueva" "v${NV:-?}" "$VERDE"
+    ficha_fila "Instalado en" "$DEST"
     if [[ -n "$RUN" && -f "$RUN" && "$RUN" != "$(readlink -f "$DEST")" && -w "$RUN" ]]; then
-        install -m 755 "$F" "$RUN" 2>/dev/null && OK "Tambien actualizado el archivo que estas ejecutando: $RUN"
+        install -m 755 "$F" "$RUN" 2>/dev/null && ficha_fila "También actualizado" "$RUN"
     fi
+    [[ -n "${BK:-}" && -f "$BK" ]] && ficha_fila "Respaldo" "$BK"
+    ficha_cerrar
     vps_log INFO "script actualizado v$CV -> v${NV:-?}"
     read -r -p "  Reiniciar el panel ahora con la version nueva? (s/n): " SN
     [[ "$SN" == "s" ]] && exec "$DEST"
@@ -2727,7 +2760,7 @@ auto_update(){
                    touch /etc/ghost-panel.conf; chmod 600 /etc/ghost-panel.conf
                    sed -i '/^UPDATE_URL=/d' /etc/ghost-panel.conf
                    echo "UPDATE_URL=$U" >> /etc/ghost-panel.conf
-                   REPO_RAW="$U"; OK "Fuente guardada."
+                   REPO_RAW="$U"; ficha_ok "🌐 FUENTE GUARDADA" "URL" "$U"
                else ERR "URL invalida."; fi
                PAUSA ;;
             3) read -r -p "  Ruta del archivo .sh: " F
@@ -2873,10 +2906,14 @@ SVCEOF
     systemctl enable --now vps-checkuser 2>/dev/null
     ufw allow "$PORT/tcp" >/dev/null 2>&1
     local IP; IP=$(ip_publica)
-    OK "CheckUser instalado y corriendo."
-    echo -e " Prueba desde la VM:  curl http://localhost:$PORT/checkuser.php?user=TUUSUARIO&token=$TOKEN"
-    echo -e " Desde afuera:        http://$IP:$PORT/checkuser.php?user=TUUSUARIO&token=$TOKEN"
-    echo -e " ${AMARILLO}Guarda este token, se guarda en /etc/vps-checkuser.conf${NC}"
+    ficha_abrir "📡 CHECKUSER INSTALADO"
+    ficha_fila "Estado" "corriendo" "$VERDE"
+    ficha_fila "Puerto" "$PORT/tcp"
+    ficha_fila "Token" "$TOKEN" "$VERDE"
+    ficha_fila "Config" "/etc/vps-checkuser.conf"
+    ficha_cerrar
+    printf '%bDesde la VM:%b\n%s\n' "$GRIS" "$NC" "curl http://localhost:$PORT/checkuser.php?user=TUUSUARIO&token=$TOKEN"
+    printf '%bDesde afuera:%b\n%s\n' "$GRIS" "$NC" "http://$IP:$PORT/checkuser.php?user=TUUSUARIO&token=$TOKEN"
     PAUSA
 }
 
@@ -2886,9 +2923,10 @@ checkuser_probar(){
     T=$(awk -F= '/^TOKEN=/{print $2}' /etc/vps-checkuser.conf 2>/dev/null)
     IP=$(ip_publica)
     read -r -p "Usuario a consultar: " U
-    echo
+    ficha_abrir "📡 PRUEBA CHECKUSER · $U"
     curl -s "http://localhost:${P:-8080}/checkuser.php?user=$U&token=$T" && echo || ERR "No responde. Estado:"
     systemctl status vps-checkuser --no-pager 2>/dev/null | head -6
+    ficha_cerrar
     PAUSA
 }
 
@@ -2896,7 +2934,7 @@ checkuser_quitar(){
     systemctl disable --now vps-checkuser 2>/dev/null
     rm -f /usr/local/bin/vps-checkuser.py /etc/systemd/system/vps-checkuser.service /etc/vps-checkuser.conf
     systemctl daemon-reload 2>/dev/null
-    OK "CheckUser removido."
+    ficha_ok "📡 CHECKUSER REMOVIDO" "Estado" "desinstalado"
     PAUSA
 }
 
@@ -2912,9 +2950,9 @@ menu_checkuser(){
         PROMPT
         case "$OP" in
             1) checkuser_instalar ;;
-            2) systemctl status vps-checkuser --no-pager 2>/dev/null | head -15; PAUSA ;;
+            2) ficha_abrir "📡 ESTADO CHECKUSER"; systemctl status vps-checkuser --no-pager 2>/dev/null | head -15; ficha_cerrar; PAUSA ;;
             3) checkuser_probar ;;
-            4) cat /etc/vps-checkuser.conf 2>/dev/null || ERR "No instalado."; PAUSA ;;
+            4) if [[ -f /etc/vps-checkuser.conf ]]; then ficha_abrir "📡 CONFIG CHECKUSER"; cat /etc/vps-checkuser.conf; ficha_cerrar; else ERR "No instalado."; fi; PAUSA ;;
             5) checkuser_quitar ;;
             0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
         esac
@@ -2928,7 +2966,7 @@ reiniciar_vps(){
         sleep 3
         reboot
     else
-        OK "Reinicio cancelado."
+        ficha_ok "🔄 REINICIO" "Estado" "cancelado"
         PAUSA
     fi
 }
@@ -2992,11 +3030,14 @@ XEOF
     sleep 2
     local IP; IP=$(ip_publica)
     local LINK="vless://$UUID@$IP:$XP?security=reality&encryption=none&pbk=$PUB&fp=chrome&sni=$SNI&flow=xtls-rprx-vision&sid=#VPS-JORGEBARRIOS"
-    OK "Xray corriendo en el puerto $XP"
-    echo
-    echo -e " ${AMARILLO}Enlace para tu app (VLESS + Reality):${NC}"
-    echo -e " ${VERDE}$LINK${NC}"
-    echo
+    ficha_abrir "🚀 XRAY INSTALADO"
+    ficha_fila "Estado" "corriendo" "$VERDE"
+    ficha_fila "Protocolo" "VLESS + Reality"
+    ficha_fila "IP / Host" "$IP"
+    ficha_fila "Puerto" "$XP/tcp"
+    ficha_fila "SNI" "$SNI"
+    ficha_cerrar
+    printf '%bEnlace para tu app (VLESS + Reality):%b\n%b%s%b\n' "$AMARILLO" "$NC" "$VERDE" "$LINK" "$NC"
     INFO "Guarda ese enlace: es la config que importas en el cliente (v2rayNG / tu app)."
     PAUSA
 }
@@ -3011,7 +3052,7 @@ instalar_openvpn(){
     chmod +x /root/openvpn-install.sh
     INFO "Arrancando instalador (configuralo con los valores que quieras)..."
     AUTO_INSTALL=y bash /root/openvpn-install.sh
-    OK "Listo. El archivo .ovpn del cliente queda en /root/"
+    ficha_ok "🔐 OPENVPN INSTALADO" "Archivo cliente" "/root/*.ovpn"
     PAUSA
 }
 
@@ -3054,11 +3095,13 @@ SEOF
     sleep 1
     local IP; IP=$(ip_publica)
     if pgrep -f stunnel >/dev/null 2>&1; then
-        OK "Stunnel ACTIVO: SSL en el puerto $SP -> SSH local $SSHP"
-        echo
-        echo -e " ${AMARILLO}Datos para la config del cliente (HTTP Injector / tu app):${NC}"
-        echo -e "  IP/Host: ${VERDE}$IP${NC}   Puerto SSL: ${VERDE}$SP${NC}"
-        echo -e "  La app debe conectar por SSL/TLS al $SP y el trafico sale por SSH ($SSHP)."
+        ficha_abrir "🔒 STUNNEL (SSL) ACTIVO"
+        ficha_fila "Estado" "ACTIVO" "$VERDE"
+        ficha_fila "IP / Host" "$IP"
+        ficha_fila "Puerto SSL" "$SP/tcp" "$VERDE"
+        ficha_fila "Destino SSH local" "127.0.0.1:$SSHP"
+        ficha_cerrar
+        INFO "La app debe conectar por SSL/TLS al $SP y el tráfico sale por SSH ($SSHP)."
     else
         ERR "Stunnel no levanto. Revisa con: systemctl status stunnel4"
     fi
@@ -3265,8 +3308,8 @@ trafico_activar(){
         INFO "Xray Stats API preparada en 127.0.0.1:10085 (conteo por email de usuario)."
     fi
     if [[ $N -gt 0 ]]; then
-        OK "Contadores SSH activos para $N usuarios."
-        WARN "Nota: iptables solo mide trafico de procesos del UID (SSH). Xray/WG/etc. se ven aparte si Stats responde."
+        ficha_ok "📶 CONTADORES ACTIVOS" "Usuarios SSH" "$N" "Medición" "iptables por UID (SSH)"
+        INFO "iptables solo mide tráfico de procesos del UID (SSH). Xray/WG/etc. se ven aparte si Stats responde."
     else
         ERR "No se pudieron crear reglas (iptables fallo?)."
     fi
@@ -3281,7 +3324,7 @@ fmt_corto(){
 }
 
 trafico_ver(){
-    echo -e "${CIAN}--- CONSUMO POR USUARIO ---${NC}"
+    ficha_abrir "📈 CONSUMO POR USUARIO"
     echo -e "${GRIS}Total = SSH (iptables) + Xray (Stats API). De mayor a menor consumo.${NC}"
     local U USED G P TOT=0 FILAS=()
     trafico_cache_cargar; TRAF_BATCH=1
@@ -3305,8 +3348,8 @@ trafico_ver(){
             fi
         done < <(printf '%s\n' "${FILAS[@]}" | sort -t'|' -k1,1nr)
     fi
-    echo
-    echo -e "  Total de todos los usuarios: ${CIAN}$(fmt_bytes "$TOT")${NC}"
+    ficha_fila "Total usuarios" "$(fmt_bytes "$TOT")" "$CIAN"
+    ficha_cerrar
     INFO "Reset pone a cero los contadores iptables (no borra las stats de Xray)."
     banner_todos_actualizar >/dev/null 2>&1 || true   # deja los banners con el consumo actual
     PAUSA
@@ -3320,7 +3363,7 @@ trafico_limite(){
     mkdir -p /etc/vps-trafico
     echo "$G" > "/etc/vps-trafico/$USU"
     banner_usuario_actualizar "$USU"   # el banner refleja el nuevo limite
-    OK "Limite de $USU = ${G}GB."
+    ficha_ok "🚦 LÍMITE DE TRÁFICO" "Usuario" "$USU" "Límite" "$([[ "$G" == 0 ]] && echo "sin límite" || echo "${G} GB")"
     PAUSA
 }
 
@@ -3409,17 +3452,17 @@ trafico_hist_registrar(){
 
 trafico_hist_ver(){
     local U DIAS=14 FECHA BYTES HDIR='/var/log/ghost-trafico-hist'
-    echo -e "${CIAN}--- HISTORIAL DE CONSUMO ---${NC}"
     pedir_usuario_ok U || { PAUSA; return; }
     if [[ ! -f "$HDIR/$U" ]]; then
         WARN "Sin historial para $U (se genera con el auto-corte activo)."
         PAUSA; return
     fi
-    echo -e "  Ultimos registros de ${BLANCO}$U${NC}:"
-    printf "  %-12s  %s\n" "FECHA" "CONSUMO"
+    ficha_abrir "📅 HISTORIAL DE CONSUMO · $U"
+    printf "%-12s  %s\n" "FECHA" "CONSUMO"
     tail -n "$DIAS" "$HDIR/$U" | while IFS='|' read -r FECHA BYTES; do
-        printf "  %-12s  %s\n" "$FECHA" "$(fmt_bytes "$BYTES")"
+        printf "%-12s  %s\n" "$FECHA" "$(fmt_bytes "$BYTES")"
     done
+    ficha_cerrar
     PAUSA
 }
 
@@ -3454,16 +3497,17 @@ trafico_bloquear_excedidos(){
 }
 
 trafico_cortar(){
-    local CORTADOS=0 U G
+    local CORTADOS=0 U G NOMBRES=""
     trafico_cache_cargar; TRAF_BATCH=1
     while read -r U G; do
         [[ -n "$U" ]] || continue
-        INFO "$U supero su limite (${G}GB) → bloqueado (SSH + Xray)."
         vps_log INFO "cuota excedida, bloqueado completo: $U (${G}GB)"
+        NOMBRES+="${NOMBRES:+, }$U (${G}GB)"
         CORTADOS=$((CORTADOS+1))
     done < <(trafico_bloquear_excedidos)
     TRAF_BATCH=0
-    [[ $CORTADOS -eq 0 ]] && OK "Nadie supero su limite." || OK "Bloqueados (SSH+Xray): $CORTADOS."
+    if [[ $CORTADOS -eq 0 ]]; then ficha_ok "🚫 CORTE POR CUOTA" "Bloqueados" "0 (nadie superó su límite)"
+    else ficha_mal "🚫 CORTE POR CUOTA" "Bloqueados (SSH+Xray)" "$CORTADOS" "Usuarios" "$NOMBRES"; fi
     banner_todos_actualizar >/dev/null 2>&1 || true
     PAUSA
 }
@@ -3535,9 +3579,9 @@ trafico_auto_toggle(){
         read -r -p "  > " OPC
         case "$OPC" in
             1) trafico_auto_pedir_min MIN; trafico_cron_instalar "$MIN"
-               OK "Frecuencia: cada $MIN min."; vps_log INFO "auto-corte cada $MIN min" ;;
+               ficha_ok "🤖 AUTO-CORTE" "Frecuencia" "cada $MIN min"; vps_log INFO "auto-corte cada $MIN min" ;;
             2) rm -f /etc/cron.d/ghost-panel-trafico /usr/local/bin/vps-trafico-cron.sh /run/ghost-trafico.lock
-               OK "Auto-corte desactivado (los banners vuelven a actualizarse solo con el panel)."
+               ficha_ok "🤖 AUTO-CORTE" "Estado" "desactivado" "Banners" "se actualizan solo con el panel"
                vps_log INFO "auto-corte desactivado" ;;
             *) INFO "Sin cambios." ;;
         esac
@@ -3545,9 +3589,8 @@ trafico_auto_toggle(){
         trafico_auto_pedir_min MIN
         trafico_cron_instalar "$MIN"
         /usr/local/bin/vps-trafico-cron.sh >/dev/null 2>&1       # primer ciclo ahora mismo
-        OK "Auto-corte ACTIVO: cada $MIN min bloquea a quien exceda su cuota y refresca los banners."
-        INFO "Activa antes los contadores (opcion 1) para que el trafico SSH cuente."
-        INFO "El bloqueo ahora cierra SSH y elimina al usuario de Xray (VLESS/VMess/Trojan)."
+        ficha_ok "🤖 AUTO-CORTE ACTIVO" "Frecuencia" "cada $MIN min" "Acción" "bloquea excedidos y refresca banners" "Bloqueo" "SSH + Xray (VLESS/VMess/Trojan)"
+        INFO "Activa antes los contadores (opción 1) para que el tráfico SSH cuente."
         vps_log INFO "auto-corte activado cada $MIN min"
     fi
     PAUSA
@@ -3561,7 +3604,7 @@ trafico_reset_usuario(){
     fi
     while iptables -D VPS-TRAFFIC -m owner --uid-owner "$UIDN" -j RETURN 2>/dev/null; do :; done
     iptables -A VPS-TRAFFIC -m owner --uid-owner "$UIDN" -j RETURN 2>/dev/null || true
-    OK "Contador iptables de $U en cero."
+    ficha_ok "🔄 CONTADOR EN CERO" "Usuario" "$U" "iptables" "en cero"
     return 0
 }
 
@@ -3580,14 +3623,14 @@ trafico_reset(){
             read -r -p "  Continuar con reset GLOBAL de iptables? (s/n): " SN
             [[ "$SN" == "s" || "$SN" == "S" ]] || { INFO "Cancelado."; PAUSA; return; }
             if iptables -L VPS-TRAFFIC -n >/dev/null 2>&1; then
-                iptables -Z VPS-TRAFFIC 2>/dev/null && OK "Contadores iptables en cero." || ERR "No se pudo hacer iptables -Z."
+                iptables -Z VPS-TRAFFIC 2>/dev/null && ficha_ok "🔄 CONTADORES EN CERO" "Alcance" "todos los usuarios" "iptables" "en cero" || ERR "No se pudo hacer iptables -Z."
             else
                 WARN "Cadena VPS-TRAFFIC no activa (activa contadores en Tráfico -> [1])."
             fi
             if systemctl is-active --quiet xray 2>/dev/null || pgrep -x xray >/dev/null 2>&1; then
                 read -r -p "  ¿Reiniciar Xray para limpiar también sus stats? (s/n): " SN
                 if [[ "$SN" == "s" || "$SN" == "S" ]]; then
-                    systemctl restart xray 2>/dev/null && OK "Xray reiniciado (stats a cero)." || ERR "No se pudo reiniciar Xray."
+                    systemctl restart xray 2>/dev/null && ficha_ok "🚀 XRAY REINICIADO" "Stats" "a cero" || ERR "No se pudo reiniciar Xray."
                 fi
             fi
             ;;
@@ -3597,7 +3640,7 @@ trafico_reset(){
             INFO "Nota: las stats de Xray de este usuario solo se limpian reiniciando Xray (global)."
             read -r -p "  ¿Reiniciar Xray ahora? (s/n): " SN
             if [[ "$SN" == "s" || "$SN" == "S" ]]; then
-                systemctl restart xray 2>/dev/null && OK "Xray reiniciado." || ERR "No se pudo reiniciar Xray."
+                systemctl restart xray 2>/dev/null && ficha_ok "🚀 XRAY REINICIADO" "Stats" "a cero" || ERR "No se pudo reiniciar Xray."
             fi
             ;;
         *) INFO "Cancelado." ;;
@@ -3608,7 +3651,7 @@ trafico_reset(){
 
 trafico_desbloquear_cuota(){
     # Desbloquea un usuario cortado por cuota: usermod -U + re-agrega a Xray + opcional subir GB + reset contador
-    local U G NEWG SN
+    local U G NEWG SN R_CUENTA R_CUOTA R_XRAY
     echo -e "${CIAN}--- DESBLOQUEAR POR CUOTA ---${NC}"
     # Listar los que estan marcados por cuota
     if compgen -G "/etc/vps-cuota-agotada/*" >/dev/null; then
@@ -3634,32 +3677,39 @@ trafico_desbloquear_cuota(){
     if ! [[ "$NEWG" =~ ^[0-9]{1,6}$ ]]; then ERR "Valor invalido."; PAUSA; return; fi
     NEWG=$((10#$NEWG))
     # 1) Desbloquear cuenta
-    usermod -U "$U" 2>/dev/null && OK "Cuenta $U desbloqueada." || ERR "No se pudo desbloquear $U."
+    usermod -U "$U" 2>/dev/null && R_CUENTA="desbloqueada" || R_CUENTA="ERROR: no se pudo desbloquear"
     # 2) Actualizar cuota
     if (( NEWG > 0 )); then
         mkdir -p /etc/vps-trafico
         echo "$NEWG" > "/etc/vps-trafico/$U"
-        OK "Nueva cuota: ${NEWG} GB"
+        R_CUOTA="${NEWG} GB"
     else
         rm -f "/etc/vps-trafico/$U"
-        OK "Sin limite de trafico."
+        R_CUOTA="sin límite"
     fi
     # 3) Re-agregar a Xray
-    xray_usuario add "$U" >/dev/null 2>&1 && OK "Usuario re-agregado a Xray." || WARN "No se pudo re-agregar a Xray (¿Xray instalado?)."
+    xray_usuario add "$U" >/dev/null 2>&1 && R_XRAY="re-agregado" || R_XRAY="no se pudo (¿Xray instalado?)"
     # 4) Reset contador del usuario
-    trafico_reset_usuario "$U" 2>/dev/null || true
+    trafico_reset_usuario "$U" >/dev/null 2>&1 || true
     # 5) Limpiar marca
     trafico_limpiar_marca_cuota "$U"
     # 6) Banner
     banner_usuario_actualizar "$U" >/dev/null 2>&1 || true
     banner_rebuild_match 2>/dev/null || true
     vps_log INFO "desbloqueado por cuota: $U (nueva cuota ${NEWG}GB)"
-    OK "Listo. $U puede volver a conectar (SSH + Xray)."
+    ficha_abrir "🔓 USUARIO DESBLOQUEADO" "$VERDE"
+    ficha_fila "Usuario" "$U" "$VERDE"
+    ficha_fila "Cuenta" "$R_CUENTA"
+    ficha_fila "Cuota" "$R_CUOTA"
+    ficha_fila "Xray" "$R_XRAY"
+    ficha_fila "Contador" "en cero"
+    ficha_fila "Estado" "puede volver a conectar" "$VERDE"
+    ficha_cerrar
     PAUSA
 }
 
 trafico_notif_config(){
-    local OPC CUR
+    local OPC CUR _t _h _k
     echo -e "${CIAN}--- NOTIFICACIONES DE CUOTA ---${NC}"
     echo "  Se envian al auto-cortar o al cortar manualmente por cuota."
     echo
@@ -3678,12 +3728,12 @@ trafico_notif_config(){
             read -r -p "  Chat ID${CUR:+ [$CUR]}: " C; C=${C:-$CUR}
             [[ -n "$T" ]] && ghost_conf_set TG_TOKEN "$T"
             [[ -n "$C" ]] && ghost_conf_set TG_CHAT "$C"
-            OK "Telegram configurado."
+            ficha_ok "📣 TELEGRAM CONFIGURADO" "Chat ID" "$(ghost_conf_get TG_CHAT)" "Bot token" "$([[ -n "$(ghost_conf_get TG_TOKEN)" ]] && echo '********' || echo '(vacío)')"
             ;;
         2)
             CUR=$(ghost_conf_get DISCORD_HOOK)
             read -r -p "  Webhook URL${CUR:+ [ya configurado]}: " H
-            [[ -n "$H" ]] && ghost_conf_set DISCORD_HOOK "$H" && OK "Discord configurado." || INFO "Sin cambios."
+            if [[ -n "$H" ]]; then ghost_conf_set DISCORD_HOOK "$H"; ficha_ok "📣 DISCORD CONFIGURADO" "Webhook" "guardado"; else INFO "Sin cambios."; fi
             ;;
         3)
             echo "  CallMeBot: obtene apikey en https://www.callmebot.com/blog/free-api-whatsapp-messages/"
@@ -3693,19 +3743,22 @@ trafico_notif_config(){
             read -r -p "  API Key${CUR:+ [$CUR]}: " K; K=${K:-$CUR}
             [[ -n "$P" ]] && ghost_conf_set WA_PHONE "$P"
             [[ -n "$K" ]] && ghost_conf_set WA_APIKEY "$K"
-            OK "WhatsApp CallMeBot configurado."
+            ficha_ok "📣 WHATSAPP CONFIGURADO" "Teléfono" "$(ghost_conf_get WA_PHONE)" "API Key" "$([[ -n "$(ghost_conf_get WA_APIKEY)" ]] && echo '********' || echo '(vacío)')"
             ;;
         4)
             INFO "Enviando mensaje de prueba..."
             notif_enviar "🧪 Prueba Ghost Panel — notificaciones de cuota OK ($(date '+%F %T'))"
-            OK "Enviado (si no llega, revisa token/webhook/apikey)."
+            ficha_ok "📣 PRUEBA ENVIADA" "Mensaje" "enviado" "Si no llega" "revisa token / webhook / apikey"
             ;;
         5)
-            echo "  Telegram token : $(ghost_conf_get TG_TOKEN | sed 's/./*/g' 2>/dev/null || echo '(vacio)')"
-            echo "  Telegram chat  : $(ghost_conf_get TG_CHAT || echo '(vacio)')"
-            echo "  Discord webhook: $(ghost_conf_get DISCORD_HOOK | head -c 40; echo ...)"
-            echo "  WhatsApp phone : $(ghost_conf_get WA_PHONE || echo '(vacio)')"
-            echo "  WhatsApp apikey: $(ghost_conf_get WA_APIKEY | sed 's/./*/g' 2>/dev/null || echo '(vacio)')"
+            _t=$(ghost_conf_get TG_TOKEN); _h=$(ghost_conf_get DISCORD_HOOK); _k=$(ghost_conf_get WA_APIKEY)
+            ficha_abrir "📣 NOTIFICACIONES DE CUOTA"
+            ficha_fila "Telegram token" "$([[ -n "$_t" ]] && echo '********' || echo '(vacío)')"
+            ficha_fila "Telegram chat" "$(ghost_conf_get TG_CHAT | grep . || echo '(vacío)')"
+            ficha_fila "Discord webhook" "$([[ -n "$_h" ]] && echo "${_h:0:30}..." || echo '(vacío)')"
+            ficha_fila "WhatsApp teléfono" "$(ghost_conf_get WA_PHONE | grep . || echo '(vacío)')"
+            ficha_fila "WhatsApp API Key" "$([[ -n "$_k" ]] && echo '********' || echo '(vacío)')"
+            ficha_cerrar
             ;;
         *) ;;
     esac
@@ -3757,7 +3810,7 @@ agregar_swap(){
     swapon /swapfile 2>/dev/null
     if swapon --show 2>/dev/null | grep -q '/swapfile'; then
         grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
-        OK "Swap de ${G}GB activa y persistente."
+        ficha_ok "💽 SWAP ACTIVA" "Tamaño" "${G} GB" "Archivo" "/swapfile" "Persistente" "sí (/etc/fstab)"
     else
         rm -f /swapfile
         ERR "No se pudo activar la swap."
@@ -3799,10 +3852,13 @@ HEOF
     sleep 1
     local IP; IP=$(ip_publica)
     if systemctl is-active --quiet hysteria-server 2>/dev/null || pgrep -x hysteria >/dev/null 2>&1; then
-        OK "Hysteria2 corriendo en UDP $HP"
-        echo
-        echo -e " ${AMARILLO}Enlace para el cliente (NekoBox / tu app):${NC}"
-        echo -e " ${VERDE}hysteria2://$PASS@$IP:$HP/?insecure=1#VPS-JORGEBARRIOS${NC}"
+        ficha_abrir "⚡ HYSTERIA2 INSTALADO"
+        ficha_fila "Estado" "corriendo" "$VERDE"
+        ficha_fila "IP / Host" "$IP"
+        ficha_fila "Puerto UDP" "$HP/udp"
+        ficha_fila "Contraseña" "$PASS" "$VERDE"
+        ficha_cerrar
+        printf '%bEnlace para el cliente (NekoBox / tu app):%b\n%b%s%b\n' "$AMARILLO" "$NC" "$VERDE" "hysteria2://$PASS@$IP:$HP/?insecure=1#VPS-JORGEBARRIOS" "$NC"
     else
         ERR "Hysteria no levanto. Revisa: journalctl -u hysteria-server"
     fi
@@ -3824,7 +3880,7 @@ restaurar_backup(){
     [[ "$CONF" != "RESTAURAR" ]] && { ERR "Cancelado."; PAUSA; return; }
     INFO "Restaurando $F ..."
     tar xzf "$F" -C / 2>/dev/null || { ERR "La restauracion fallo o quedo incompleta."; PAUSA; return; }
-    OK "Restaurado. Recomendado: reiniciar el VPS (Sistema -> Reiniciar VPS)."
+    ficha_aviso "📥 BACKUP RESTAURADO" "Archivo" "$F" "Recomendado" "reiniciar el VPS (Sistema → Reiniciar VPS)"
     PAUSA
 }
 
@@ -3909,11 +3965,13 @@ BEOF
     sleep 1
 
     if systemctl is-active --quiet badvpn 2>/dev/null || pgrep -f badvpn-udpgw >/dev/null 2>&1; then
-        OK "BadVPN ACTIVO en 127.0.0.1:${BP}"
-        echo
-        echo -e " ${AMARILLO}En la app del cliente (HTTP Injector / eProxy / tu app):${NC}"
-        echo -e "  UDP Gateway: ${VERDE}127.0.0.1:${BP}${NC} a traves del tunel SSH/SSL"
-        echo -e "  ${CIAN}Con eso funcionan juegos UDP y llamadas de WhatsApp/Telegram.${NC}"
+        ficha_abrir "🎮 BADVPN (UDP GW) ACTIVO"
+        ficha_fila "Estado" "ACTIVO" "$VERDE"
+        ficha_fila "UDP Gateway" "127.0.0.1:${BP}" "$VERDE"
+        ficha_fila "Uso" "a través del túnel SSH/SSL"
+        ficha_cerrar
+        INFO "En la app del cliente (HTTP Injector / eProxy / tu app) pon ese UDP Gateway."
+        INFO "Con eso funcionan juegos UDP y llamadas de WhatsApp/Telegram."
         vps_log INFO "badvpn instalado/activado puerto $BP"
     else
         ERR "BadVPN no levanto. Revisa: journalctl -u badvpn -n 30"
@@ -3928,7 +3986,7 @@ quitar_badvpn(){
     pkill -f badvpn-udpgw 2>/dev/null
     # Eliminar binario compilado (no viene de apt)
     rm -f /usr/local/bin/badvpn-udpgw /usr/bin/badvpn-udpgw 2>/dev/null
-    OK "BadVPN detenido y removido (servicio + binario)."
+    ficha_ok "🎮 BADVPN REMOVIDO" "Servicio" "detenido" "Binario" "eliminado"
     PAUSA
 }
 
@@ -3974,10 +4032,14 @@ PYEOF
     sleep 1
     local IP; IP=$(ip_publica)
     if systemctl is-active --quiet xray 2>/dev/null || pgrep -x xray >/dev/null 2>&1; then
-        OK "Xray WS corriendo en el puerto $WP (path $WPATH)"
-        echo
-        echo -e " ${AMARILLO}Enlace VLESS + WebSocket (ponelo detras de Cloudflare):${NC}"
-        echo -e " ${VERDE}vless://$UUID@$IP:$WP?type=ws&path=%2F${WPATH#/}&security=none#VPSJB-WS${NC}"
+        ficha_abrir "🌐 XRAY WS INSTALADO"
+        ficha_fila "Estado" "corriendo" "$VERDE"
+        ficha_fila "Protocolo" "VLESS + WebSocket"
+        ficha_fila "IP / Host" "$IP"
+        ficha_fila "Puerto" "$WP/tcp"
+        ficha_fila "Path" "$WPATH"
+        ficha_cerrar
+        printf '%bEnlace VLESS + WebSocket (ponlo detrás de Cloudflare):%b\n%b%s%b\n' "$AMARILLO" "$NC" "$VERDE" "vless://$UUID@$IP:$WP?type=ws&path=%2F${WPATH#/}&security=none#VPSJB-WS" "$NC"
         INFO "En tu app: network=ws, path=$WPATH, TLS desactivado (el CDN lo pone)."
     else
         ERR "Xray no levanto. Revisa: journalctl -u xray"
@@ -4198,10 +4260,13 @@ SVCEOF
     local IP; IP=$(ip_publica)
     if systemctl is-active --quiet vpsjb-ws 2>/dev/null || pgrep -f vpsjb-ws.py >/dev/null 2>&1; then
         ufw allow "$EP/tcp" >/dev/null 2>&1
-        OK "WS-epro ACTIVO: ws://$IP:$EP (cualquier path) -> SSH $SSHP"
-        echo
-        echo -e " ${AMARILLO}Config del cliente (HTTP Custom / HTTP Injector / tu app):${NC}"
-        echo -e "  Servidor WS: ${VERDE}$IP:$EP${NC}   (payload con Upgrade: websocket, o WebSocket estandar)"
+        ficha_abrir "🌐 WS-EPRO ACTIVO"
+        ficha_fila "Estado" "ACTIVO" "$VERDE"
+        ficha_fila "Servidor WS" "$IP:$EP" "$VERDE"
+        ficha_fila "Destino SSH" "127.0.0.1:$SSHP"
+        ficha_fila "Path" "cualquiera"
+        ficha_cerrar
+        INFO "Cliente (HTTP Custom / HTTP Injector): payload con Upgrade: websocket, o WebSocket estándar."
     else
         ERR "El proxy WS no levanto. Revisa: journalctl -u vpsjb-ws"
     fi
@@ -4475,19 +4540,17 @@ instalar_adguard(){
     fi
 
     if adguard_activo; then
-        OK "AdGuard Home ACTIVO."
-        echo
-        echo -e " ${AMARILLO}Seguridad:${NC} DNS en 127.0.0.1$(adguard_ip_disponible 10.66.0.1 && echo ' y 10.66.0.1 (WG activo)' || echo ' (10.66.0.1 se agrega cuando WireGuard este UP)')."
-        echo -e " ${AMARILLO}NO se abrio el puerto 53 a Internet.${NC}"
-        echo
-        echo -e " Panel web (desde tu PC):"
-        echo -e "   ${VERDE}ssh -L 3000:127.0.0.1:3000 root@$(ip_publica)${NC}"
-        echo -e "   Luego: ${CIAN}http://127.0.0.1:3000${NC}"
-        echo
+        ficha_abrir "🛡 ADGUARD HOME ACTIVO"
+        ficha_fila "Estado" "ACTIVO" "$VERDE"
+        ficha_fila "DNS en" "127.0.0.1$(adguard_ip_disponible 10.66.0.1 && echo ' y 10.66.0.1 (WG activo)' || echo ' (10.66.0.1 al levantar WG)')"
+        ficha_fila "Puerto 53" "NO abierto a Internet" "$VERDE"
+        ficha_fila "Panel web" "http://127.0.0.1:3000"
+        ficha_cerrar
+        printf '%bPanel web (ejecútalo en tu PC):%b\n%b%s%b\n' "$GRIS" "$NC" "$VERDE" "ssh -L 3000:127.0.0.1:3000 root@$(ip_publica)" "$NC"
         if [[ -f /etc/wireguard/wg0.conf ]]; then
-            echo -e " Clientes WireGuard: DNS = ${VERDE}10.66.0.1${NC}"
+            INFO "Clientes WireGuard: DNS = 10.66.0.1"
         else
-            INFO "Instala WireGuard despues: el panel pondra DNS=10.66.0.1 en el cliente."
+            INFO "Instala WireGuard después: el panel pondrá DNS=10.66.0.1 en el cliente."
         fi
         vps_log INFO "AdGuard Home instalado/activo"
     else
@@ -4505,7 +4568,7 @@ instalar_adguard(){
 }
 
 estado_adguard(){
-    echo -e "${CIAN}--- ESTADO AdGuard Home ---${NC}"
+    ficha_abrir "📊 ESTADO ADGUARD HOME"
     if adguard_instalado; then
         if adguard_activo; then
             OK "Servicio ACTIVO"
@@ -4532,6 +4595,7 @@ estado_adguard(){
     else
         ERR "AdGuard Home no esta instalado."
     fi
+    ficha_cerrar
     PAUSA
 }
 
@@ -4541,7 +4605,7 @@ actualizar_listas_adguard(){
     fi
     INFO "Las listas se actualizan desde el panel web (Filters)."
     INFO "Tambien puedes forzar recarga del servicio:"
-    systemctl restart AdGuardHome 2>/dev/null && OK "Servicio reiniciado (tomara las listas al cargar)." || ERR "No se pudo reiniciar."
+    systemctl restart AdGuardHome 2>/dev/null && ficha_ok "🔄 ADGUARD REINICIADO" "Servicio" "reiniciado" "Listas" "se cargan al iniciar" || ERR "No se pudo reiniciar."
     PAUSA
 }
 
@@ -4555,7 +4619,7 @@ quitar_adguard(){
     rm -f /etc/systemd/resolved.conf.d/adguardhome.conf
     systemctl restart systemd-resolved 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null
-    OK "AdGuard Home eliminado. DNS del sistema restaurado a systemd-resolved."
+    ficha_ok "🗑 ADGUARD HOME ELIMINADO" "DNS del sistema" "restaurado a systemd-resolved"
     vps_log INFO "AdGuard Home eliminado"
     PAUSA
 }
@@ -4566,8 +4630,8 @@ reparar_adguard(){
     if ! adguard_instalado; then ERR "AdGuard Home no esta instalado."; PAUSA; return; fi
     INFO "Liberando :53, reescribiendo config y re-registrando el servicio..."
     if adguard_arreglar_y_arrancar; then
-        OK "Servicio ACTIVO tras reparacion"
         vps_log INFO "AdGuard Home reparado"
+        ficha_ok "🛠 ADGUARD HOME REPARADO" "Servicio" "ACTIVO"
     else
         ERR "No arranco. Diagnostico:"
         adguard_diag
@@ -4875,7 +4939,7 @@ ssl_dias_restantes(){
 }
 
 ssl_dominio_poner(){
-    local DOM EM cur re_d re_e
+    local DOM EM cur re_d re_e R_A="apunta a esta VPS" R_W="apunta a esta VPS"
     re_d='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$'
     re_e='^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'
     cur=$(ssl_conf_get DOMINIO)
@@ -4894,9 +4958,15 @@ ssl_dominio_poner(){
     fi
     ssl_conf_set DOMINIO "$DOM"; ssl_conf_set EMAIL "$EM"
     echo
-    ssl_dns_verificar "$DOM" || WARN "El dominio principal (@) aun no apunta a esta VPS."
-    ssl_dns_verificar "ghost-prueba-$RANDOM.$DOM" || WARN "Falta el comodin (*): los subdominios no resolveran."
+    ssl_dns_verificar "$DOM" || R_A="AÚN NO apunta a esta VPS"
+    ssl_dns_verificar "ghost-prueba-$RANDOM.$DOM" || R_W="FALTA el comodín (*): los subdominios no resolverán"
     vps_log INFO "ssl: dominio $DOM"
+    ficha_abrir "🌍 DOMINIO CONFIGURADO" "$VERDE"
+    ficha_fila "Dominio" "$DOM" "$VERDE"
+    ficha_fila "Correo avisos" "${EM:-sin correo}"
+    ficha_fila "Registro @" "$R_A" "$([[ "$R_A" == apunta* ]] && echo "$VERDE" || echo "$AMARILLO")"
+    ficha_fila "Registro *" "$R_W" "$([[ "$R_W" == apunta* ]] && echo "$VERDE" || echo "$AMARILLO")"
+    ficha_cerrar
     PAUSA
 }
 
@@ -4914,8 +4984,8 @@ ssl_sub_crear(){
     if (( $(ssl_subs_lista | wc -l) >= 90 )); then ERR "Limite de 90 subdominios por certificado."; PAUSA; return; fi
     ssl_dns_verificar "$F" || { PAUSA; return; }
     echo "$F" >> "$SSL_DIR/subdominios.list"
-    OK "Subdominio $F registrado."
     vps_log INFO "ssl: subdominio $F"
+    ficha_ok "🌍 SUBDOMINIO REGISTRADO" "Subdominio" "$F" "Apunta a" "$(ip_publica)"
     read -r -p "  ¿Actualizar el certificado ahora para incluirlo? (S/n): " SN
     if [[ ! "$SN" =~ ^[nN]$ ]]; then ssl_emitir_flujo; else INFO "Pendiente: usa 'Emitir certificado SSL' cuando quieras."; fi
     PAUSA
@@ -4932,8 +5002,7 @@ ssl_subs_menu(){
     F=$(ssl_subs_lista | sed -n "${SEL}p")
     [[ -n "$F" ]] || { ERR "Numero invalido."; PAUSA; return; }
     sed -i "\#^${F}\$#d" "$SSL_DIR/subdominios.list"
-    OK "$F quitado de la lista."
-    INFO "Seguira dentro del certificado hasta que lo reemitas."
+    ficha_ok "🗑 SUBDOMINIO QUITADO" "Subdominio" "$F" "Certificado" "lo conserva hasta que lo reemitas"
     read -r -p "  ¿Reemitir ahora para quitarlo del certificado? (s/N): " SN
     [[ "$SN" =~ ^[sSyY]$ ]] && ssl_emitir_flujo force
     PAUSA
@@ -4973,7 +5042,7 @@ ssl_emitir_flujo(){
     ssl_certbot_run real "$force" || return 1
     ssl_desplegar            # no-op si el deploy-hook ya lo hizo
     ssl_aplicar_adguard
-    OK "Certificado emitido y aplicado a los servicios instalados."
+    ficha_ok "🔒 CERTIFICADO EMITIDO" "Dominio" "$(ssl_conf_get DOMINIO)" "Días restantes" "$(ssl_dias_restantes)" "Aplicado a" "los servicios instalados"
     ssl_enlaces
     return 0
 }
@@ -4994,7 +5063,7 @@ ssl_renovar(){
     [[ "$SN" =~ ^[sSyY]$ ]] && a+=(--force-renewal)
     ssl_hook_instalar
     if certbot "${a[@]}" >/tmp/ghost-certbot.log 2>&1; then
-        OK "Listo. Dias restantes: $(ssl_dias_restantes)"
+        ficha_ok "🔄 CERTIFICADO RENOVADO" "Días restantes" "$(ssl_dias_restantes)"
         rm -f /tmp/ghost-certbot.log
     else
         ERR "Fallo la renovacion:"; tail -n 12 /tmp/ghost-certbot.log | sed 's/^/    /'
@@ -5024,7 +5093,7 @@ ssl_aplicar(){
     [[ -f "$SSL_LIVE/fullchain.pem" ]] || { ERR "Aun no hay certificado (opcion 4)."; PAUSA; return; }
     echo -e "${CIAN}--- APLICAR A LOS SERVICIOS ---${NC}"
     ssl_hook_instalar
-    ssl_desplegar force && OK "Stunnel, Hysteria2, Trojan y Webmin actualizados (los que esten instalados)."
+    ssl_desplegar force && ficha_ok "🔒 CERTIFICADO APLICADO" "Servicios" "Stunnel, Hysteria2, Trojan, Webmin" "Alcance" "solo los que estén instalados"
     ssl_aplicar_adguard
     ssl_enlaces
     PAUSA
@@ -5035,16 +5104,16 @@ ssl_fp(){ openssl x509 -noout -fingerprint -sha256 -in "$1" 2>/dev/null | cut -d
 ssl_enlaces(){
     local DOM P PASS TROJ
     DOM=$(ssl_conf_get DOMINIO); [[ -n "$DOM" && -f "$SSL_DIR/fullchain.pem" ]] || return 0
-    echo
-    echo -e " ${AMARILLO}Conecta usando el DOMINIO (no la IP). Certificado valido: no actives 'aceptar invalidos'.${NC}"
+    ficha_abrir "🔗 CONECTA CON TU DOMINIO" "$AMARILLO"
+    echo -e "${AMARILLO}Usa el DOMINIO (no la IP). Certificado válido: no actives 'aceptar inválidos'.${NC}"
     if [[ -f /etc/stunnel/stunnel.conf ]]; then
         P=$(awk '/^accept *=/{print $3; exit}' /etc/stunnel/stunnel.conf)
-        echo -e "  Stunnel : host/SNI ${VERDE}$DOM${NC}  puerto SSL ${VERDE}${P:-?}${NC}"
+        echo -e "Stunnel : host/SNI ${VERDE}$DOM${NC}  puerto SSL ${VERDE}${P:-?}${NC}"
     fi
     if [[ -f /etc/hysteria/config.yaml ]]; then
         P=$(awk '/^listen:/{sub(/^:/,"",$2); print $2; exit}' /etc/hysteria/config.yaml)
         PASS=$(awk -F'"' '/password:/{print $2; exit}' /etc/hysteria/config.yaml)
-        echo -e "  Hysteria: ${VERDE}hysteria2://$PASS@$DOM:${P:-?}/?sni=$DOM#VPS-JORGEBARRIOS${NC}"
+        echo -e "Hysteria: ${VERDE}hysteria2://$PASS@$DOM:${P:-?}/?sni=$DOM#VPS-JORGEBARRIOS${NC}"
     fi
     if [[ -f /etc/vpsjb-trojan/cert.pem ]]; then
         TROJ=$(python3 - <<'PYEOF' 2>/dev/null
@@ -5060,47 +5129,58 @@ except Exception:
 PYEOF
 )
         while read -r P PASS; do
-            [[ -n "$P" ]] && echo -e "  Trojan  : ${VERDE}trojan://$PASS@$DOM:$P?security=tls&sni=$DOM#VPSJB-Trojan${NC}"
+            [[ -n "$P" ]] && echo -e "Trojan  : ${VERDE}trojan://$PASS@$DOM:$P?security=tls&sni=$DOM#VPSJB-Trojan${NC}"
         done <<< "$TROJ"
     fi
     if [[ -f /etc/webmin/miniserv.conf ]]; then
         P=$(grep -o '^port=[0-9]*' /etc/webmin/miniserv.conf 2>/dev/null | cut -d= -f2 | head -1)
-        echo -e "  Webmin  : ${VERDE}https://$DOM:${P:-10000}${NC}"
+        echo -e "Webmin  : ${VERDE}https://$DOM:${P:-10000}${NC}"
     fi
     if grep -q 'certificate_path: /etc/ghost-ssl' /opt/AdGuardHome/AdGuardHome.yaml 2>/dev/null; then
-        echo -e "  AdGuard : DNS-over-TLS interno en 853 (solo clientes WireGuard), nombre ${VERDE}$DOM${NC}"
+        echo -e "AdGuard : DNS-over-TLS interno en 853 (solo clientes WireGuard), nombre ${VERDE}$DOM${NC}"
     fi
+    ficha_cerrar
 }
 
 ssl_estado(){
     local DOM D FP nsub
     DOM=$(ssl_conf_get DOMINIO)
-    echo -e "${CIAN}--- ESTADO DOMINIO Y SSL ---${NC}"
     [[ -n "$DOM" ]] || { INFO "Sin dominio configurado (opcion 1)."; PAUSA; return; }
     nsub=$(ssl_subs_lista | wc -l)
-    echo -e "  Dominio     : ${VERDE}$DOM${NC}   Subdominios: ${VERDE}$nsub${NC}"
     D=$(ssl_dias_restantes)
-    if [[ -z "$D" ]]; then WARN "Aun no hay certificado emitido (opcion 4)."; PAUSA; return; fi
-    echo -e "  Certificado : vence en ${VERDE}$D dias${NC}  ($(openssl x509 -issuer -noout -in "$SSL_DIR/fullchain.pem" 2>/dev/null | sed 's/^issuer=//'))"
-    echo -e "  Nombres     : $(openssl x509 -noout -ext subjectAltName -in "$SSL_DIR/fullchain.pem" 2>/dev/null | tail -n +2 | tr -d ' ' | sed 's/DNS://g')"
-    if systemctl is-active --quiet certbot.timer 2>/dev/null; then echo -e "  Renovacion  : ${VERDE}automatica (certbot.timer)${NC}"
-    else WARN "certbot.timer inactivo: la renovacion automatica no corre (systemctl enable --now certbot.timer)."; fi
+    ficha_abrir "📊 ESTADO DOMINIO Y SSL"
+    ficha_fila "Dominio" "$DOM" "$VERDE"
+    ficha_fila "Subdominios" "$nsub"
+    if [[ -z "$D" ]]; then
+        ficha_fila "Certificado" "aún no hay (opción 4)" "$AMARILLO"
+        ficha_cerrar; PAUSA; return
+    fi
+    ficha_fila "Certificado" "vence en $D días" "$VERDE"
+    ficha_fila "Emisor" "$(openssl x509 -issuer -noout -in "$SSL_DIR/fullchain.pem" 2>/dev/null | sed 's/^issuer=//')"
+    ficha_fila "Nombres" "$(openssl x509 -noout -ext subjectAltName -in "$SSL_DIR/fullchain.pem" 2>/dev/null | tail -n +2 | tr -d ' ' | sed 's/DNS://g')"
+    if systemctl is-active --quiet certbot.timer 2>/dev/null; then ficha_fila "Renovación" "automática (certbot.timer)" "$VERDE"
+    else ficha_fila "Renovación" "certbot.timer inactivo (systemctl enable --now certbot.timer)" "$AMARILLO"; fi
     FP=$(ssl_fp "$SSL_DIR/fullchain.pem")
-    echo "  Servicios:"
-    [[ -f /etc/stunnel/stunnel.conf ]]  && echo -e "    Stunnel   : $(ssl_estado_fp "$FP" /etc/stunnel/stunnel.pem)"
-    [[ -f /etc/hysteria/server.crt ]]   && echo -e "    Hysteria2 : $(ssl_estado_fp "$FP" /etc/hysteria/server.crt)"
-    [[ -f /etc/vpsjb-trojan/cert.pem ]] && echo -e "    Trojan    : $(ssl_estado_fp "$FP" /etc/vpsjb-trojan/cert.pem)"
+    [[ -f /etc/stunnel/stunnel.conf ]]  && ssl_estado_fila "Stunnel" "$FP" /etc/stunnel/stunnel.pem
+    [[ -f /etc/hysteria/server.crt ]]   && ssl_estado_fila "Hysteria2" "$FP" /etc/hysteria/server.crt
+    [[ -f /etc/vpsjb-trojan/cert.pem ]] && ssl_estado_fila "Trojan" "$FP" /etc/vpsjb-trojan/cert.pem
     if [[ -f /etc/webmin/miniserv.conf ]]; then
-        if grep -q "^certfile=$SSL_DIR/fullchain.pem" /etc/webmin/miniserv.conf; then echo -e "    Webmin    : ${VERDE}aplicado${NC}"
-        else echo -e "    Webmin    : ${AMARILLO}pendiente (opcion 7)${NC}"; fi
+        if grep -q "^certfile=$SSL_DIR/fullchain.pem" /etc/webmin/miniserv.conf; then ficha_fila "Webmin" "aplicado" "$VERDE"
+        else ficha_fila "Webmin" "pendiente (opción 7)" "$AMARILLO"; fi
     fi
     if [[ -d /opt/AdGuardHome ]]; then
-        if grep -q 'certificate_path: /etc/ghost-ssl' /opt/AdGuardHome/AdGuardHome.yaml 2>/dev/null; then echo -e "    AdGuard   : ${VERDE}aplicado${NC}"
-        else echo -e "    AdGuard   : ${AMARILLO}pendiente (opcion 7)${NC}"; fi
+        if grep -q 'certificate_path: /etc/ghost-ssl' /opt/AdGuardHome/AdGuardHome.yaml 2>/dev/null; then ficha_fila "AdGuard" "aplicado" "$VERDE"
+        else ficha_fila "AdGuard" "pendiente (opción 7)" "$AMARILLO"; fi
     fi
-    echo -e "  ${GRIS}No usan certificado: Reality, WS-epro, Shadowsocks, OpenVPN, WireGuard, BadVPN, SSH.${NC}"
+    echo -e "${GRIS}No usan certificado: Reality, WS-epro, Shadowsocks, OpenVPN, WireGuard, BadVPN, SSH.${NC}"
+    ficha_cerrar
     ssl_enlaces
     PAUSA
+}
+ssl_estado_fila(){
+    # ssl_estado_fila ETIQUETA HUELLA_ESPERADA ARCHIVO -> fila "aplicado" (verde) / "pendiente" (amarillo)
+    if [[ "$(ssl_fp "$3")" == "$2" ]]; then ficha_fila "$1" "aplicado" "$VERDE"
+    else ficha_fila "$1" "pendiente (opción 7)" "$AMARILLO"; fi
 }
 ssl_estado_fp(){
     # ssl_estado_fp HUELLA_ESPERADA ARCHIVO -> "aplicado" / "pendiente"
@@ -5149,7 +5229,7 @@ PYEOF
         DEBIAN_FRONTEND=noninteractive apt purge -y certbot >/dev/null 2>&1
         rm -rf /etc/letsencrypt
     fi
-    OK "Dominio y SSL removidos; los servicios volvieron a su certificado anterior."
+    ficha_ok "🗑 DOMINIO Y SSL REMOVIDOS" "Servicios" "volvieron a su certificado anterior" "DNS Cloudflare" "no se tocó"
     vps_log INFO "ssl: removido"
     return 0
 }
@@ -5272,7 +5352,7 @@ menu_herramientas(){
         case "$OP" in
             1) instalar_comando_global ;; 2) auto_menu ;; 3) quitar_auto_menu ;;
             4) auto_update ;; 5) menu_checkuser ;; 7) menu_tema ;; 8) desinstalar_ghost ;;
-            6) rm -f /etc/vps-manager.lang; seleccionar_idioma; OK "Idioma: $IDIOMA / Language: $IDIOMA"; PAUSA ;;
+            6) rm -f /etc/vps-manager.lang; seleccionar_idioma; ficha_ok "🌐 IDIOMA" "Idioma" "$IDIOMA"; PAUSA ;;
             0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
         esac
     done
@@ -5339,10 +5419,14 @@ SSSVC
         local IP B64
         IP=$(ip_publica)
         B64=$(printf 'aes-256-gcm:%s' "$PASS" | base64 -w0 2>/dev/null || printf 'aes-256-gcm:%s' "$PASS" | base64)
-        OK "Shadowsocks ACTIVO en puerto $SP (aes-256-gcm)"
-        echo
-        echo -e " ${AMARILLO}Enlace para el cliente (SS/SSR compatible):${NC}"
-        echo -e " ${VERDE}ss://$B64@$IP:$SP#VPSJB-SS${NC}"
+        ficha_abrir "🎭 SHADOWSOCKS ACTIVO"
+        ficha_fila "Estado" "ACTIVO" "$VERDE"
+        ficha_fila "IP / Host" "$IP"
+        ficha_fila "Puerto" "$SP (tcp + udp)"
+        ficha_fila "Cifrado" "aes-256-gcm"
+        ficha_fila "Contraseña" "$PASS" "$VERDE"
+        ficha_cerrar
+        printf '%bEnlace para el cliente (SS/SSR compatible):%b\n%b%s%b\n' "$AMARILLO" "$NC" "$VERDE" "ss://$B64@$IP:$SP#VPSJB-SS" "$NC"
     else
         ERR "Shadowsocks no levanto. Revisa: journalctl -u vpsjb-ss"
     fi
@@ -5397,10 +5481,14 @@ PYEOF
     sleep 1
     if systemctl is-active --quiet xray 2>/dev/null || pgrep -x xray >/dev/null 2>&1; then
         local IP; IP=$(ip_publica)
-        OK "Trojan ACTIVO en puerto $TP (SNI $SNI)"
-        echo
-        echo -e " ${AMARILLO}Enlace para el cliente (activar 'allowInsecure'):${NC}"
-        echo -e " ${VERDE}trojan://$PASS@$IP:$TP?security=tls&sni=$SNI&allowInsecure=1#VPSJB-Trojan${NC}"
+        ficha_abrir "🐴 TROJAN ACTIVO"
+        ficha_fila "Estado" "ACTIVO" "$VERDE"
+        ficha_fila "IP / Host" "$IP"
+        ficha_fila "Puerto" "$TP/tcp"
+        ficha_fila "SNI" "$SNI"
+        ficha_fila "Contraseña" "$PASS" "$VERDE"
+        ficha_cerrar
+        printf '%bEnlace para el cliente (activar allowInsecure):%b\n%b%s%b\n' "$AMARILLO" "$NC" "$VERDE" "trojan://$PASS@$IP:$TP?security=tls&sni=$SNI&allowInsecure=1#VPSJB-Trojan" "$NC"
     else
         ERR "Xray no levanto. Revisa: journalctl -u xray"
     fi
@@ -5463,17 +5551,16 @@ Endpoint = $IP:$WP
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 CLIENTEOF
-        OK "WireGuard ACTIVO (puerto UDP $WP)"
+        ficha_ok "🐉 WIREGUARD ACTIVO" "Estado" "ACTIVO" "IP / Host" "$IP" "Puerto" "$WP/udp" "DNS del cliente" "$WGDNS" "Config cliente" "/root/wg-client.conf"
         # Si AdGuard esta instalado, reescribir config para bindear 10.66.0.1 ahora que la IP existe
         if adguard_instalado 2>/dev/null; then
             INFO "Actualizando AdGuard Home para escuchar en 10.66.0.1 (adblock en el tunel)..."
             adguard_escribir_config /opt/AdGuardHome/AdGuardHome.yaml 2>/dev/null || true
             systemctl restart AdGuardHome 2>/dev/null || true
         fi
-        INFO "Config del cliente: /root/wg-client.conf"
-        echo -e " ${AMARILLO}--- para la app WireGuard ---${NC}"
+        ficha_abrir "📲 CONFIG PARA LA APP WIREGUARD" "$AMARILLO"
         cat /root/wg-client.conf
-        echo
+        ficha_cerrar
         if command -v qrencode >/dev/null 2>&1; then
             echo -e " ${CIAN}QR para escanear desde el celular:${NC}"
             qrencode -t ansiutf8 < /root/wg-client.conf 2>/dev/null || qrencode -t UTF8 < /root/wg-client.conf 2>/dev/null || true
@@ -5499,7 +5586,7 @@ quitar_xray_completo(){
     rm -rf /usr/local/etc/xray /etc/vpsjb-trojan
     systemctl daemon-reload 2>/dev/null
     pkill -x xray 2>/dev/null
-    OK "Xray (y Trojan/WS) removido."
+    ficha_ok "🗑 XRAY REMOVIDO" "Incluye" "Xray, Trojan y WS" "Estado" "desinstalado"
     PAUSA
 }
 quitar_wsepro(){
@@ -5507,7 +5594,7 @@ quitar_wsepro(){
     rm -f /etc/systemd/system/vpsjb-ws.service /usr/local/bin/vpsjb-ws.py
     systemctl daemon-reload 2>/dev/null
     pkill -f vpsjb-ws.py 2>/dev/null
-    OK "WS-epro removido."
+    ficha_ok "🗑 WS-EPRO REMOVIDO" "Servicio" "detenido y eliminado"
     PAUSA
 }
 quitar_stunnel(){
@@ -5517,9 +5604,9 @@ quitar_stunnel(){
     read -r -p "Tambien desinstalar el paquete stunnel4? (s/n): " SN
     if [[ "$SN" == "s" ]]; then
         apt purge -y stunnel4 2>/dev/null && apt autoremove -y >/dev/null 2>&1
-        OK "Stunnel detenido y paquete eliminado."
+        ficha_ok "🗑 STUNNEL REMOVIDO" "Servicio" "detenido" "Paquete" "eliminado"
     else
-        OK "Stunnel detenido (paquete permanece instalado)."
+        ficha_ok "🗑 STUNNEL REMOVIDO" "Servicio" "detenido" "Paquete" "permanece instalado"
     fi
     PAUSA
 }
@@ -5534,9 +5621,9 @@ quitar_hysteria(){
         # instalador oficial suele dejar unit en /etc/systemd/system
         rm -f /etc/systemd/system/hysteria-server.service /lib/systemd/system/hysteria-server*.service 2>/dev/null
         systemctl daemon-reload 2>/dev/null
-        OK "Hysteria2 removido por completo."
+        ficha_ok "🗑 HYSTERIA2 REMOVIDO" "Servicio" "detenido" "Binario y certificados" "eliminados"
     else
-        OK "Hysteria2 detenido (binario puede permanecer)."
+        ficha_ok "🗑 HYSTERIA2 REMOVIDO" "Servicio" "detenido" "Binario" "puede permanecer"
     fi
     PAUSA
 }
@@ -5548,9 +5635,9 @@ quitar_shadowsocks(){
     read -r -p "Tambien desinstalar el paquete shadowsocks-libev? (s/n): " SN
     if [[ "$SN" == "s" ]]; then
         apt purge -y shadowsocks-libev 2>/dev/null && apt autoremove -y >/dev/null 2>&1
-        OK "Shadowsocks detenido y paquete eliminado."
+        ficha_ok "🗑 SHADOWSOCKS REMOVIDO" "Servicio" "detenido" "Paquete" "eliminado"
     else
-        OK "Shadowsocks detenido (paquete permanece instalado)."
+        ficha_ok "🗑 SHADOWSOCKS REMOVIDO" "Servicio" "detenido" "Paquete" "permanece instalado"
     fi
     PAUSA
 }
@@ -5567,7 +5654,7 @@ except Exception:
 PYEOF
     rm -rf /etc/vpsjb-trojan
     xray_recargar 2>/dev/null
-    OK "Trojan removido del Xray."
+    ficha_ok "🗑 TROJAN REMOVIDO" "Estado" "quitado de Xray"
     PAUSA
 }
 quitar_wireguard(){
@@ -5576,9 +5663,9 @@ quitar_wireguard(){
     read -r -p "Tambien desinstalar el paquete wireguard? (s/n): " SN
     if [[ "$SN" == "s" ]]; then
         apt purge -y wireguard wireguard-tools 2>/dev/null && apt autoremove -y >/dev/null 2>&1
-        OK "WireGuard detenido y paquete eliminado."
+        ficha_ok "🗑 WIREGUARD REMOVIDO" "Servicio" "detenido" "Paquete" "eliminado"
     else
-        OK "WireGuard detenido (paquete permanece instalado)."
+        ficha_ok "🗑 WIREGUARD REMOVIDO" "Servicio" "detenido" "Paquete" "permanece instalado"
     fi
     PAUSA
 }
@@ -5637,7 +5724,7 @@ ZEOF
     systemctl daemon-reload
     systemctl enable vpsjb-zram 2>/dev/null
     if swapon --show 2>/dev/null | grep -q zram; then
-        OK "ZRAM de ${G}GB activa (prioridad alta, mas rapida que swap de disco)."
+        ficha_ok "🧠 ZRAM ACTIVA" "Tamaño" "${G} GB" "Prioridad" "alta (más rápida que swap de disco)"
     else
         ERR "ZRAM no pudo activarse en este entorno."
     fi
@@ -5676,13 +5763,17 @@ tunel_trycloudflare(){
     done
     echo
     if [[ -n "$URL" ]]; then
-        OK "Tunel CDN activo:"
-        echo
-        echo -e " ${VERDE}${URL}${NC}"
-        echo
-        echo -e " ${AMARILLO}Uso en la app: WebSocket activado, servidor ${URL#https://} puerto 443, path /${NC}"
-        echo -e " ${AMARILLO}OJO: la URL cambia al reiniciar el tunel. Es para pruebas/demos.${NC}"
-        echo -e " ${CIAN}Log: /var/log/ghost-cf-tunnel.log  |  Frenar: pkill cloudflared${NC}"
+        ficha_abrir "⛅ TÚNEL CDN ACTIVO"
+        ficha_fila "Estado" "ACTIVO" "$VERDE"
+        ficha_fila "Servidor" "${URL#https://}" "$VERDE"
+        ficha_fila "Puerto" "443"
+        ficha_fila "Path" "/"
+        ficha_fila "Log" "/var/log/ghost-cf-tunnel.log"
+        ficha_fila "Para frenar" "pkill cloudflared"
+        ficha_cerrar
+        printf '%b%s%b\n' "$VERDE" "$URL" "$NC"
+        WARN "La URL cambia al reiniciar el túnel. Es para pruebas/demos."
+        INFO "En la app: WebSocket activado, servidor ${URL#https://}, puerto 443, path /"
     else
         ERR "El tunel no dio URL a tiempo. Log:"
         tail -5 /var/log/ghost-cf-tunnel.log 2>/dev/null
@@ -5691,7 +5782,7 @@ tunel_trycloudflare(){
 }
 
 quitar_tunel_cdn(){
-    pkill -x cloudflared 2>/dev/null && OK "Tunel CDN detenido." || ERR "No habia tunel corriendo."
+    pkill -x cloudflared 2>/dev/null && ficha_ok "⛅ TÚNEL CDN DETENIDO" "Estado" "detenido" || ERR "No habia tunel corriendo."
     PAUSA
 }
 
@@ -5739,16 +5830,15 @@ desinst_protocolos(){
 
 desinstalar_ghost(){
     local RUN WORD R U L N=0 DO_USERS=0 DO_PROTO=1 DO_BK=0 USERS=()
-    echo -e "${ROJO}--- 🔥 $(T t_du_titulo) ---${NC}"
-    echo
-    echo "  Se eliminara TODO lo que creo Ghost Panel:"
+    ficha_abrir "🔥 $(T t_du_titulo)" "$ROJO"
+    echo "Se eliminará TODO lo que creó Ghost Panel:"
     echo "   · Servicios: limiter, CheckUser, cron de vencidos y de auto-corte, contadores iptables"
     echo "   · Banners (OpenSSH Match User, /etc/banner-vps, Dropbear) y auto-menu"
     echo "   · Datos: limites, trafico, usuarios del panel, licencia, idioma, links, logs"
     echo "   · Dominio y SSL: certificado, hooks de renovacion y lista de subdominios"
     echo "   · Ajustes: sysctl/BBR del panel, jail.local de fail2ban"
     echo "   · El comando ghostpanel (vpsmgr, vps) y este archivo del script"
-    echo
+    ficha_cerrar
     while read -r U; do
         usuario_protegido "$U" && continue
         USERS+=("$U")
@@ -5840,10 +5930,11 @@ desinstalar_ghost(){
     [[ -n "$RUN" && -f "$RUN" ]] && rm -f "$RUN"
     rm -f /var/log/ghost-panel.log
 
-    echo
-    echo -e "  👻 ${VERDE}$(T t_du_fin)${NC}"
-    echo -e "  ${GRIS}No se tocaron: paquetes del sistema (python3, curl, ufw, fail2ban...), reglas UFW ya abiertas,"
-    echo -e "  PasswordAuthentication de sshd, ni OpenVPN (para quitarlo: bash /root/openvpn-install.sh).${NC}"
+    ficha_abrir "👻 GHOST PANEL DESINSTALADO" "$VERDE"
+    echo -e "${VERDE}$(T t_du_fin)${NC}"
+    echo -e "${GRIS}No se tocaron: paquetes del sistema (python3, curl, ufw, fail2ban...), reglas UFW ya abiertas,"
+    echo -e "PasswordAuthentication de sshd, ni OpenVPN (para quitarlo: bash /root/openvpn-install.sh).${NC}"
+    ficha_cerrar
     echo
     exit 0
 }
