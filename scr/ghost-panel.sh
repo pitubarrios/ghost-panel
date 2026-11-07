@@ -3,7 +3,21 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 3.11.2
+#  Version: 3.11.4
+#  Cambios 3.11.4:
+#    - Bot Telegram: al CREAR usuario ahora entrega ademas un bloque unico
+#      "TOCA EL BLOQUE PARA COPIAR TODO JUNTO" (pre monospace): usuario,
+#      contrasena, IP, puerto, vencimiento, conexiones y trafico. Un toque
+#      copia el bloque entero para pegarlo y enviarselo al cliente.
+#    - Bot Telegram: la opcion CLAVE tambien muestra el bloque copiable
+#      (usuario + contrasena nueva + IP + puerto + vencimiento).
+#  Cambios 3.11.3:
+#    - Diagnostico (Sistema/Recursos -> [2]): si la RAM pasa del 85% ahora
+#      muestra los 5 procesos que mas memoria usan (agrupados por nombre y en
+#      MB), el detalle de free -h y avisa si no hay swap (recomienda ZRAM).
+#      Sirve para descartar mineros: un nombre desconocido comiendo RAM delata.
+#      Auditoria SSL: la instalacion SSL (Stunnel y Dominio/Certbot) solo usa
+#      paquetes de los repos oficiales de Ubuntu + openssl local; sin virus.
 #  Cambios 3.11.2:
 #    - FIX "BTK: unbound variable" al instalar el bot (al escribir tu ID y dar
 #      ENTER): el flag OKF arrancaba en 0 y el chequeo [[ -z "$OKF" ]] lo
@@ -149,7 +163,7 @@ tema_guardar(){
     echo "THEME=$1" >> /etc/ghost-panel.conf
 }
 tema_cargar
-GHOST_VER='3.11.2'
+GHOST_VER='3.11.4'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -2736,12 +2750,29 @@ quitar_auto_menu(){
 
 diagnostico(){
     ficha_abrir "🩺 DIAGNÓSTICO DEL SERVIDOR"
-    local RAM_P DISCO_P LOAD ADV=0
+    local RAM_P DISCO_P LOAD ADV=0 TOP5 SW_T
     RAM_P=$(free | awk '/Mem/{printf "%d", $3*100/$2}')
     DISCO_P=$(df -h / | awk 'NR==2{gsub(/%/,"",$5); print $5}')
     LOAD=$(cut -d' ' -f1 /proc/loadavg)
     echo -e " RAM: ${RAM_P}%   Disco: ${DISCO_P}%   Carga: $LOAD"
-    [[ "$RAM_P" -gt 85 ]]    && { echo -e " ${ROJO}!${NC} RAM al ${RAM_P}%: cerrar procesos o agregar swap."; ADV=1; }
+    free -h 2>/dev/null | awk '/^Mem:/{printf "        total %s   usada %s   libre %s\n", $2, $3, $7}'
+    SW_T=$(free -m 2>/dev/null | awk '/^Swap:/{print $2}')
+    if [[ "${SW_T:-0}" -gt 0 ]] 2>/dev/null; then
+        free -h 2>/dev/null | awk '/^Swap:/{printf "        swap  %s usada de %s\n", $3, $2}'
+    else
+        echo -e "        swap  sin configurar"
+    fi
+    if [[ "$RAM_P" -gt 85 ]]; then
+        echo -e " ${ROJO}!${NC} RAM al ${RAM_P}%. Los procesos que mas consumen:"
+        TOP5=$(ps -eo rss=,comm= --sort=-rss 2>/dev/null \
+            | awk '{a[$2]+=$1} END{for(c in a) printf "%d %s\n", a[c], c}' \
+            | sort -rn | head -5 \
+            | awk '{printf "        %6.1f MB  %s\n", $1/1024, $2}')
+        [[ -n "$TOP5" ]] && printf '%s\n' "$TOP5"
+        echo -e "        Si el nombre no te suena (ej. xmrig, kinsing, kdevtmpfsi) es un minero."
+        echo -e "        Mitigar: Sistema/Recursos -> [9] ZRAM o [4] Swap."
+        ADV=1
+    fi
     [[ "$DISCO_P" -gt 85 ]]  && { echo -e " ${ROJO}!${NC} Disco al ${DISCO_P}%: correr Sistema -> Mantenimiento y revisar /root/backups."; ADV=1; }
     systemctl is-failed --quiet sshd 2>/dev/null && { echo -e " ${ROJO}!${NC} sshd con fallos: 'systemctl status sshd'."; ADV=1; }
     pgrep -f miniserv >/dev/null 2>&1 || echo -e " ${AMARILLO}-${NC} Webmin no corre (menu Webmin)."
@@ -3587,7 +3618,7 @@ bot_telegram_escribir_py(){
 """
 👻 GHOST PANEL · Bot de Telegram para administrar usuarios SSH
 ==============================================================
-Generado por Ghost Panel v3.11.2 (función bot_telegram_escribir_py).
+Generado por Ghost Panel v3.11.4 (función bot_telegram_escribir_py).
 NO editar a mano: se regenera al reinstalar el bot desde el panel
 (Bot Telegram -> Instalar / Configurar).
 
@@ -4245,17 +4276,27 @@ def ficha_creada(u, clave, dias, maxc, gbk, expiso):
     gb_txt = ("%d GB" % gbk) if gbk > 0 else "Sin límite"
     cx_txt = str(maxc) if maxc > 0 else "sin límite"
     enlace = checkuser_enlace(u)
+    ip = esc(ip_publica())
+    pto = esc(ssh_puerto())
     txt = ("👻 <b>USUARIO CREADO</b>\n"
            "━━━━━━━━━━━━━━━━━━\n"
            f"👤 Usuario: <code>{esc(u)}</code>\n"
            f"🔑 Contraseña: <code>{esc(clave)}</code>\n"
-           f"🌍 IP: <code>{esc(ip_publica())}</code>\n"
-           f"🔌 Puerto SSH: <code>{esc(ssh_puerto())}</code>\n"
+           f"🌍 IP: <code>{ip}</code>\n"
+           f"🔌 Puerto SSH: <code>{pto}</code>\n"
            f"📅 Creado: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}\n"
            f"⏳ Validez: {dias} días (vence {expiso})\n"
            f"📶 Conexiones: {esc(cx_txt)}\n"
            f"📦 Tráfico: {esc(gb_txt)}\n"
-           "✅ Estado: ACTIVO")
+           "✅ Estado: ACTIVO"
+           "\n\n📋 <b>TOCÁ EL BLOQUE PARA COPIAR TODO JUNTO:</b>\n"
+           f"<pre>Usuario: {esc(u)}\n"
+           f"Contraseña: {esc(clave)}\n"
+           f"IP: {ip}\n"
+           f"Puerto: {pto}\n"
+           f"Vence: {expiso} ({dias} días)\n"
+           f"Conexiones: {esc(cx_txt)}\n"
+           f"Tráfico: {esc(gb_txt)}</pre>")
     if enlace:
         txt += "\n🔗 CheckUser: " + esc(enlace)
     return txt
@@ -4285,11 +4326,21 @@ def ficha_bloqueo(u, bloqueado):
             f"👤 Usuario: <code>{esc(u)}</code>\n"
             "✅ Estado: ACTIVO")
 
-def ficha_clave(u):
-    return ("🔑 <b>CLAVE ACTUALIZADA</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            f"👤 Usuario: <code>{esc(u)}</code>\n"
-            "✅ Estado: ACTIVO")
+def ficha_clave(u, clave=""):
+    txt = ("🔑 <b>CLAVE ACTUALIZADA</b>\n"
+           "━━━━━━━━━━━━━━━━━━\n"
+           f"👤 Usuario: <code>{esc(u)}</code>\n"
+           "✅ Estado: ACTIVO")
+    if clave:
+        exp = account_expiry_iso(u)
+        extra = (f"Vence: {esc(exp)}\n") if exp else ""
+        txt += ("\n\n📋 <b>TOCÁ EL BLOQUE PARA COPIAR:</b>\n"
+                f"<pre>Usuario: {esc(u)}\n"
+                f"Contraseña: {esc(clave)}\n"
+                f"IP: {esc(ip_publica())}\n"
+                f"Puerto: {esc(ssh_puerto())}\n"
+                f"{extra}</pre>")
+    return txt
 
 def error_accion(detalle, retry_data):
     return {
@@ -4707,7 +4758,7 @@ async def flow_text(update, context, texto, f):
             ok, msg = accion_clave(d.get("usuario", ""), texto)
             flow_clear(context)
             if ok:
-                await pantalla(update, context, ficha_clave(d.get("usuario", "")) + "\n\n"
+                await pantalla(update, context, ficha_clave(d.get("usuario", ""), texto) + "\n\n"
                                + menu_text(), MENU_ROWS, borra_texto=True)
             else:
                 e = error_accion(msg, "clave")
