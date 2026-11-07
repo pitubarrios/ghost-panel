@@ -3,7 +3,16 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 3.11.0
+#  Version: 3.11.1
+#  Cambios 3.11.1:
+#    - FIX menu: la fila [9] Bot Telegram / [0] Salir queda pegada al resto
+#      (antes habia una linea en blanco que las separaba en celulares).
+#    - FIX instalador del bot en Ubuntu 24.04: el modulo venv se puede importar
+#      aunque falte ensurepip (vive en python3.12-venv) y por eso nunca se
+#      instalaban las librerias. Ahora se intenta crear el venv y, si falla,
+#      se instala python3.XX-venv + python3-venv + python3-pip con reintento
+#      (soporta lock de unattended-upgrades), plan B con get-pip.py y plan C
+#      con el Python del sistema (--break-system-packages).
 #  Cambios 3.11.0:
 #    - NUEVO: Bot de Telegram integrado (menu principal [9] -> BOT DE TELEGRAM):
 #      instalar/configurar, iniciar, detener, reiniciar, estado, ver token,
@@ -133,7 +142,7 @@ tema_guardar(){
     echo "THEME=$1" >> /etc/ghost-panel.conf
 }
 tema_cargar
-GHOST_VER='3.11.0'
+GHOST_VER='3.11.1'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -3571,7 +3580,7 @@ bot_telegram_escribir_py(){
 """
 👻 GHOST PANEL · Bot de Telegram para administrar usuarios SSH
 ==============================================================
-Generado por Ghost Panel v3.11.0 (función bot_telegram_escribir_py).
+Generado por Ghost Panel v3.11.1 (función bot_telegram_escribir_py).
 NO editar a mano: se regenera al reinstalar el bot desde el panel
 (Bot Telegram -> Instalar / Configurar).
 
@@ -4792,37 +4801,95 @@ PYBOTGHOST
     return 0
 }
 
+bot_apt_instalar(){
+    # bot_apt_instalar PAQUETES... -> apt install con reintento si el lock esta
+    # ocupado (unattended-upgrades suele correr justo al bootear el VPS).
+    local i
+    for i in 1 2 3; do
+        apt install -y "$@" >/tmp/ghost-apt.log 2>&1 && return 0
+        grep -qi 'could not get lock\|locked by another process\|dpkg lock\|waiting for cache lock' /tmp/ghost-apt.log \
+            || break
+        WARN "apt está ocupado; espero 20 s y reintento ($i/3)..."
+        sleep 20
+    done
+    return 1
+}
+
+bot_venv_crear(){
+    # Crea $BOT_DIR/venv con pip y devuelve 0 si queda listo.
+    # OJO Ubuntu 24.04: el modulo venv SIEMPRE se puede importar (viene en el
+    # stdlib) pero 'ensurepip' vive en el paquete python3.12-venv; por eso el
+    # chequeo correcto es INTENTAR CREAR el venv (no "import venv") e instalar
+    # el paquete si la creacion falla. Plan B: venv --without-pip + get-pip.py.
+    [[ -x "$BOT_DIR/venv/bin/pip" ]] && return 0
+    local PYVER PKGS ERRLOG="$BOT_DIR/venv-error.log"
+    rm -rf "$BOT_DIR/venv"
+    INFO "Creando entorno virtual..."
+    if python3 -m venv "$BOT_DIR/venv" 2>"$ERRLOG" && [[ -x "$BOT_DIR/venv/bin/pip" ]]; then
+        return 0
+    fi
+    PYVER=$(python3 -c 'import sys;print("{}.{}".format(*sys.version_info[:2]))' 2>/dev/null)
+    PKGS="python3-venv python3-pip"
+    [[ -n "$PYVER" ]] && PKGS="python${PYVER}-venv $PKGS"
+    INFO "ensurepip falta: instalando $PKGS (puede tardar)..."
+    apt update -y >/dev/null 2>&1
+    bot_apt_instalar $PKGS || bot_apt_instalar python3-venv python3-pip || true
+    rm -rf "$BOT_DIR/venv"
+    if python3 -m venv "$BOT_DIR/venv" 2>>"$ERRLOG" && [[ -x "$BOT_DIR/venv/bin/pip" ]]; then
+        OK "Entorno virtual creado."
+        return 0
+    fi
+    # Plan B: venv sin pip + bootstrap de pip con get-pip.py
+    rm -rf "$BOT_DIR/venv"
+    if python3 -m venv --without-pip "$BOT_DIR/venv" 2>>"$ERRLOG" && [[ -x "$BOT_DIR/venv/bin/python" ]]; then
+        INFO "Bootstrap de pip (get-pip.py)..."
+        curl -fsSL --max-time 60 https://bootstrap.pypa.io/get-pip.py -o "$BOT_DIR/.get-pip.py" 2>>"$ERRLOG" \
+            && "$BOT_DIR/venv/bin/python" "$BOT_DIR/.get-pip.py" >/dev/null 2>&1
+        rm -f "$BOT_DIR/.get-pip.py"
+        if [[ -x "$BOT_DIR/venv/bin/pip" ]]; then
+            OK "Entorno virtual creado (pip via get-pip)."
+            return 0
+        fi
+    fi
+    ERR "No se pudo crear el venv. Diagnostico:"
+    tail -n 4 "$ERRLOG" 2>/dev/null | sed 's/^/      /'
+    INFO "Probá manual: apt install -y python${PYVER:-3.12}-venv python3-pip  y volvé a la opción 1."
+    rm -rf "$BOT_DIR/venv"
+    return 1
+}
+
 bot_telegram_instalar(){
     # Instalador del bot: python3 + venv + dependencias + datos + servicio systemd.
     echo -e "${CIAN}--- BOT DE TELEGRAM: INSTALAR / CONFIGURAR ---${NC}"
-    local BTK BCH R OKF=0 RESP EST BOTNAME REINST=0
-    # 1) python3 + modulo venv (apt si falta)
+    local BTK BCH R OKF=0 RESP EST BOTNAME REINST=0 BOT_PYBIN
+    # 1) python3 + entorno virtual con pip (bot_venv_crear instala lo que falte)
     if ! command -v python3 >/dev/null 2>&1; then
         INFO "Instalando python3..."
-        apt update -y >/dev/null 2>&1; apt install -y python3 >/dev/null 2>&1
+        apt update -y >/dev/null 2>&1; bot_apt_instalar python3
         command -v python3 >/dev/null 2>&1 || { ERR "No se pudo instalar python3."; PAUSA; return; }
     fi
-    if ! python3 -c "import venv" >/dev/null 2>&1; then
-        INFO "Instalando python3-venv y python3-pip (puede tardar)..."
-        apt update -y >/dev/null 2>&1; apt install -y python3-venv python3-pip >/dev/null 2>&1
-    fi
-    python3 -c "import venv" >/dev/null 2>&1 || { ERR "Falta el modulo venv (instalá python3-venv)."; PAUSA; return; }
-    # 2) directorio + entorno virtual
     mkdir -p "$BOT_DIR"
     [[ -f /etc/systemd/system/ghost-bot.service ]] && REINST=1
-    if [[ ! -x "$BOT_DIR/venv/bin/pip" ]]; then
-        INFO "Creando entorno virtual..."
-        rm -rf "$BOT_DIR/venv"
-        python3 -m venv "$BOT_DIR/venv" || { ERR "No se pudo crear el venv."; PAUSA; return; }
+    if bot_venv_crear; then
+        BOT_PYBIN="$BOT_DIR/venv/bin/python"
+    else
+        # Plan C: Python del sistema + pip (Ubuntu 24.04 exige --break-system-packages)
+        WARN "Sin venv usable: instalo con el Python del sistema."
+        python3 -m pip --version >/dev/null 2>&1 || { apt update -y >/dev/null 2>&1; bot_apt_instalar python3-pip; }
+        python3 -m pip --version >/dev/null 2>&1 || { ERR "No hay pip para python3 (apt install -y python3-pip)."; PAUSA; return; }
+        BOT_PYBIN="$(command -v python3)"
     fi
-    [[ -x "$BOT_DIR/venv/bin/pip" ]] || { ERR "El venv no tiene pip (falta python3-venv)."; PAUSA; return; }
-    # 3) dependencias (version fija)
+    # 2) dependencias (version fija)
     INFO "Instalando python-telegram-bot 20.7 (1-2 min, no cierres)..."
-    if ! "$BOT_DIR/venv/bin/pip" install -q python-telegram-bot==20.7; then
-        ERR "Fallo la instalacion de python-telegram-bot. Revisá la conexion y reintentá."
-        PAUSA; return
+    if [[ "$BOT_PYBIN" == "$BOT_DIR/venv/bin/python" ]]; then
+        "$BOT_DIR/venv/bin/pip" install -q python-telegram-bot==20.7 \
+            || { ERR "Fallo la instalacion de python-telegram-bot. Revisá la conexion y reintentá."; PAUSA; return; }
+    else
+        python3 -m pip install -q --break-system-packages python-telegram-bot==20.7 \
+            || python3 -m pip install -q python-telegram-bot==20.7 \
+            || { ERR "Fallo la instalacion de python-telegram-bot. Revisá la conexion y reintentá."; PAUSA; return; }
     fi
-    "$BOT_DIR/venv/bin/python" -c "import telegram" 2>/dev/null \
+    "$BOT_PYBIN" -c "import telegram" 2>/dev/null \
         || { ERR "La libreria no se pudo importar."; PAUSA; return; }
     OK "python-telegram-bot instalado."
     # 4) BOT_TOKEN (conserva el actual si reinstall y se pide ENTER)
@@ -4882,11 +4949,11 @@ except Exception: print("")' 2>/dev/null)
     # 7) bot.py + helper de banners + verificacion de sintaxis
     bot_telegram_escribir_py
     bot_refresh_helper
-    if ! "$BOT_DIR/venv/bin/python" -m py_compile "$BOT_DIR/bot.py" 2>/dev/null; then
+    if ! "$BOT_PYBIN" -m py_compile "$BOT_DIR/bot.py" 2>/dev/null; then
         ERR "El bot.py generado no compila (reportalo al desarrollador)."; PAUSA; return
     fi
-    # 8) servicio systemd
-    cat > /etc/systemd/system/ghost-bot.service <<'GBSVC'
+    # 8) servicio systemd (ExecStart segun el interprete que quedo funcionando)
+    cat > /etc/systemd/system/ghost-bot.service <<GBSVC
 [Unit]
 Description=Ghost Panel Telegram Bot
 After=network.target
@@ -4894,8 +4961,8 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/opt/ghost-bot
-ExecStart=/opt/ghost-bot/venv/bin/python /opt/ghost-bot/bot.py
+WorkingDirectory=$BOT_DIR
+ExecStart=$BOT_PYBIN $BOT_DIR/bot.py
 Restart=always
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1
@@ -7637,7 +7704,7 @@ while true; do
     FR_OPT 3 "🔰 $(T t_seguridad)" 4 "🔧 $(T t_sistema)"
     FR_OPT 5 "🧰 $(T t_herramientas)" 6 "🌐 $(T t_webmin)"
     FR_OPT 7 "💾 $(T t_backup)" 8 "🩺 $(T t_diagnostico)"
-    FR_TXT ""
+    # (sin linea en blanco: [9]/[0] queda pegado al resto del menu en celulares)
     FR_OPT 9 "🤖 $(T t_bot)" 0 "🚪 $(T t_salir)"
     FR_BOT
     UI_KCOL=()
