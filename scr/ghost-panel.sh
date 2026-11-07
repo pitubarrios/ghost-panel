@@ -3,7 +3,22 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 3.12.0
+#  Version: 3.12.2
+#  Cambios 3.12.2 (Bot de Telegram: seguridad y diseño):
+#    - El backup que manda el bot por Telegram va CIFRADO (AES-256 + PBKDF2) con una clave que NUNCA
+#      viaja por Telegram: se ve en el panel (Bot Telegram → Ver token y admin). Sin openssl no se envía.
+#    - El bot YA NO guarda contraseñas en texto plano. Si existía claves.json (versiones 3.12.0/3.12.1)
+#      se sobrescribe y se borra al arrancar. «Enviar datos» ofrece generar una clave nueva.
+#    - Fichas del bot rediseñadas: bloque alineado «Etiqueta  valor» (crear usuario, test SSH, clave,
+#      renovar, ficha de usuario, límites, enviar datos). Un solo bloque que se copia de un toque.
+#  Cambios 3.12.1 (notificaciones de Telegram unificadas con el Bot instalado):
+#    - Tráfico → Notificaciones → Telegram ya NO pide token/chat si tienes el Bot instalado (opción 9):
+#      detecta el bot, muestra su chat y lo usa solo. Sigue pudiendo enviar ADEMÁS a otro bot/chat.
+#    - FIX: el aviso de CUOTA AGOTADA al bot nunca salía cuando el corte lo hacía el cron (auto-corte):
+#      el script generado del cron no incluía bot_notificar. Ahora notif_enviar manda al Telegram manual
+#      y/o al Bot instalado (sin duplicar si son el mismo destino) y el cron lleva todo lo necesario.
+#    - Probar envío dice a qué canales salió; si no hay ninguno configurado, lo avisa.
+#    - Instalar el Bot reutiliza el token/chat de Telegram si ya los habías puesto en Notificaciones.
 #  Cambios 3.12.0 (Bot de Telegram: casi todo con botones):
 #    - Menu principal con barras de RAM, CPU y disco (+ uptime) y boton Actualizar.
 #    - Ficha por usuario (se abre al tocarlo en la lista): Renovar, Bloquear/Desbloquear, Clave,
@@ -201,7 +216,7 @@ tema_guardar(){
     echo "THEME=$1" >> /etc/ghost-panel.conf
 }
 tema_cargar
-GHOST_VER='3.12.0'
+GHOST_VER='3.12.2'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -2148,6 +2163,7 @@ ghost_conf_set(){
     sed -i "/^$1=/d" /etc/ghost-panel.conf
     echo "$1=$2" >> /etc/ghost-panel.conf
 }
+ghost_conf_del(){ [[ -f /etc/ghost-panel.conf ]] && sed -i "/^$1=/d" /etc/ghost-panel.conf; return 0; }
 plan_dias_set(){ mkdir -p /etc/vps-plan; echo "$2" > "/etc/vps-plan/$1"; }   # dias del plan vigente (para la barra de vigencia)
 
 # --- piezas del banner (siempre UNA linea; solo tags permitidos por HTTP Custom) ---
@@ -3613,13 +3629,12 @@ trafico_esta_por_cuota(){
 notif_enviar(){
     # notif_enviar "mensaje"
     local MSG="$1" URL TOKEN CHAT HOOK PHONE APIKEY
-    # Telegram
-    TOKEN=$(ghost_conf_get TG_TOKEN)
-    CHAT=$(ghost_conf_get TG_CHAT)
-    if [[ -n "$TOKEN" && -n "$CHAT" ]]; then
+    # Telegram: el manual (TG_TOKEN/TG_CHAT) y/o el Bot instalado (opcion 9), sin repetir si son el mismo destino
+    while read -r TOKEN CHAT; do
+        [[ -n "$TOKEN" && -n "$CHAT" ]] || continue
         curl -fsS --max-time 8 -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
-            -d "chat_id=${CHAT}" --data-urlencode "text=${MSG}" -d "parse_mode=HTML" >/dev/null 2>&1 || true
-    fi
+            -d "chat_id=${CHAT}" --data-urlencode "text=${MSG}" -d "parse_mode=HTML" >/dev/null 2>&1 </dev/null || true
+    done < <(tg_destinos)
     # Discord webhook
     HOOK=$(ghost_conf_get DISCORD_HOOK)
     if [[ -n "$HOOK" ]]; then
@@ -3648,6 +3663,48 @@ BOT_DIR='/opt/ghost-bot'
 bot_conf_get(){
     # bot_conf_get CLAVE -> valor de /opt/ghost-bot/config.env (sin romper por '=')
     awk -F= -v k="$1" '$1==k{sub(/^[^=]*=/,""); print; exit}' "$BOT_DIR/config.env" 2>/dev/null
+}
+
+tg_destinos(){
+    # tg_destinos -> una linea "TOKEN CHAT" por destino de Telegram: el manual (ghost-panel.conf) y el del
+    # Bot instalado (/opt/ghost-bot/config.env). Si son el mismo, sale una sola vez.
+    local T C BT BC
+    T=$(ghost_conf_get TG_TOKEN); C=$(ghost_conf_get TG_CHAT)
+    BT=$(bot_conf_get BOT_TOKEN); BC=$(bot_conf_get ADMIN_CHAT_ID)
+    [[ -n "$T" && -n "$C" ]] && printf '%s %s\n' "$T" "$C"
+    [[ -n "$BT" && -n "$BC" ]] && { [[ "$BT" != "$T" || "$BC" != "$C" ]] && printf '%s %s\n' "$BT" "$BC"; }
+    return 0
+}
+
+tg_estado(){
+    # tg_estado -> bot | manual | ambos | ninguno
+    local T C BT BC
+    T=$(ghost_conf_get TG_TOKEN); C=$(ghost_conf_get TG_CHAT)
+    BT=$(bot_conf_get BOT_TOKEN); BC=$(bot_conf_get ADMIN_CHAT_ID)
+    if [[ -n "$BT" && -n "$BC" ]]; then
+        if [[ -n "$T" && -n "$C" && ( "$T" != "$BT" || "$C" != "$BC" ) ]]; then echo ambos; else echo bot; fi
+    elif [[ -n "$T" && -n "$C" ]]; then echo manual
+    else echo ninguno; fi
+}
+
+tg_estado_txt(){
+    case "$(tg_estado)" in
+        bot)    echo "Bot instalado (chat $(bot_conf_get ADMIN_CHAT_ID))" ;;
+        ambos)  echo "Bot instalado + manual (chat $(ghost_conf_get TG_CHAT))" ;;
+        manual) echo "Manual (chat $(ghost_conf_get TG_CHAT))" ;;
+        *)      echo "(sin configurar)" ;;
+    esac
+}
+
+notif_canales_txt(){
+    # canales con destino configurado, separados por coma (vacio = ninguno)
+    local R=""
+    case "$(tg_estado)" in
+        bot) R="Telegram (bot instalado)" ;; ambos) R="Telegram (bot + manual)" ;; manual) R="Telegram" ;;
+    esac
+    [[ -n "$(ghost_conf_get DISCORD_HOOK)" ]] && R+="${R:+, }Discord"
+    [[ -n "$(ghost_conf_get WA_PHONE)" && -n "$(ghost_conf_get WA_APIKEY)" ]] && R+="${R:+, }WhatsApp"
+    printf '%s' "$R"
 }
 
 bot_notificar(){
@@ -3718,7 +3775,7 @@ bot_refresh_helper(){
     return 0
 }
 
-BOT_REV='3.12.0'   # revision del bot.py embebido (debe coincidir con BOT_REV dentro de bot.py)
+BOT_REV='3.12.2'   # revision del bot.py embebido (debe coincidir con BOT_REV dentro de bot.py)
 
 bot_autoactualizar(){
     # Si el bot ya esta instalado con un bot.py de otra revision, lo regenera solo (sin pedir token ni
@@ -3739,6 +3796,7 @@ bot_autoactualizar(){
 }
 
 bot_telegram_escribir_py(){
+    bot_backup_key_asegurar
     # Genera /opt/ghost-bot/bot.py (el codigo del bot). Heredoc literal: sin expansion.
     mkdir -p "$BOT_DIR"
     cat > "$BOT_DIR/bot.py" <<'PYBOTGHOST'
@@ -3774,6 +3832,8 @@ import os
 import pwd
 import re
 import secrets
+import shutil
+import string
 import subprocess
 import sys
 import time
@@ -3784,7 +3844,7 @@ try:
 except ImportError:  # Python < 3.9
     ZoneInfo = None
 
-BOT_REV = "3.12.0"   # el panel compara esto para actualizar el bot solo
+BOT_REV = "3.12.2"   # el panel compara esto para actualizar el bot solo
 
 if not hasattr(asyncio, "to_thread"):          # Python 3.8 (Ubuntu 20.04)
     async def _to_thread(fn, *a, **k):
@@ -3802,7 +3862,8 @@ from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
 BOT_DIR = "/opt/ghost-bot"
 CONF_FILE = os.path.join(BOT_DIR, "config.env")
 ALERTS_FILE = os.path.join(BOT_DIR, "alerts.json")
-CLAVES_FILE = os.path.join(BOT_DIR, "claves.json")
+CLAVES_FILE = os.path.join(BOT_DIR, "claves.json")      # OBSOLETO: ya no se escribe; se elimina al arrancar
+BACKUP_KEY = os.path.join(BOT_DIR, "backup.key")        # clave para CIFRAR los backups (solo en el servidor)
 REBOOT_FLAG = os.path.join(BOT_DIR, "reboot.flag")
 LOG_FILE = "/var/log/ghost-bot.log"
 REFRESH_SH = os.path.join(BOT_DIR, "panel-refresh.sh")   # banners: generado por el panel
@@ -3930,20 +3991,58 @@ def alerts_set(**kw):
     jsave(ALERTS_FILE, d)
     return d
 
-# Claves que el bot fijó (Linux solo guarda el hash: sin esto no se podría reenviar la ficha)
-def clave_guardar(u, clave):
-    d = jload(CLAVES_FILE, {})
-    d[u] = clave
-    jsave(CLAVES_FILE, d)
+# ------------------------- SEGURIDAD: contraseñas y backups -------------------------
+def purgar_claves_antiguas():
+    """Las versiones 3.12.0/3.12.1 guardaban en claves.json las contraseñas que el bot fijaba (texto plano).
+    Ya no se guardan: si ese archivo existe se sobrescribe con ceros y se borra."""
+    try:
+        if os.path.isfile(CLAVES_FILE):
+            n = os.path.getsize(CLAVES_FILE)
+            with open(CLAVES_FILE, "r+b") as fh:
+                fh.write(b"\0" * n)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.remove(CLAVES_FILE)
+            log.warning("claves.json (contraseñas en texto plano) eliminado de forma segura")
+    except OSError as e:
+        log.error("no se pudo eliminar claves.json: %s", e)
 
-def clave_obtener(u):
-    return jload(CLAVES_FILE, {}).get(u, "")
+def backup_key():
+    """Clave que CIFRA el backup antes de mandarlo a Telegram. Vive solo en el servidor (0600);
+    se consulta en el panel: Bot Telegram -> Ver token y admin. Nunca se manda por Telegram."""
+    k = ""
+    try:
+        with open(BACKUP_KEY, "r", encoding="utf-8") as fh:
+            k = fh.readline().strip()
+    except OSError:
+        pass
+    if len(k) < 16:
+        alfabeto = string.ascii_letters + string.digits
+        k = "".join(secrets.choice(alfabeto) for _ in range(24))
+        fd = os.open(BACKUP_KEY, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(k + "\n")
+    return k
 
-def clave_borrar(u):
-    d = jload(CLAVES_FILE, {})
-    if u in d:
-        del d[u]
-        jsave(CLAVES_FILE, d)
+def cifrar_backup(src):
+    """AES-256-CBC + PBKDF2 (openssl). Devuelve (ok, ruta_cifrada | mensaje_de_error)."""
+    if not shutil.which("openssl"):
+        return False, "openssl no está instalado (apt install openssl)."
+    backup_key()
+    dst = src + ".enc"
+    r = sh("openssl", "enc", "-aes-256-cbc", "-pbkdf2", "-iter", "200000", "-salt",
+           "-in", src, "-out", dst, "-pass", "file:" + BACKUP_KEY, timeout=300)
+    if r.returncode != 0 or not os.path.isfile(dst) or os.path.getsize(dst) == 0:
+        try:
+            os.remove(dst)
+        except OSError:
+            pass
+        return False, "No se pudo cifrar: %s" % (r.stderr.strip()[:150] or "openssl falló")
+    try:
+        os.chmod(dst, 0o600)
+    except OSError:
+        pass
+    return True, dst
 
 # ------------------------- SUBPROCESOS -------------------------
 def sh(*args, inp=None, timeout=20):
@@ -4525,7 +4624,6 @@ def accion_crear(u, dias, maxc, gbk, clave):
     iptables_reset_uid(u)
     xray_add(u)
     refresh_banner("user", u)
-    clave_guardar(u, clave)
     log.info("usuario creado via bot: %s (%dd, conx %d, %s)", u, dias, maxc,
              ("%d GB" % gbk) if gbk > 0 else "sin limite")
     return True, expiso
@@ -4574,7 +4672,6 @@ def accion_eliminar(u, borrar_home=True):
     refresh_banner("rebuild")
     ok = uid_of(u) is None
     if ok:
-        clave_borrar(u)
         log.info("usuario eliminado via bot: %s", u)
     return ok, "" if ok else "userdel falló: " + (r.stderr.strip() or "?")
 
@@ -4597,7 +4694,6 @@ def accion_clave(u, clave):
     r = sh("chpasswd", inp="%s:%s\n" % (u, clave))
     if r.returncode != 0:
         return False, "chpasswd falló."
-    clave_guardar(u, clave)
     log.info("clave cambiada via bot: %s", u)
     return True, ""
 
@@ -4653,47 +4749,37 @@ def accion_desbloquear_cuota(u):
     log.info("desbloqueado por cuota via bot: %s", u)
 
 # ------------------------- DATOS / FICHAS DE TEXTO -------------------------
-def bloque_datos(u, clave, iso, con_checkuser=True):
+def tabla(filas, ancho=11):
+    """Bloque <pre> «Etiqueta  valor» ALINEADO (monoespaciado). Un toque lo copia entero."""
+    return "<pre>%s</pre>" % esc("\n".join("%-*s %s" % (ancho, k, v) for k, v in filas))
+
+def checkuser_bloque(u):
+    """Enlace CheckUser en su propia línea (tocarlo lo copia completo)."""
+    link = checkuser_enlace(u)
+    return ("\n\n🔗 <b>CheckUser</b>\n<code>%s</code>" % esc(link)) if link else ""
+
+def bloque_datos(u, clave, iso, con_checkuser=False):
+    """Datos del cliente alineados. clave=None -> sin fila de contraseña (no se guarda en ningún lado)."""
     d = days_hasta(iso) if iso else None
     cx = lim_conex(u)
     g = lim_gb(u)
-    filas = ["Usuario: %s" % u,
-             "Contraseña: %s" % clave,
-             "IP: %s" % ip_publica(),
-             "Puerto: %s" % ssh_puerto()]
+    filas = [("Usuario", u)]
+    if clave:
+        filas.append(("Contraseña", clave))
+    filas += [("IP", ip_publica()), ("Puerto SSH", ssh_puerto())]
     if iso:
-        filas.append("Vence: %s (%s)" % (iso, dias_txt(d)))
-    filas.append("Conexiones: %s" % (str(cx) if cx > 0 else "sin límite"))
-    filas.append("Tráfico: %s" % (("%d GB" % g) if g > 0 else "sin límite"))
-    if con_checkuser:
-        link = checkuser_enlace(u)
-        if link:
-            filas.append("CheckUser: %s" % link)
-    return "<pre>%s</pre>" % esc("\n".join(filas))
+        filas.append(("Vence", "%s · %s" % (iso, dias_txt(d))))
+    filas.append(("Conexiones", str(cx) if cx > 0 else "sin límite"))
+    filas.append(("Tráfico", ("%d GB" % g) if g > 0 else "sin límite"))
+    return tabla(filas)
 
 def ficha_creada(u, clave, dias, maxc, gbk, expiso, test=False):
-    gb_txt = ("%d GB" % gbk) if gbk > 0 else "Sin límite"
-    cx_txt = str(maxc) if maxc > 0 else "sin límite"
-    enlace = checkuser_enlace(u)
-    txt = ("%s <b>%s</b>\n" % ("🧪" if test else "👻", "TEST SSH CREADO" if test else "USUARIO CREADO")
-           + LINEA + "\n"
-           "👤 Usuario: <code>%s</code>\n"
-           "🔑 Contraseña: <code>%s</code>\n"
-           "🌍 IP: <code>%s</code>\n"
-           "🔌 Puerto SSH: <code>%s</code>\n"
-           "📅 Creado: %s\n"
-           "⏳ Validez: %d día%s (vence %s)\n"
-           "📶 Conexiones: %s\n"
-           "📦 Tráfico: %s\n"
-           "✅ Estado: ACTIVO\n\n"
-           "📋 <b>TOCÁ EL BLOQUE PARA COPIAR TODO JUNTO:</b>\n"
-           % (esc(u), esc(clave), esc(ip_publica()), esc(ssh_puerto()),
-              datetime.datetime.now().strftime("%d/%m/%Y %H:%M"),
-              dias, "" if dias == 1 else "s", expiso, esc(cx_txt), esc(gb_txt))
-           + bloque_datos(u, clave, expiso, con_checkuser=False))
-    if enlace:
-        txt += "\n🔗 CheckUser: " + esc(enlace)
-    return txt
+    titulo = "🧪 <b>TEST SSH CREADO</b>" if test else "👻 <b>USUARIO CREADO</b>"
+    return (titulo + "\n" + LINEA + "\n"
+            + bloque_datos(u, clave, expiso)
+            + "\n🟢 <b>ACTIVO</b> · creado %s\n" % datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
+            + "<i>Tocá el bloque para copiarlo y pasárselo al cliente.</i>"
+            + checkuser_bloque(u))
 
 # ------------------------- PANTALLAS (devuelven (texto, filas)) -------------------------
 def scr_lista(page=0, filtro=""):
@@ -4732,15 +4818,11 @@ def scr_lista(page=0, filtro=""):
 
 def scr_ficha(u, pre=""):
     i = info_usuario(u)
-    if i["iso"]:
-        vence = "📅 Vence %s (%s)" % (i["iso"], dias_txt(i["dias"]))
-    else:
-        vence = "📅 Sin vencimiento"
+    vence = ("%s · %s" % (i["iso"], dias_txt(i["dias"]))) if i["iso"] else "sin vencimiento"
     cx = ("%d/%s" % (i["on"], i["lc"] if i["lc"] > 0 else "∞"))
     txt = (pre
            + "👤 <b>%s</b> · %s %s\n" % (esc(u), i["emoji"], i["estado"])
-           + vence + "\n"
-           "🔌 %s sesiones · 📦 %s" % (cx, esc(fmt_uso(i["used"], i["gb"]))))
+           + tabla([("Vence", vence), ("Sesiones", cx), ("Tráfico", fmt_uso(i["used"], i["gb"]))]))
     if i["cuota"]:
         lock_btn = ("🚦 Desbloq. cuota", "lim|" + u)
     elif i["locked"]:
@@ -4834,10 +4916,9 @@ def scr_limites(u, pre=""):
     i = info_usuario(u)
     pct = ("%d%%" % min(100, i["used"] * 100 // (i["gb"] * GB))) if i["gb"] > 0 else "—"
     txt = (pre + "🚦 <b>LÍMITES · %s</b>\n" % esc(u) + LINEA + "\n"
-           "🔌 Conexiones máx: <b>%s</b> (ahora %d)\n"
-           "📦 Cuota: <b>%s</b> · usado %s (%s)"
-           % (i["lc"] if i["lc"] > 0 else "∞", i["on"],
-              ("%d GB" % i["gb"]) if i["gb"] > 0 else "sin límite", esc(fmt_bytes(i["used"])), pct))
+           + tabla([("Conexiones", "%s máx (ahora %d)" % (i["lc"] if i["lc"] > 0 else "∞", i["on"])),
+                    ("Cuota", ("%d GB" % i["gb"]) if i["gb"] > 0 else "sin límite"),
+                    ("Usado", "%s (%s)" % (fmt_bytes(i["used"]), pct))]))
     if i["cuota"]:
         txt += "\n🚫 <b>Cuota agotada</b>: tocá «Desbloquear por cuota»."
 
@@ -4854,19 +4935,13 @@ def scr_limites(u, pre=""):
     return txt, rows
 
 def scr_enviar(u, pre=""):
-    clave = clave_obtener(u)
     iso = account_expiry_iso(u)
-    if clave:
-        txt = (pre + "📤 <b>DATOS PARA ENVIAR · %s</b>\n" % esc(u) + LINEA + "\n"
-               "<i>Tocá el bloque para copiarlo y reenviarlo al cliente:</i>\n"
-               + bloque_datos(u, clave, iso))
-        rows = [[("🔑 Nueva clave", "clv|" + u)], [("⬅ Ficha", "u|" + u)]]
-    else:
-        txt = (pre + "📤 <b>DATOS PARA ENVIAR · %s</b>\n" % esc(u) + LINEA + "\n"
-               "No tengo guardada la clave de este usuario (Linux solo guarda su hash; "
-               "el bot guarda las que él mismo crea o cambia).\n"
-               "Generá una <b>nueva clave</b> para armar la ficha. La anterior dejará de funcionar.")
-        rows = [[("🎲 Nueva clave y enviar", "sng|" + u)], [("⬅ Ficha", "u|" + u)]]
+    txt = (pre + "📤 <b>DATOS PARA ENVIAR · %s</b>\n" % esc(u) + LINEA + "\n"
+           + bloque_datos(u, None, iso)
+           + "\n🔒 <i>La contraseña no se guarda en ningún lado (Linux solo guarda su hash). "
+             "Para enviarla, generá una nueva: la anterior deja de funcionar.</i>"
+           + checkuser_bloque(u))
+    rows = [[("🎲 Nueva clave y enviar", "sng|" + u)], [("⬅ Ficha", "u|" + u)]]
     return txt, rows
 
 def scr_eliminar(u):
@@ -5508,9 +5583,11 @@ async def route(update, context, data):
     elif k == "sng":
         u = arg(1)
         if await usuario_ok(u):
-            ok, msg = await asyncio.to_thread(accion_clave, u, gen_clave())
+            clave = gen_clave()
+            ok, msg = await asyncio.to_thread(accion_clave, u, clave)
             if ok:
-                await show(update, context, scr_enviar, u, "🔑 <b>Clave nueva generada.</b>\n\n")
+                txt = await asyncio.to_thread(ficha_clave, u, clave)
+                await pantalla(update, context, txt, [[("⬅ Ficha", "u|" + u), ("🔙 Menú", "menu")]])
             else:
                 await show_err(update, context, msg, [[("⬅ Ficha", "u|" + u)]])
     # ---- límites ----
@@ -5629,12 +5706,11 @@ async def route(update, context, data):
         await show(update, context, scr_menu)
 
 def ficha_clave(u, clave):
-    iso = account_expiry_iso(u)
     return ("🔑 <b>CLAVE ACTUALIZADA</b>\n" + LINEA + "\n"
-            "👤 Usuario: <code>%s</code>\n"
-            "✅ Contraseña cambiada\n\n"
-            "📋 <b>TOCÁ EL BLOQUE PARA COPIAR:</b>\n" % esc(u)
-            + bloque_datos(u, clave, iso))
+            + bloque_datos(u, clave, account_expiry_iso(u))
+            + "\n🟢 Contraseña cambiada · la anterior ya no funciona\n"
+              "<i>Tocá el bloque para copiarlo.</i>"
+            + checkuser_bloque(u))
 
 # --- botones DENTRO de un flujo; devuelve False si el dato no es del flujo ---
 async def flow_button(update, context, data, f):
@@ -5819,8 +5895,11 @@ async def renovar_ejecutar(update, context, usuario, dias, borra=False):
     flow_clear(context)
     ok, res = await asyncio.to_thread(accion_renovar, usuario, dias)
     if ok:
-        pre = ("🔄 <b>RENOVADO</b> +%d día%s → vence %s (%s)\n\n"
-               % (dias, "" if dias == 1 else "s", res, dias_txt(days_hasta(res))))
+        pre = ("🔄 <b>USUARIO RENOVADO</b>\n"
+               + tabla([("Usuario", usuario),
+                        ("Agregado", "+%d día%s" % (dias, "" if dias == 1 else "s")),
+                        ("Vence", "%s · %s" % (res, dias_txt(days_hasta(res))))])
+               + "\n")
         await show(update, context, scr_ficha, usuario, pre, borra=borra)
     else:
         await show_err(update, context, res, [[("⬅ Ficha", "u|" + usuario)]], borra=borra)
@@ -5831,28 +5910,46 @@ async def backup_ejecutar(update, context):
                    "⛔ El ADMIN_CHAT_ID es un <b>grupo</b>: el backup lleva datos de usuarios y "
                    "solo se envía a un chat privado.\n\n")
         return
-    await pantalla(update, context, "💾 <b>Creando backup…</b>\n<i>Puede tardar unos segundos.</i>", None)
+    await pantalla(update, context, "💾 <b>Creando backup…</b>\n<i>Se cifra antes de enviarlo.</i>", None)
     ok, res, size = await asyncio.to_thread(hacer_backup)
     if not ok:
         await show(update, context, scr_servidor, "❌ Backup falló: %s\n\n" % esc(res))
         return
-    if size > TG_MAX_FILE:
+    # NUNCA se manda sin cifrar: el backup lleva /etc/shadow (hashes) y las llaves privadas de SSH
+    ok, enc = await asyncio.to_thread(cifrar_backup, res)
+    if not ok:
         await show(update, context, scr_servidor,
-                   "⚠️ Backup creado pero pesa %s (> 49 MB, límite de Telegram).\n"
-                   "Quedó en <code>%s</code>\n\n" % (esc(fmt_bytes(size)), esc(res)))
+                   "❌ <b>No se envió el backup</b> (no se manda sin cifrar): %s\n"
+                   "Quedó solo en el servidor: <code>%s</code>\n\n" % (esc(enc), esc(res)))
         return
     try:
-        with open(res, "rb") as fh:
-            await context.bot.send_document(
-                chat_id=int(ADMIN_ID), document=fh, filename=os.path.basename(res),
-                caption="💾 Backup de /etc + paquetes · %s\n⚠️ Contiene datos de usuarios: no lo reenvíes."
-                        % fmt_bytes(size))
-    except Exception as e:
-        log.error("backup send: %s", e)
-        await show(update, context, scr_servidor, "❌ No se pudo enviar el backup: %s\n\n" % esc(e))
-        return
-    log.info("backup enviado via bot: %s (%d bytes)", res, size)
-    await pantalla(update, context, "💾 <b>BACKUP ENVIADO</b> ↓\n<code>%s</code>" % esc(res), None)
+        esize = os.path.getsize(enc)
+        if esize > TG_MAX_FILE:
+            await show(update, context, scr_servidor,
+                       "⚠️ Backup creado pero pesa %s (> 49 MB, límite de Telegram).\n"
+                       "Quedó solo en el servidor: <code>%s</code>\n\n" % (esc(fmt_bytes(esize)), esc(res)))
+            return
+        nombre = os.path.basename(enc)
+        try:
+            with open(enc, "rb") as fh:
+                await context.bot.send_document(
+                    chat_id=int(ADMIN_ID), document=fh, filename=nombre, parse_mode=ParseMode.HTML,
+                    caption=("💾 <b>Backup CIFRADO</b> (AES-256) · %s\n"
+                             "🔓 Para abrirlo:\n"
+                             "<code>openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in %s -out backup.tar.gz</code>\n"
+                             "🔑 La clave NO viaja por Telegram: panel → Bot Telegram → Ver token y admin."
+                             % (esc(fmt_bytes(esize)), esc(nombre))))
+        except Exception as e:
+            log.error("backup send: %s", e)
+            await show(update, context, scr_servidor, "❌ No se pudo enviar el backup: %s\n\n" % esc(e))
+            return
+    finally:
+        try:
+            os.remove(enc)          # el .enc es temporal; la copia local queda en BACKUP_DIR (0600)
+        except OSError:
+            pass
+    log.info("backup CIFRADO enviado via bot: %s (%d bytes)", res, esize)
+    await pantalla(update, context, "💾 <b>BACKUP ENVIADO (cifrado)</b> ↓\n<code>%s</code>" % esc(res), None)
     context.user_data["wid"] = None          # la nueva pantalla queda debajo del archivo
     await show(update, context, scr_servidor)
 
@@ -5894,6 +5991,8 @@ async def on_error(update, context):
               type(update).__name__ if update else "?")
 
 async def post_init(app):
+    await asyncio.to_thread(purgar_claves_antiguas)
+    await asyncio.to_thread(backup_key)
     app.bot_data["alert_task"] = asyncio.create_task(alert_loop(app))
     if os.path.isfile(REBOOT_FLAG):          # venimos de un reinicio pedido desde el bot
         try:
@@ -5921,7 +6020,7 @@ def main():
     if not ADMIN_ID:
         log.error("ADMIN_CHAT_ID vacio en %s. Reinstalá el bot desde el panel.", CONF_FILE)
         sys.exit(1)
-    log.info("Ghost Bot 3.12.0 iniciado (admin=%s, dir=%s)", ADMIN_ID, BOT_DIR)
+    log.info("Ghost Bot %s iniciado (admin=%s, dir=%s)", BOT_REV, ADMIN_ID, BOT_DIR)
     app = (Application.builder().token(BOT_TOKEN)
            .post_init(post_init).post_shutdown(post_shutdown).build())
     app.add_handler(CommandHandler("start", cmd_start))
@@ -6036,6 +6135,9 @@ bot_telegram_instalar(){
     local CUR_TOK CUR_CHAT INTENTOS=0
     CUR_TOK=$(bot_conf_get BOT_TOKEN)
     CUR_CHAT=$(bot_conf_get ADMIN_CHAT_ID)
+    # Si ya pusiste Telegram en Trafico → Notificaciones, se ofrece ese mismo token/chat (ENTER lo conserva)
+    [[ -n "$CUR_TOK" ]]  || CUR_TOK=$(ghost_conf_get TG_TOKEN)
+    [[ -n "$CUR_CHAT" ]] || CUR_CHAT=$(ghost_conf_get TG_CHAT)
     while [[ -z "$OKF" ]] && (( INTENTOS < 5 )); do
         if [[ -n "$CUR_TOK" ]]; then
             read -r -p "Ya hay un token (…${CUR_TOK: -6}). ENTER lo conserva, otro lo reemplaza: " R
@@ -6203,15 +6305,28 @@ bot_telegram_estado(){
     PAUSA
 }
 
+bot_backup_key_asegurar(){
+    # Clave con la que el bot CIFRA los backups antes de mandarlos a Telegram (24 caracteres, 0600).
+    mkdir -p "$BOT_DIR" 2>/dev/null
+    if [[ ! -s "$BOT_DIR/backup.key" ]]; then
+        ( umask 077; head -c 512 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 24 > "$BOT_DIR/backup.key"; echo >> "$BOT_DIR/backup.key" )
+    fi
+    chmod 600 "$BOT_DIR/backup.key" 2>/dev/null
+}
+
 bot_telegram_ver(){
     if [[ ! -r "$BOT_DIR/config.env" ]]; then
         ERR "Sin configuración: instalá el bot (opción 1)."; PAUSA; return
     fi
+    bot_backup_key_asegurar
     ficha_ok "🔑 DATOS DEL BOT" \
         "BOT_TOKEN" "$(bot_conf_get BOT_TOKEN)" \
         "ADMIN_CHAT_ID" "$(bot_conf_get ADMIN_CHAT_ID)" \
+        "Clave de backup" "$(head -n1 "$BOT_DIR/backup.key" 2>/dev/null)" \
         "Config" "$BOT_DIR/config.env"
-    INFO "El token es SECRETO: no lo compartas (da control total del bot)."
+    INFO "El token y la clave de backup son SECRETOS: no los compartas."
+    INFO "El backup que el bot manda por Telegram va CIFRADO con esa clave (la clave nunca viaja por Telegram)."
+    INFO "Para abrirlo: openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in ARCHIVO.enc -out backup.tar.gz"
     PAUSA
 }
 
@@ -6296,11 +6411,11 @@ trafico_notif_corte(){
     IP=$(ip_publica 2>/dev/null || echo "?")
     SOP=$(ghost_conf_get SUPPORT); SOP=${SOP:-@JorgeBarrios}
     notif_enviar "🚫 <b>CUOTA AGOTADA</b>
-Usuario: <code>${U}</code>
-Limite: ${G} GB
-Servidor: ${IP}
-Contacto soporte: ${SOP}
-El usuario fue bloqueado (SSH + Xray)."
+👤 <code>${U}</code>
+📦 Límite: ${G} GB
+🌍 Servidor: ${IP}
+⛔ Bloqueado (SSH + Xray)
+🆘 Soporte: ${SOP}"
 }
 
 # ---- Historial diario de consumo ----
@@ -6361,12 +6476,8 @@ trafico_bloquear_excedidos(){
         xray_usuario del "$U" >/dev/null 2>&1
         # 3) Marcar estado
         trafico_marcar_cuota "$U" "${G:-0}"
-        # 4) Notificar (Telegram/Discord/WhatsApp + Bot de Telegram)
+        # 4) Notificar (Telegram manual y/o Bot instalado, Discord, WhatsApp): un solo envio por canal
         trafico_notif_corte "$U" "${G:-?}"
-        bot_notificar "🚫 <b>CUOTA AGOTADA</b>
-👤 <code>$U</code>
-📦 Límite: ${G:-?} GB
-⛔ Bloqueado (SSH + Xray)"
         echo "$U ${G:-?}"
     done
 }
@@ -6416,11 +6527,11 @@ trafico_cron_instalar(){
         echo '# Generado por Ghost Panel (trafico_cron_instalar). No editar: se regenera solo.'
         echo 'export PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin LC_ALL=C.UTF-8'
         echo 'exec 9>/run/ghost-trafico.lock; flock -n 9 || exit 0      # sin ciclos solapados'
-        declare -p BANNERS_DIR LOG_PANEL PROTEGIDOS_NOMBRES
+        declare -p BANNERS_DIR LOG_PANEL PROTEGIDOS_NOMBRES BOT_DIR
         echo 'declare -A TRAF_CACHE=(); TRAF_BATCH=0'
         for FN in vps_log usuario_protegido ui_rep fmt_bytes xray_stats_todos trafico_cache_cargar \
                   trafico_usuario_bytes trafico_excedido trafico_bloquear_excedidos trafico_marcar_cuota \
-                  trafico_esta_por_cuota trafico_notif_corte notif_enviar trafico_hist_registrar \
+                  trafico_esta_por_cuota trafico_notif_corte notif_enviar bot_conf_get tg_destinos trafico_hist_registrar \
                   xray_usuario xray_recargar xray_ensure_api xray_config_perms xray_grupo \
                   usuario_fecha_cuenta dias_hasta ghost_conf_get ip_publica \
                   banner_barra banner_seg banner_sep banner_hora banner_l_gruesa banner_l_fina \
@@ -6583,12 +6694,30 @@ trafico_desbloquear_cuota(){
     PAUSA
 }
 
+tg_pedir_manual(){
+    # Token + chat para un Telegram MANUAL (solo si no usas el Bot instalado, o quieres otro destino ADEMAS)
+    local CUR T C
+    CUR=$(ghost_conf_get TG_TOKEN)
+    read -r -p "  Bot Token${CUR:+ [ya configurado]}: " T; T=${T:-$CUR}
+    CUR=$(ghost_conf_get TG_CHAT)
+    read -r -p "  Chat ID${CUR:+ [$CUR]}: " C; C=${C:-$CUR}
+    [[ -n "$T" ]] && ghost_conf_set TG_TOKEN "$T"
+    [[ -n "$C" ]] && ghost_conf_set TG_CHAT "$C"
+    ficha_ok "📣 TELEGRAM MANUAL CONFIGURADO" "Chat ID" "$(ghost_conf_get TG_CHAT)" "Bot token" "$([[ -n "$(ghost_conf_get TG_TOKEN)" ]] && echo '********' || echo '(vacío)')"
+}
+
 trafico_notif_config(){
-    local OPC CUR _t _h _k
+    local OPC OPC2 CUR H P K _h _k _e CAN
+    _e=$(tg_estado)
     echo -e "${CIAN}--- NOTIFICACIONES DE CUOTA ---${NC}"
     echo "  Se envian al auto-cortar o al cortar manualmente por cuota."
+    case "$_e" in
+        bot|ambos) echo -e "  ${VERDE}✔ Telegram ya funciona con tu Bot instalado (opción 9 del menú principal).${NC}" ;;
+        manual)    echo -e "  ${VERDE}✔ Telegram manual configurado.${NC}" ;;
+        *)         echo -e "  ${AMARILLO}Telegram sin configurar.${NC} ${GRIS}Si instalas el Bot (opción 9) se usa solo.${NC}" ;;
+    esac
     echo
-    echo "  [1] Telegram (bot token + chat_id)"
+    echo "  [1] Telegram"
     echo "  [2] Discord (webhook URL)"
     echo "  [3] WhatsApp CallMeBot (telefono + apikey)"
     echo "  [4] Probar envio"
@@ -6597,13 +6726,28 @@ trafico_notif_config(){
     read -r -p "  > " OPC
     case "$OPC" in
         1)
-            CUR=$(ghost_conf_get TG_TOKEN)
-            read -r -p "  Bot Token${CUR:+ [$CUR]}: " T; T=${T:-$CUR}
-            CUR=$(ghost_conf_get TG_CHAT)
-            read -r -p "  Chat ID${CUR:+ [$CUR]}: " C; C=${C:-$CUR}
-            [[ -n "$T" ]] && ghost_conf_set TG_TOKEN "$T"
-            [[ -n "$C" ]] && ghost_conf_set TG_CHAT "$C"
-            ficha_ok "📣 TELEGRAM CONFIGURADO" "Chat ID" "$(ghost_conf_get TG_CHAT)" "Bot token" "$([[ -n "$(ghost_conf_get TG_TOKEN)" ]] && echo '********' || echo '(vacío)')"
+            if [[ "$_e" == bot || "$_e" == ambos ]]; then
+                ficha_abrir "📣 TELEGRAM · BOT INSTALADO" "$VERDE"
+                ficha_fila "Origen" "Bot de Telegram (opción 9)"
+                ficha_fila "Chat ID" "$(bot_conf_get ADMIN_CHAT_ID)"
+                ficha_fila "Estado" "se usa solo, sin pedir token" "$VERDE"
+                ficha_cerrar
+                echo "  [1] Dejarlo así (recomendado)"
+                echo "  [2] Enviar ADEMÁS a otro bot/chat"
+                [[ -n "$(ghost_conf_get TG_TOKEN)" ]] && echo "  [3] Quitar el Telegram manual (usar solo el Bot)"
+                read -r -p "  > " OPC2
+                case "$OPC2" in
+                    2) tg_pedir_manual ;;
+                    3) if [[ -n "$(ghost_conf_get TG_TOKEN)" ]]; then
+                           ghost_conf_del TG_TOKEN; ghost_conf_del TG_CHAT
+                           ficha_ok "📣 TELEGRAM" "Origen" "solo el Bot instalado"
+                       fi ;;
+                    *) INFO "Sin cambios." ;;
+                esac
+            else
+                tg_pedir_manual
+                INFO "Tip: con el Bot instalado (opción 9 del menú principal) no hace falta configurar esto."
+            fi
             ;;
         2)
             CUR=$(ghost_conf_get DISCORD_HOOK)
@@ -6615,21 +6759,25 @@ trafico_notif_config(){
             CUR=$(ghost_conf_get WA_PHONE)
             read -r -p "  Telefono con codigo pais (ej 54911xxxxxxx)${CUR:+ [$CUR]}: " P; P=${P:-$CUR}
             CUR=$(ghost_conf_get WA_APIKEY)
-            read -r -p "  API Key${CUR:+ [$CUR]}: " K; K=${K:-$CUR}
+            read -r -p "  API Key${CUR:+ [ya configurada]}: " K; K=${K:-$CUR}
             [[ -n "$P" ]] && ghost_conf_set WA_PHONE "$P"
             [[ -n "$K" ]] && ghost_conf_set WA_APIKEY "$K"
             ficha_ok "📣 WHATSAPP CONFIGURADO" "Teléfono" "$(ghost_conf_get WA_PHONE)" "API Key" "$([[ -n "$(ghost_conf_get WA_APIKEY)" ]] && echo '********' || echo '(vacío)')"
             ;;
         4)
-            INFO "Enviando mensaje de prueba..."
-            notif_enviar "🧪 Prueba Ghost Panel — notificaciones de cuota OK ($(date '+%F %T'))"
-            ficha_ok "📣 PRUEBA ENVIADA" "Mensaje" "enviado" "Si no llega" "revisa token / webhook / apikey"
+            CAN=$(notif_canales_txt)
+            if [[ -z "$CAN" ]]; then
+                ERR "No hay ningún canal configurado (Telegram, Discord o WhatsApp)."
+            else
+                INFO "Enviando mensaje de prueba..."
+                notif_enviar "🧪 Prueba Ghost Panel — notificaciones de cuota OK ($(date '+%F %T'))"
+                ficha_ok "📣 PRUEBA ENVIADA" "Canales" "$CAN" "Si no llega" "revisa token / webhook / apikey"
+            fi
             ;;
         5)
-            _t=$(ghost_conf_get TG_TOKEN); _h=$(ghost_conf_get DISCORD_HOOK); _k=$(ghost_conf_get WA_APIKEY)
+            _h=$(ghost_conf_get DISCORD_HOOK); _k=$(ghost_conf_get WA_APIKEY)
             ficha_abrir "📣 NOTIFICACIONES DE CUOTA"
-            ficha_fila "Telegram token" "$([[ -n "$_t" ]] && echo '********' || echo '(vacío)')"
-            ficha_fila "Telegram chat" "$(ghost_conf_get TG_CHAT | grep . || echo '(vacío)')"
+            ficha_fila "Telegram" "$(tg_estado_txt)"
             ficha_fila "Discord webhook" "$([[ -n "$_h" ]] && echo "${_h:0:30}..." || echo '(vacío)')"
             ficha_fila "WhatsApp teléfono" "$(ghost_conf_get WA_PHONE | grep . || echo '(vacío)')"
             ficha_fila "WhatsApp API Key" "$([[ -n "$_k" ]] && echo '********' || echo '(vacío)')"
