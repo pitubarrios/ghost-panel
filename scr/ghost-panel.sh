@@ -3,7 +3,19 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 3.11.6
+#  Version: 3.12.0
+#  Cambios 3.12.0 (Bot de Telegram: casi todo con botones):
+#    - Menu principal con barras de RAM, CPU y disco (+ uptime) y boton Actualizar.
+#    - Ficha por usuario (se abre al tocarlo en la lista): Renovar, Bloquear/Desbloquear, Clave,
+#      Limites, Enviar datos, Eliminar (con confirmacion) y Desconectar. Lista paginada + buscador.
+#    - Conectados ahora: quien esta online, sesiones usadas/permitidas y boton para desconectarlo.
+#    - Limites desde el bot: conexiones y GB, desbloquear por cuota y resetear el contador (SSH + Xray).
+#    - Test SSH de 1 dia con un toque y Enviar datos (usuario, clave, IP, puerto y CheckUser).
+#    - Alertas automaticas cada 5 min DENTRO del bot (sin procesos nuevos): resumen diario a la hora
+#      elegida, aviso a 3 dias de vencer y aviso si RAM/CPU/disco pasan del umbral (85% por defecto).
+#    - Servidor: reiniciar Xray/SSH/limiter, ver puertos, ver logs, backup enviado como archivo
+#      (solo a un chat privado) y reinicio de la VPS con doble confirmacion + aviso al volver.
+#    - El panel actualiza solo el bot ya instalado al abrir (bot_autoactualizar): no hace falta reinstalar.
 #  Cambios 3.11.6 (rendimiento en VPS de 1 vCPU / 1 GB):
 #    - FIX load alto: PROMPT/PAUSA ahora SALEN si la terminal ya no existe (EOF) o tras
 #      IDLE_TIMEOUT s sin tocar nada (por defecto 1200; 0 = nunca). Antes un panel huerfano
@@ -189,7 +201,7 @@ tema_guardar(){
     echo "THEME=$1" >> /etc/ghost-panel.conf
 }
 tema_cargar
-GHOST_VER='3.11.6'
+GHOST_VER='3.12.0'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -3706,6 +3718,26 @@ bot_refresh_helper(){
     return 0
 }
 
+BOT_REV='3.12.0'   # revision del bot.py embebido (debe coincidir con BOT_REV dentro de bot.py)
+
+bot_autoactualizar(){
+    # Si el bot ya esta instalado con un bot.py de otra revision, lo regenera solo (sin pedir token ni
+    # reinstalar). Si el codigo nuevo no compila, restaura el anterior. Solo reinicia si estaba habilitado.
+    [[ -f "$BOT_DIR/bot.py" && -f /etc/systemd/system/ghost-bot.service ]] || return 0
+    grep -q "^BOT_REV = \"$BOT_REV\"" "$BOT_DIR/bot.py" 2>/dev/null && return 0
+    cp -f "$BOT_DIR/bot.py" "$BOT_DIR/bot.py.bak" 2>/dev/null
+    bot_telegram_escribir_py
+    if ! python3 -m py_compile "$BOT_DIR/bot.py" 2>/dev/null; then
+        mv -f "$BOT_DIR/bot.py.bak" "$BOT_DIR/bot.py" 2>/dev/null
+        return 0
+    fi
+    rm -f "$BOT_DIR/bot.py.bak"
+    bot_refresh_helper
+    systemctl is-enabled --quiet ghost-bot 2>/dev/null && systemctl restart ghost-bot >/dev/null 2>&1
+    vps_log INFO "bot actualizado a la revision $BOT_REV" 2>/dev/null
+    return 0
+}
+
 bot_telegram_escribir_py(){
     # Genera /opt/ghost-bot/bot.py (el codigo del bot). Heredoc literal: sin expansion.
     mkdir -p "$BOT_DIR"
@@ -3715,19 +3747,24 @@ bot_telegram_escribir_py(){
 """
 👻 GHOST PANEL · Bot de Telegram para administrar usuarios SSH
 ==============================================================
-Generado por Ghost Panel v3.11.5 (función bot_telegram_escribir_py).
+Generado por Ghost Panel v3.12.0 (función bot_telegram_escribir_py).
 NO editar a mano: se regenera al reinstalar el bot desde el panel
 (Bot Telegram -> Instalar / Configurar).
 
 REGLA DE ORO · CHAT SIEMPRE LIMPIO:
-  - NUNCA se envia un mensaje nuevo al tocar un boton: SIEMPRE se edita
-    la misma "pantalla" (query.edit_message_text / edit_message_text).
-  - Mensaje nuevo solo en /start (o si la pantalla se perdio).
+  - Al tocar un botón se EDITA la misma "pantalla" (nunca mensajes nuevos).
+  - Mensaje nuevo solo en /start, en alertas automáticas y al enviar un backup.
   - Los textos que el admin escribe se BORRAN para no ensuciar el chat.
-  - Los flujos (crear / renovar / eliminar / bloquear / clave) son paso a
-    paso, con timeout de 5 minutos: si el admin no responde, se cancelan.
+
+TODO CON BOTONES:
+  - Menú con barras de RAM / CPU / disco.
+  - Ficha por usuario (renovar, bloquear, clave, límites, enviar datos, eliminar).
+  - Conectados ahora (con botón para desconectar), límites, test SSH de 1 día.
+  - Alertas automáticas (resumen diario, por vencer, RAM/CPU/disco) cada 5 min.
+  - Servidor: reiniciar servicios, puertos, logs, backup y reinicio de la VPS.
 """
 
+import asyncio
 import datetime
 import functools
 import html
@@ -3742,6 +3779,19 @@ import sys
 import time
 import uuid
 
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # Python < 3.9
+    ZoneInfo = None
+
+BOT_REV = "3.12.0"   # el panel compara esto para actualizar el bot solo
+
+if not hasattr(asyncio, "to_thread"):          # Python 3.8 (Ubuntu 20.04)
+    async def _to_thread(fn, *a, **k):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, functools.partial(fn, *a, **k))
+    asyncio.to_thread = _to_thread
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
@@ -3751,14 +3801,21 @@ from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
 # ------------------------- CONSTANTES -------------------------
 BOT_DIR = "/opt/ghost-bot"
 CONF_FILE = os.path.join(BOT_DIR, "config.env")
+ALERTS_FILE = os.path.join(BOT_DIR, "alerts.json")
+CLAVES_FILE = os.path.join(BOT_DIR, "claves.json")
+REBOOT_FLAG = os.path.join(BOT_DIR, "reboot.flag")
 LOG_FILE = "/var/log/ghost-bot.log"
 REFRESH_SH = os.path.join(BOT_DIR, "panel-refresh.sh")   # banners: generado por el panel
+PANEL_CONF = "/etc/ghost-panel.conf"
 XRAY_CFG = "/usr/local/etc/xray/config.json"
 XRAY_BIN = "/usr/local/bin/xray"
 CHECKUSER_CONF = "/etc/vps-checkuser.conf"
+BACKUP_DIR = "/root/backups"
 TIMEOUT_FLOW = 300      # 5 minutos sin responder -> se cancela el flujo
-MAX_FILAS = 40          # maximo de usuarios por mensaje en listados
+PAGE = 8                # usuarios por página en la lista
+ALERT_EVERY = 300       # chequeo de alertas cada 5 minutos
 GB = 1073741824
+TG_MAX_FILE = 49 * 1024 * 1024   # límite de subida de los bots de Telegram (~50 MB)
 
 # Usuarios protegidos del sistema (espejo de PROTEGIDOS_NOMBRES del panel)
 PROTEGIDOS = {
@@ -3771,6 +3828,15 @@ PROTEGIDOS = {
 }
 NAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
+# Logs que se pueden ver desde Servidor -> Logs
+LOGS = {
+    "bot": ("🤖 Bot", "/var/log/ghost-bot.log"),
+    "panel": ("👻 Panel", "/var/log/ghost-panel.log"),
+    "xray": ("🛰 Xray", "journal:xray"),
+    "ssh": ("🔐 SSH", "journal:ssh"),
+    "lim": ("🚦 Limiter", "journal:vps-limiter"),
+}
+
 # ------------------------- LOG -------------------------
 try:
     logging.basicConfig(
@@ -3780,7 +3846,7 @@ try:
     )
 except OSError:  # sin permiso de escritura (no deberia pasar: corre como root)
     logging.basicConfig(level=logging.INFO)
-logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)   # sus URLs llevan el token
 log = logging.getLogger("ghost-bot")
 
 ENV = dict(os.environ, LC_ALL="C", LANG="C")
@@ -3801,6 +3867,83 @@ def load_conf():
 CONF = load_conf()
 BOT_TOKEN = CONF.get("BOT_TOKEN", "").strip()
 ADMIN_ID = str(CONF.get("ADMIN_CHAT_ID", "")).strip()
+
+def _int_conf(key, default):
+    try:
+        return int(CONF.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+TEST_DIAS = max(1, _int_conf("TEST_DIAS", 1))   # test SSH: días de validez
+TEST_CONX = max(0, _int_conf("TEST_CONX", 1))   # test SSH: conexiones
+TEST_GB = max(0, _int_conf("TEST_GB", 1))       # test SSH: GB (0 = sin límite)
+
+def panel_conf_get(key):
+    try:
+        with open(PANEL_CONF, encoding="utf-8") as f:
+            for line in f:
+                k, _, v = line.rstrip("\n").partition("=")
+                if k == key:
+                    return v
+    except OSError:
+        pass
+    return ""
+
+# ------------------------- JSON (alertas / claves) -------------------------
+def jload(path, default):
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, type(default)) else default
+    except (OSError, ValueError):
+        return default
+
+def jsave(path, data):
+    """Guarda JSON con permisos 600 (escritura atómica)."""
+    tmp = path + ".tmp"
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=1, ensure_ascii=False)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+ALERTS_DEF = {
+    "daily": True, "hour": 21,          # resumen diario
+    "venc": True, "dias_aviso": 3,      # aviso de vencimiento
+    "res": True, "umbral": 85,          # RAM / CPU / disco
+    "last_daily": "", "venc_avisado": {},
+}
+
+def alerts_get():
+    d = dict(ALERTS_DEF)
+    d.update(jload(ALERTS_FILE, {}))
+    if not isinstance(d.get("venc_avisado"), dict):
+        d["venc_avisado"] = {}
+    return d
+
+def alerts_set(**kw):
+    d = alerts_get()
+    d.update(kw)
+    jsave(ALERTS_FILE, d)
+    return d
+
+# Claves que el bot fijó (Linux solo guarda el hash: sin esto no se podría reenviar la ficha)
+def clave_guardar(u, clave):
+    d = jload(CLAVES_FILE, {})
+    d[u] = clave
+    jsave(CLAVES_FILE, d)
+
+def clave_obtener(u):
+    return jload(CLAVES_FILE, {}).get(u, "")
+
+def clave_borrar(u):
+    d = jload(CLAVES_FILE, {})
+    if u in d:
+        del d[u]
+        jsave(CLAVES_FILE, d)
 
 # ------------------------- SUBPROCESOS -------------------------
 def sh(*args, inp=None, timeout=20):
@@ -3827,25 +3970,54 @@ def is_protegido(name):
     return name in PROTEGIDOS
 
 def panel_users():
-    """Usuarios del panel: uid>=1000, no nobody, no protegidos."""
-    out = sh("awk", "-F:", '$3>=1000 && $1!="nobody"{print $1}', "/etc/passwd").stdout
-    return [u for u in out.split() if not is_protegido(u)]
+    """Usuarios del panel (uid>=1000, no nobody, no protegidos), ordenados. Sin subprocesos."""
+    out = []
+    try:
+        with open("/etc/passwd", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                p = line.split(":")
+                if (len(p) >= 3 and p[2].isdigit() and int(p[2]) >= 1000
+                        and p[0] != "nobody" and p[0] not in PROTEGIDOS):
+                    out.append(p[0])
+    except OSError:
+        pass
+    return sorted(out)
+
+def shadow_map():
+    """usuario -> (bloqueado, expira_en_dias_epoch|None). Una lectura de /etc/shadow."""
+    m = {}
+    try:
+        with open("/etc/shadow", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                p = line.rstrip("\n").split(":")
+                if len(p) >= 8:
+                    exp = int(p[7]) if p[7].lstrip("-").isdigit() and int(p[7]) >= 0 else None
+                    m[p[0]] = (p[1].startswith("!"), exp)
+    except OSError:
+        pass
+    return m
+
+EPOCH = datetime.date(1970, 1, 1)
+
+def exp_iso(exp):
+    if exp is None:
+        return None
+    try:
+        return (EPOCH + datetime.timedelta(days=exp)).isoformat()
+    except (OverflowError, ValueError):
+        return None
+
+def dias_desde_exp(exp):
+    if exp is None:
+        return None
+    try:
+        return (EPOCH + datetime.timedelta(days=exp) - datetime.date.today()).days
+    except (OverflowError, ValueError):
+        return None
 
 def account_expiry_iso(name):
-    """Vencimiento de la CUENTA (chage -E) como YYYY-MM-DD o None si no vence."""
-    r = sh("chage", "-l", name)
-    if r.returncode != 0:
-        return None
-    for line in r.stdout.splitlines():
-        if line.lower().startswith("account expires"):
-            v = line.split(":", 1)[1].strip()
-            if not v or v.lower() == "never":
-                return None
-            try:
-                return datetime.datetime.strptime(v, "%b %d, %Y").date().isoformat()
-            except ValueError:
-                return None
-    return None
+    """Vencimiento de la CUENTA como YYYY-MM-DD o None si no vence."""
+    return exp_iso(shadow_map().get(name, (False, None))[1])
 
 def days_hasta(iso_date):
     try:
@@ -3854,17 +4026,24 @@ def days_hasta(iso_date):
         return 0
     return (d - datetime.date.today()).days
 
-def online_count(name):
-    r = sh("ps", "-eo", "user:32=,comm=")
-    n = 0
-    for line in r.stdout.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[0] == name and parts[1] in ("sshd", "dropbear"):
-            n += 1
-    return n
+def dias_txt(d):
+    if d is None:
+        return "sin vencimiento"
+    if d < 0:
+        return "venció hace %d día%s" % (-d, "" if d == -1 else "s")
+    if d == 0:
+        return "vence hoy"
+    return "%d día%s" % (d, "" if d == 1 else "s")
 
-def online_total():
-    return sum(online_count(u) for u in panel_users())
+def sesiones_map():
+    """usuario -> nº de sesiones sshd/dropbear. UNA sola pasada de ps."""
+    m = {}
+    r = sh("ps", "-eo", "user:32=,comm=")
+    for line in r.stdout.splitlines():
+        p = line.split()
+        if len(p) >= 2 and p[1] in ("sshd", "dropbear"):
+            m[p[0]] = m.get(p[0], 0) + 1
+    return m
 
 def read_file(path, default=""):
     try:
@@ -3891,12 +4070,24 @@ def lim_conex(name):
 def lim_gb(name):
     return solo_digitos("/etc/vps-trafico/" + name)  # 0 = sin limite
 
+def cuota_agotada(name):
+    return os.path.isfile("/etc/vps-cuota-agotada/" + name)
+
 def fmt_bytes(b):
     b = int(b or 0)
     if b < GB:
         return "%d MB" % (b // 1048576)
     c = b * 100 // GB
     return "%d.%02d GB" % (c // 100, c % 100)
+
+def fmt_uso(b, g):
+    """'1.2 / 10 GB' · '300 MB / 10 GB' · '1.2 GB (sin límite)'."""
+    b = int(b or 0)
+    if g > 0:
+        if b >= GB:
+            return "%.1f / %d GB" % (b / GB, g)
+        return "%d MB / %d GB" % (b // 1048576, g)
+    return "%s (sin límite)" % fmt_bytes(b)
 
 def trafico_mapa():
     """usuario -> bytes usados (SSH via iptables + Xray via API de stats)."""
@@ -3919,7 +4110,7 @@ def trafico_mapa():
     if os.path.isfile(XRAY_BIN):
         r = sh(XRAY_BIN, "api", "statsquery", "--server=127.0.0.1:10085", timeout=6)
         data = None
-        if r.stdout.strip()[:1] in "{[":
+        if r.stdout.strip()[:1] in ("{", "["):
             try:
                 data = json.loads(r.stdout)
             except json.JSONDecodeError:
@@ -3932,24 +4123,180 @@ def trafico_mapa():
                     m[mo.group(1)] = m.get(mo.group(1), 0) + int(s.get("value") or 0)
     return m
 
-def stats_negocio():
-    """(usuarios, online, por_vencer, bloqueados, trafico_total_txt)"""
-    us = panel_users()
-    hoy = int(time.time() // 86400)
-    awk = ('NR==FNR{if($3>=1000&&$1!="nobody"&&index(prot," "$1" ")==0)u[$1]=1;next}'
-           '($1 in u){n++;if($2~/^!/)b++;if($8!=""){d=$8-today;'
-           'if(d<0)v++;else if(d==0)h++;else if(d<=3)p++}}'
-           'END{print n+0,v+0,h+0,p+0,b+0}')
-    r = sh("awk", "-F:", "-v", "today=%d" % hoy,
-           "-v", "prot= %s " % " ".join(sorted(PROTEGIDOS)), awk,
-           "/etc/passwd", "/etc/shadow")
+# ------------------------- MÉTRICAS DEL SERVIDOR (sin subprocesos) -------------------------
+def mem_info():
+    """(usado_MB, total_MB, %). Usado = total - disponible (cuenta la caché como libre)."""
+    tot = av = 0
     try:
-        n, v, h, p, b = (int(x) for x in r.stdout.split())
-    except ValueError:
-        n, v, h, p, b = len(us), 0, 0, 0, 0
-    mapa = trafico_mapa()
-    total = sum(mapa.values())
-    return n, online_total(), v + h + p, b, ("--" if not mapa else fmt_bytes(total))
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    tot = int(line.split()[1])
+                elif line.startswith("MemAvailable:"):
+                    av = int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    used = max(0, tot - av)
+    return used // 1024, tot // 1024, (used * 100 // tot) if tot else 0
+
+def disk_info(path="/"):
+    """(usado_bytes, total_bytes, %) como df."""
+    try:
+        st = os.statvfs(path)
+    except OSError:
+        return 0, 0, 0
+    tot = st.f_blocks * st.f_frsize
+    used = (st.f_blocks - st.f_bfree) * st.f_frsize
+    avail = st.f_bavail * st.f_frsize
+    den = used + avail
+    return used, tot, (int((used * 100 + den - 1) // den) if den else 0)
+
+def _cpu_vals():
+    with open("/proc/stat") as f:
+        v = [int(x) for x in f.readline().split()[1:]]
+    return sum(v), v[3] + (v[4] if len(v) > 4 else 0)
+
+def cpu_pct(intervalo=0.4):
+    """% de CPU en una ventana corta. Bloquea 'intervalo' s (llamar en un hilo)."""
+    try:
+        t1, i1 = _cpu_vals()
+        time.sleep(intervalo)
+        t2, i2 = _cpu_vals()
+        if t2 > t1:
+            return max(0, min(100, 100 * ((t2 - t1) - (i2 - i1)) // (t2 - t1)))
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+def uptime_txt():
+    try:
+        up = int(float(read_file("/proc/uptime", "0").split()[0] or 0))
+    except (ValueError, IndexError):
+        up = 0
+    if up >= 86400:
+        return "%dd %dh" % (up // 86400, (up % 86400) // 3600)
+    if up >= 3600:
+        return "%dh %dm" % (up // 3600, (up % 3600) // 60)
+    return "%dm" % (up // 60)
+
+def barra8(pct):
+    pct = max(0, min(100, int(pct or 0)))
+    f = (pct * 8 + 50) // 100
+    return "▰" * f + "▱" * (8 - f)
+
+def barra10(pct, seg=10):
+    pct = max(0, min(100, int(pct or 0)))
+    f = (pct * seg + 50) // 100
+    return "█" * f + "░" * (seg - f)
+
+def bloque_salud():
+    """Bloque <pre> con barras de RAM, CPU y disco + uptime."""
+    _, _, rp = mem_info()
+    cp = cpu_pct()
+    _, _, dp = disk_info()
+    return ("<pre>RAM   %s %3d%%\n"
+            "CPU   %s %3d%%\n"
+            "Disco %s %3d%%   ⏱ %s</pre>"
+            % (barra8(rp), rp, barra8(cp), cp, barra8(dp), dp, uptime_txt()))
+
+def top_procesos(clave="rss", n=3):
+    """Top n procesos por memoria (MB) o CPU (%), agrupados por nombre."""
+    r = sh("ps", "-eo", "comm=,%s=" % ("rss" if clave == "rss" else "pcpu"),
+           "--sort=-%s" % ("rss" if clave == "rss" else "pcpu"))
+    ag = {}
+    for line in r.stdout.splitlines()[:400]:
+        p = line.rsplit(None, 1)
+        if len(p) != 2:
+            continue
+        try:
+            v = float(p[1])
+        except ValueError:
+            continue
+        ag[p[0]] = ag.get(p[0], 0.0) + v
+    top = sorted(ag.items(), key=lambda x: x[1], reverse=True)[:n]
+    if clave == "rss":
+        return ["%s %d MB" % (k, v // 1024) for k, v in top]
+    return ["%s %.0f%%" % (k, v) for k, v in top]
+
+# ------------------------- NEGOCIO -------------------------
+_IP_CACHE = {"ip": "", "ts": 0.0}
+
+def ip_publica():
+    if _IP_CACHE["ip"] and time.time() - _IP_CACHE["ts"] < 600:
+        return _IP_CACHE["ip"]
+    r = sh("curl", "-4", "-fsS", "--max-time", "3", "ifconfig.me", timeout=6)
+    ip = r.stdout.strip()
+    if not ip:
+        r = sh("hostname", "-I")
+        parts = r.stdout.split()
+        ip = parts[0] if parts else "?"
+    _IP_CACHE.update(ip=ip, ts=time.time())
+    return ip
+
+def ssh_puerto():
+    r = sh("sshd", "-T")
+    if r.returncode == 0:
+        for line in r.stdout.splitlines():
+            if line.startswith("port "):
+                return line.split()[1]
+    return "22"
+
+def checkuser_enlace(usuario):
+    if not os.path.isfile(CHECKUSER_CONF):
+        return ""
+    port, tok = "8080", ""
+    try:
+        with open(CHECKUSER_CONF, encoding="utf-8") as f:
+            for line in f:
+                k, _, v = line.strip().partition("=")
+                if k == "PORT":
+                    port = v
+                elif k == "TOKEN":
+                    tok = v
+    except OSError:
+        return ""
+    return "http://%s:%s/checkuser.php?user=%s&token=%s" % (ip_publica(), port, usuario, tok)
+
+def resumen_negocio(mapa=None):
+    """dict: n, on, ven (0-3 días), bloq, traf (texto), mapa."""
+    us = panel_users()
+    shd = shadow_map()
+    ses = sesiones_map()
+    ven = bloq = on = 0
+    for u in us:
+        lk, exp = shd.get(u, (False, None))
+        if lk:
+            bloq += 1
+        d = dias_desde_exp(exp)
+        if d is not None and 0 <= d <= 3:
+            ven += 1
+        if ses.get(u):
+            on += 1
+    if mapa is None:
+        mapa = trafico_mapa()
+    return {"n": len(us), "on": on, "ven": ven, "bloq": bloq, "mapa": mapa,
+            "traf": "--" if not mapa else fmt_bytes(sum(mapa.values()))}
+
+def info_usuario(u, shd=None, ses=None, mapa=None):
+    shd = shadow_map() if shd is None else shd
+    ses = sesiones_map() if ses is None else ses
+    mapa = trafico_mapa() if mapa is None else mapa
+    lk, exp = shd.get(u, (False, None))
+    d = dias_desde_exp(exp)
+    cuota = cuota_agotada(u)
+    if cuota:
+        est = ("🔴", "CUOTA AGOTADA")
+    elif lk:
+        est = ("🔴", "BLOQUEADO")
+    elif d is not None and d < 0:
+        est = ("🔴", "VENCIDO")
+    elif d is not None and d <= 3:
+        est = ("⏳", "POR VENCER")
+    else:
+        est = ("🟢", "ACTIVO")
+    return {"u": u, "locked": lk, "cuota": cuota, "iso": exp_iso(exp), "dias": d,
+            "on": ses.get(u, 0), "lc": lim_conex(u), "gb": lim_gb(u),
+            "used": mapa.get(u, 0), "emoji": est[0], "estado": est[1]}
 
 # ------------------------- UI TELEGRAM -------------------------
 def esc(s):
@@ -3957,33 +4304,39 @@ def esc(s):
 
 def kb(rows):
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton(t, callback_data=d) for t, d in fila] for fila in rows]
+        [[InlineKeyboardButton(t, callback_data=d[:64]) for t, d in fila] for fila in rows]
     )
 
 KB_CANCELAR = [[("❌ Cancelar", "cancel")]]
 
 MENU_ROWS = [
-    [("➕ Crear", "crear"), ("📋 Listar", "listar")],
-    [("🔄 Renovar", "renovar"), ("❌ Eliminar", "eliminar")],
-    [("🔒 Bloquear", "bloquear"), ("📈 Tráfico", "trafico")],
-    [("🔑 Clave", "clave"), ("📊 Estado VPS", "estado")],
-    [("🔙 Menú", "menu")],
+    [("➕ Crear", "cr"), ("📋 Usuarios", "ul|0")],
+    [("🟢 Conectados", "on"), ("📈 Tráfico", "tr")],
+    [("🛠 Servidor", "srv"), ("🔔 Alertas", "alr")],
+    [("🔄 Actualizar", "menu")],
 ]
 
-def barra(pct, seg=10):
-    pct = max(0, min(100, int(pct or 0)))
-    f = (pct * seg + 50) // 100
-    return "█" * f + "░" * (seg - f)
+LINEA = "━━━━━━━━━━━━━━━━━━━━"
 
 def menu_text():
-    n, on, ven, bloq, traf = stats_negocio()
+    s = resumen_negocio()
     return (
         "👻 <b>GHOST PANEL · Bot Admin</b>\n"
-        "─────────────────────\n"
-        f"👥 Usuarios: {n}  |  🟢 Online: {on}\n"
-        f"⏳ Por vencer: {ven}  |  🚫 Bloqueados: {bloq}\n"
-        f"📈 Tráfico total: {esc(traf)}"
+        + LINEA + "\n"
+        "👥 %d usuario%s · 🟢 %d online\n"
+        "⏳ %d por vencer · 🚫 %d bloqueado%s\n"
+        "📈 Tráfico: %s\n\n"
+        % (s["n"], "" if s["n"] == 1 else "s", s["on"], s["ven"], s["bloq"],
+           "" if s["bloq"] == 1 else "s", esc(s["traf"]))
+        + bloque_salud()
     )
+
+def scr_menu():
+    return menu_text(), MENU_ROWS
+
+def scr_error(detalle, rows=None):
+    return ("❌ <b>ERROR</b>\n" + LINEA + "\n<code>%s</code>" % esc(detalle)[:300],
+            rows or [[("🔙 Menú", "menu")]])
 
 # ------------------------- ACCIONES (espejo de las funciones del panel) -------------------------
 def refresh_banner(modo, usuario=None):
@@ -4086,6 +4439,12 @@ def xray_del(usuario):
         pass
     xray_reiniciar()
 
+def xray_reset_stats(usuario):
+    """Pone a cero los contadores de Xray del usuario (mejor esfuerzo)."""
+    if os.path.isfile(XRAY_BIN):
+        sh(XRAY_BIN, "api", "statsquery", "--server=127.0.0.1:10085",
+           "-pattern", "user>>>%s>>>" % usuario, "-reset", timeout=6)
+
 def iptables_reset_uid(usuario):
     """Espejo del panel: borra y recrea la regla del UID (contador a cero)."""
     uid = uid_of(usuario)
@@ -4096,39 +4455,6 @@ def iptables_reset_uid(usuario):
         pass
     sh("iptables", "-A", "VPS-TRAFFIC", "-m", "owner",
        "--uid-owner", str(uid), "-j", "RETURN")
-
-def ip_publica():
-    r = sh("curl", "-4", "-fsS", "--max-time", "3", "ifconfig.me", timeout=6)
-    ip = r.stdout.strip()
-    if not ip:
-        r = sh("hostname", "-I")
-        parts = r.stdout.split()
-        ip = parts[0] if parts else "?"
-    return ip
-
-def ssh_puerto():
-    r = sh("sshd", "-T")
-    if r.returncode == 0:
-        for line in r.stdout.splitlines():
-            if line.startswith("port "):
-                return line.split()[1]
-    return "22"
-
-def checkuser_enlace(usuario):
-    if not os.path.isfile(CHECKUSER_CONF):
-        return ""
-    port, tok = "8080", ""
-    try:
-        with open(CHECKUSER_CONF, encoding="utf-8") as f:
-            for line in f:
-                k, _, v = line.strip().partition("=")
-                if k == "PORT":
-                    port = v
-                elif k == "TOKEN":
-                    tok = v
-    except OSError:
-        return ""
-    return "http://%s:%s/checkuser.php?user=%s&token=%s" % (ip_publica(), port, usuario, tok)
 
 def validar_usuario_flow(usuario):
     """Valida el nombre para CREAR. Devuelve mensaje de error o '' si ok."""
@@ -4154,6 +4480,13 @@ def usuario_valido_existente(usuario):
 def gen_clave(n=12):
     alfabeto = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789"
     return "".join(secrets.choice(alfabeto) for _ in range(n))
+
+def nombre_libre(prefijo):
+    for _ in range(50):
+        n = "%s%04d" % (prefijo, secrets.randbelow(10000))
+        if not validar_usuario_flow(n):
+            return n
+    return "%s%d" % (prefijo, int(time.time()) % 100000)
 
 def accion_crear(u, dias, maxc, gbk, clave):
     """Crea el usuario. Devuelve (ok, expiso|msg_error). Espejo de crear_usuario."""
@@ -4192,6 +4525,7 @@ def accion_crear(u, dias, maxc, gbk, clave):
     iptables_reset_uid(u)
     xray_add(u)
     refresh_banner("user", u)
+    clave_guardar(u, clave)
     log.info("usuario creado via bot: %s (%dd, conx %d, %s)", u, dias, maxc,
              ("%d GB" % gbk) if gbk > 0 else "sin limite")
     return True, expiso
@@ -4213,6 +4547,7 @@ def accion_renovar(u, dias):
     r = sh("chage", "-M", "99999", "-E", expiso, u)
     if r.returncode != 0:
         return False, "chage falló: " + (r.stderr.strip() or "?")
+    os.makedirs("/etc/vps-plan", exist_ok=True)
     write_file("/etc/vps-plan/" + u, "%d\n" % max(0, days_hasta(expiso)))
     refresh_banner("user", u)
     log.info("renovado via bot: %s hasta %s (+%dd)", u, expiso, dias)
@@ -4239,6 +4574,7 @@ def accion_eliminar(u, borrar_home=True):
     refresh_banner("rebuild")
     ok = uid_of(u) is None
     if ok:
+        clave_borrar(u)
         log.info("usuario eliminado via bot: %s", u)
     return ok, "" if ok else "userdel falló: " + (r.stderr.strip() or "?")
 
@@ -4261,191 +4597,640 @@ def accion_clave(u, clave):
     r = sh("chpasswd", inp="%s:%s\n" % (u, clave))
     if r.returncode != 0:
         return False, "chpasswd falló."
+    clave_guardar(u, clave)
     log.info("clave cambiada via bot: %s", u)
     return True, ""
 
-def accion_estado():
-    mem = sh("free", "-m").stdout
-    ram_t = ram_u = 0
-    for line in mem.splitlines():
-        if line.startswith("Mem:"):
-            p = line.split()
-            ram_t, ram_u = int(p[1]), int(p[2])
-            break
-    ram_p = (ram_u * 100 // ram_t) if ram_t else 0
-    cpu = 0
-    try:
-        with open("/proc/stat") as f1:
-            a1 = f1.readline().split()[1:]
-        time.sleep(0.2)
-        with open("/proc/stat") as f2:
-            a2 = f2.readline().split()[1:]
-        v1 = [int(x) for x in a1]
-        v2 = [int(x) for x in a2]
-        t1, t2 = sum(v1), sum(v2)
-        i1 = v1[3] + (v1[4] if len(v1) > 4 else 0)
-        i2 = v2[3] + (v2[4] if len(v2) > 4 else 0)
-        if t2 > t1:
-            cpu = 100 * ((t2 - t1) - (i2 - i1)) // (t2 - t1)
-    except (OSError, ValueError, IndexError):
-        cpu = 0
-    dsk_p, dsk_u, dsk_t = 0, "?", "?"
-    for line in sh("df", "-P", "-h", "/").stdout.splitlines()[1:]:
-        p = line.split()
-        if len(p) >= 6:
-            dsk_p = int(p[4].rstrip("%") or 0)
-            dsk_u, dsk_t = p[2], p[1]
-            break
-    up = int(float(read_file("/proc/uptime", "0").split()[0] or 0))
-    if up >= 86400:
-        upt = "%dd %dh" % (up // 86400, (up % 86400) // 3600)
-    elif up >= 3600:
-        upt = "%dh %dm" % (up // 3600, (up % 3600) // 60)
+def accion_kick(u):
+    """Desconecta TODAS las sesiones del usuario. Devuelve cuántas tenía."""
+    n = sesiones_map().get(u, 0)
+    sh("pkill", "-KILL", "-u", u)
+    log.info("desconectado via bot: %s (%d sesiones)", u, n)
+    return n
+
+def accion_limite_conex(u, n):
+    if not (isinstance(n, int) and 0 <= n <= 999999):
+        return False, "Valor inválido."
+    os.makedirs("/etc/vps-limits", exist_ok=True)
+    write_file("/etc/vps-limits/" + u, "%d\n" % n)
+    refresh_banner("user", u)
+    log.info("limite conexiones via bot: %s = %d", u, n)
+    return True, ""
+
+def accion_limite_gb(u, g):
+    if not (isinstance(g, int) and 0 <= g <= 999999):
+        return False, "Valor inválido."
+    if g > 0:
+        os.makedirs("/etc/vps-trafico", exist_ok=True)
+        write_file("/etc/vps-trafico/" + u, "%d\n" % g)
     else:
-        upt = "%dm" % (up // 60)
-    n, on, ven, bloq, _ = stats_negocio()
-    return (
-        "📊 <b>ESTADO DEL VPS</b>\n"
-        "─────────────────────\n"
-        f"🌍 IP: <code>{esc(ip_publica())}</code>\n"
-        f"🔌 Puerto SSH: <code>{esc(ssh_puerto())}</code>\n"
-        f"⏱ Uptime: {esc(upt)}\n"
-        f"💾 RAM: {ram_u}M / {ram_t}M  {barra(ram_p)} {ram_p}%\n"
-        f"🧠 CPU: {barra(cpu)} {cpu}%\n"
-        f"🗄 Disco: {esc(dsk_u)} / {esc(dsk_t)}  {barra(dsk_p)} {dsk_p}%\n"
-        f"👥 Usuarios: {n}  |  🟢 Online: {on}\n"
-        f"⏳ Por vencer: {ven}  |  🚫 Bloqueados: {bloq}"
-    )
+        try:
+            os.remove("/etc/vps-trafico/" + u)
+        except OSError:
+            pass
+    refresh_banner("user", u)
+    log.info("limite GB via bot: %s = %d", u, g)
+    return True, ""
 
-def accion_listar():
-    us = panel_users()
-    if not us:
-        return "📋 <b>USUARIOS</b>\n<i>No hay usuarios del panel.</i>"
-    mapa = trafico_mapa()
-    filas = []
-    for u in us[:MAX_FILAS]:
-        exp = account_expiry_iso(u)
-        if exp:
-            d = days_hasta(exp)
-            vence = exp[8:10] + "/" + exp[5:7]
-            dias = ("%d" % d) if d >= 0 else "0"
-        else:
-            vence, dias = "-", "-"
-        est = "🔒" if sh("passwd", "-S", u).stdout.split()[1:2] == ["L"] else "✅"
-        lim = lim_conex(u)
-        cx = "∞" if lim == 0 else str(lim)
-        on = online_count(u)
-        used = mapa.get(u, 0)
-        g = lim_gb(u)
-        if g > 0:
-            pct = min(100, used * 100 // (g * GB))
-            traf = "%s/%dG %d%%" % (fmt_bytes(used), g, pct)
-        else:
-            traf = fmt_bytes(used) if mapa else "--"
-        filas.append("%-14s %-6s %4s %2s %1d %-16s %s" % (u, vence, dias, cx, on, traf, est))
-    cuerpo = "\n".join(filas)
-    extra = ("\n<i>… %d más (no entran en un mensaje)</i>" % (len(us) - MAX_FILAS)
-             if len(us) > MAX_FILAS else "")
-    return ("📋 <b>USUARIOS (%d)</b>\n"
-            "<pre>usuario        vence    d  cx on tráfico         est\n"
-            "%s</pre>%s" % (len(us), esc(cuerpo), extra))
+def accion_reset_contador(u):
+    iptables_reset_uid(u)
+    xray_reset_stats(u)
+    refresh_banner("user", u)
+    log.info("contador reseteado via bot: %s", u)
 
-def accion_trafico():
-    mapa = trafico_mapa()
-    if not mapa:
-        return ("📈 <b>TRÁFICO</b>\n"
-                "<i>Sin contadores activos. Activalos en el panel: Tráfico → Activar conteo.</i>")
-    us = sorted((u for u in panel_users() if u in mapa), key=lambda u: mapa[u], reverse=True)
-    filas = []
-    for u in us[:MAX_FILAS]:
-        used = mapa[u]
-        g = lim_gb(u)
-        if g > 0:
-            pct = min(100, used * 100 // (g * GB))
-            filas.append("%-14s %11s /%-5dGB %3d%% %s" % (u, fmt_bytes(used), g, pct, barra(pct, 8)))
-        else:
-            filas.append("%-14s %11s   sin límite" % (u, fmt_bytes(used)))
-    return ("📈 <b>TRÁFICO POR USUARIO (SSH + Xray)</b>\n"
-            "<pre>%s</pre>" % esc("\n".join(filas)))
+def accion_desbloquear_cuota(u):
+    """Espejo de trafico_desbloquear_cuota: desbloquea + Xray + contador a cero."""
+    sh("usermod", "-U", u)
+    try:
+        os.remove("/etc/vps-cuota-agotada/" + u)
+    except OSError:
+        pass
+    xray_add(u)
+    iptables_reset_uid(u)
+    xray_reset_stats(u)
+    refresh_banner("user", u)
+    refresh_banner("rebuild")
+    log.info("desbloqueado por cuota via bot: %s", u)
 
-# ------------------------- FICHAS -------------------------
-def ficha_creada(u, clave, dias, maxc, gbk, expiso):
+# ------------------------- DATOS / FICHAS DE TEXTO -------------------------
+def bloque_datos(u, clave, iso, con_checkuser=True):
+    d = days_hasta(iso) if iso else None
+    cx = lim_conex(u)
+    g = lim_gb(u)
+    filas = ["Usuario: %s" % u,
+             "Contraseña: %s" % clave,
+             "IP: %s" % ip_publica(),
+             "Puerto: %s" % ssh_puerto()]
+    if iso:
+        filas.append("Vence: %s (%s)" % (iso, dias_txt(d)))
+    filas.append("Conexiones: %s" % (str(cx) if cx > 0 else "sin límite"))
+    filas.append("Tráfico: %s" % (("%d GB" % g) if g > 0 else "sin límite"))
+    if con_checkuser:
+        link = checkuser_enlace(u)
+        if link:
+            filas.append("CheckUser: %s" % link)
+    return "<pre>%s</pre>" % esc("\n".join(filas))
+
+def ficha_creada(u, clave, dias, maxc, gbk, expiso, test=False):
     gb_txt = ("%d GB" % gbk) if gbk > 0 else "Sin límite"
     cx_txt = str(maxc) if maxc > 0 else "sin límite"
     enlace = checkuser_enlace(u)
-    ip = esc(ip_publica())
-    pto = esc(ssh_puerto())
-    txt = ("👻 <b>USUARIO CREADO</b>\n"
-           "━━━━━━━━━━━━━━━━━━\n"
-           f"👤 Usuario: <code>{esc(u)}</code>\n"
-           f"🔑 Contraseña: <code>{esc(clave)}</code>\n"
-           f"🌍 IP: <code>{ip}</code>\n"
-           f"🔌 Puerto SSH: <code>{pto}</code>\n"
-           f"📅 Creado: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}\n"
-           f"⏳ Validez: {dias} días (vence {expiso})\n"
-           f"📶 Conexiones: {esc(cx_txt)}\n"
-           f"📦 Tráfico: {esc(gb_txt)}\n"
-           "✅ Estado: ACTIVO"
-           "\n\n📋 <b>TOCÁ EL BLOQUE PARA COPIAR TODO JUNTO:</b>\n"
-           f"<pre>Usuario: {esc(u)}\n"
-           f"Contraseña: {esc(clave)}\n"
-           f"IP: {ip}\n"
-           f"Puerto: {pto}\n"
-           f"Vence: {expiso} ({dias} días)\n"
-           f"Conexiones: {esc(cx_txt)}\n"
-           f"Tráfico: {esc(gb_txt)}</pre>")
+    txt = ("%s <b>%s</b>\n" % ("🧪" if test else "👻", "TEST SSH CREADO" if test else "USUARIO CREADO")
+           + LINEA + "\n"
+           "👤 Usuario: <code>%s</code>\n"
+           "🔑 Contraseña: <code>%s</code>\n"
+           "🌍 IP: <code>%s</code>\n"
+           "🔌 Puerto SSH: <code>%s</code>\n"
+           "📅 Creado: %s\n"
+           "⏳ Validez: %d día%s (vence %s)\n"
+           "📶 Conexiones: %s\n"
+           "📦 Tráfico: %s\n"
+           "✅ Estado: ACTIVO\n\n"
+           "📋 <b>TOCÁ EL BLOQUE PARA COPIAR TODO JUNTO:</b>\n"
+           % (esc(u), esc(clave), esc(ip_publica()), esc(ssh_puerto()),
+              datetime.datetime.now().strftime("%d/%m/%Y %H:%M"),
+              dias, "" if dias == 1 else "s", expiso, esc(cx_txt), esc(gb_txt))
+           + bloque_datos(u, clave, expiso, con_checkuser=False))
     if enlace:
         txt += "\n🔗 CheckUser: " + esc(enlace)
     return txt
 
-def ficha_renovada(u, dias, expiso):
-    return ("🔄 <b>USUARIO RENOVADO</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            f"👤 Usuario: <code>{esc(u)}</code>\n"
-            f"⏳ Días agregados: {dias}\n"
-            f"📅 Nuevo vencimiento: {expiso}\n"
-            f"📆 Días restantes: {days_hasta(expiso)}")
+# ------------------------- PANTALLAS (devuelven (texto, filas)) -------------------------
+def scr_lista(page=0, filtro=""):
+    us = panel_users()
+    if filtro:
+        us = [u for u in us if filtro.lower() in u.lower()]
+    if not us:
+        txt = ("📋 <b>USUARIOS</b>\n<i>%s</i>"
+               % ("Sin resultados para «%s»." % esc(filtro) if filtro else "No hay usuarios del panel."))
+        return txt, [[("🔎 Buscar", "sr"), ("➕ Crear", "cr")], [("🔙 Menú", "menu")]]
+    shd, ses, mapa = shadow_map(), sesiones_map(), trafico_mapa()
+    total = len(us)
+    pages = (total + PAGE - 1) // PAGE
+    page = max(0, min(page, pages - 1))
+    btns = []
+    for u in us[page * PAGE:(page + 1) * PAGE]:
+        i = info_usuario(u, shd, ses, mapa)
+        extra = (" · %dd" % i["dias"]) if (i["dias"] is not None and i["dias"] >= 0) else ""
+        btns.append(("%s %s%s" % (i["emoji"], u, extra), "u|" + u))
+    rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
+    sufijo = ("|" + filtro[:30]) if filtro else ""
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(("⬅", "ul|%d%s" % (page - 1, sufijo)))
+        nav.append(("%d/%d" % (page + 1, pages), "noop"))
+        if page < pages - 1:
+            nav.append(("➡", "ul|%d%s" % (page + 1, sufijo)))
+        rows.append(nav)
+    rows.append([("🔎 Buscar", "sr"), ("➕ Crear", "cr")])
+    rows.append([("🔄 Actualizar", "ul|%d%s" % (page, sufijo)), ("🔙 Menú", "menu")])
+    txt = ("📋 <b>USUARIOS (%d)</b>%s\n" % (total, (" · «%s»" % esc(filtro)) if filtro else "")
+           + "🟢 activo · ⏳ por vencer · 🔴 bloqueado/vencido\n"
+           "<i>Tocá un usuario para abrir su ficha.</i>")
+    return txt, rows
 
-def ficha_eliminada(u, home_txt):
-    return ("❌ <b>USUARIO ELIMINADO</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            f"👤 Usuario: <code>{esc(u)}</code>\n"
-            f"📁 Carpeta /home: {esc(home_txt)}")
+def scr_ficha(u, pre=""):
+    i = info_usuario(u)
+    if i["iso"]:
+        vence = "📅 Vence %s (%s)" % (i["iso"], dias_txt(i["dias"]))
+    else:
+        vence = "📅 Sin vencimiento"
+    cx = ("%d/%s" % (i["on"], i["lc"] if i["lc"] > 0 else "∞"))
+    txt = (pre
+           + "👤 <b>%s</b> · %s %s\n" % (esc(u), i["emoji"], i["estado"])
+           + vence + "\n"
+           "🔌 %s sesiones · 📦 %s" % (cx, esc(fmt_uso(i["used"], i["gb"]))))
+    if i["cuota"]:
+        lock_btn = ("🚦 Desbloq. cuota", "lim|" + u)
+    elif i["locked"]:
+        lock_btn = ("🔓 Desbloquear", "blk|" + u)
+    else:
+        lock_btn = ("🔒 Bloquear", "blk|" + u)
+    rows = []
+    if i["on"]:
+        rows.append([("⛔ Desconectar (%d)" % i["on"], "kick|" + u)])
+    rows += [
+        [("🔄 Renovar", "rnm|" + u), lock_btn],
+        [("🔑 Clave", "clv|" + u), ("🚦 Límites", "lim|" + u)],
+        [("📤 Enviar datos", "snd|" + u), ("❌ Eliminar", "dl|" + u)],
+        [("⬅ Usuarios", "ul|0")],
+    ]
+    return txt, rows
 
-def ficha_bloqueo(u, bloqueado):
-    if bloqueado:
-        return ("🔒 <b>USUARIO BLOQUEADO</b>\n"
-                "━━━━━━━━━━━━━━━━━━\n"
-                f"👤 Usuario: <code>{esc(u)}</code>\n"
-                "⛔ Estado: BLOQUEADO (sesiones cerradas)")
-    return ("🔓 <b>USUARIO DESBLOQUEADO</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            f"👤 Usuario: <code>{esc(u)}</code>\n"
-            "✅ Estado: ACTIVO")
+def scr_conectados(pre=""):
+    ses = sesiones_map()
+    us = [u for u in panel_users() if ses.get(u)]
+    rows = []
+    if not us:
+        txt = pre + "🟢 <b>CONECTADOS AHORA</b>\n" + LINEA + "\n<i>Nadie conectado.</i>"
+    else:
+        lineas = []
+        for u in us[:40]:
+            lc = lim_conex(u)
+            n = ses[u]
+            warn = " ⚠️" if (lc > 0 and n > lc) else ""
+            lineas.append("🟢 %s · %d/%s sesión%s%s" % (u, n, lc if lc > 0 else "∞",
+                                                       "" if n == 1 else "es", warn))
+        txt = (pre + "🟢 <b>CONECTADOS AHORA (%d)</b>\n" % len(us) + LINEA + "\n"
+               "<pre>%s</pre>" % esc("\n".join(lineas)))
+        for u in us[:12]:
+            rows.append([("👤 %s (%d)" % (u, ses[u]), "u|" + u),
+                         ("⛔ Desconectar", "kick|%s|on" % u)])
+        if len(us) > 12:
+            txt += "\n<i>Botones para los primeros 12.</i>"
+    rows.append([("🔄 Actualizar", "on"), ("🔙 Menú", "menu")])
+    return txt, rows
 
-def ficha_clave(u, clave=""):
-    txt = ("🔑 <b>CLAVE ACTUALIZADA</b>\n"
-           "━━━━━━━━━━━━━━━━━━\n"
-           f"👤 Usuario: <code>{esc(u)}</code>\n"
-           "✅ Estado: ACTIVO")
+def scr_trafico():
+    mapa = trafico_mapa()
+    if not mapa:
+        return ("📈 <b>TRÁFICO</b>\n"
+                "<i>Sin contadores activos. Activalos en el panel: Tráfico → Activar conteo.</i>",
+                [[("🔄 Actualizar", "tr")], [("🔙 Menú", "menu")]])
+    us = sorted((u for u in panel_users() if u in mapa), key=lambda x: mapa[x], reverse=True)
+    filas = []
+    for u in us[:30]:
+        used = mapa[u]
+        g = lim_gb(u)
+        if g > 0:
+            pct = min(100, used * 100 // (g * GB))
+            filas.append("%-14s %9s /%-4dGB %3d%% %s" % (u, fmt_bytes(used), g, pct, barra10(pct, 8)))
+        else:
+            filas.append("%-14s %9s   sin límite" % (u, fmt_bytes(used)))
+    txt = ("📈 <b>TRÁFICO POR USUARIO (SSH + Xray)</b>\n<pre>%s</pre>\n"
+           "Total: <b>%s</b>" % (esc("\n".join(filas)), esc(fmt_bytes(sum(mapa.values())))))
+    btns = [("👤 " + u, "u|" + u) for u in us[:6]]
+    rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
+    rows.append([("🔄 Actualizar", "tr"), ("🔙 Menú", "menu")])
+    return txt, rows
+
+def scr_crear():
+    return ("➕ <b>CREAR USUARIO</b>\n" + LINEA + "\n"
+            "🧪 <b>Test SSH</b>: %d día%s · %s conexión%s · %s, un toque.\n"
+            "👤 <b>Usuario completo</b>: elegís días, conexiones, GB y clave."
+            % (TEST_DIAS, "" if TEST_DIAS == 1 else "s",
+               TEST_CONX if TEST_CONX > 0 else "∞", "" if TEST_CONX == 1 else "es",
+               ("%d GB" % TEST_GB) if TEST_GB > 0 else "sin límite"),
+            [[("🧪 Test SSH (1 toque)", "cr|test")],
+             [("👤 Usuario completo", "cr|full")],
+             [("🔙 Menú", "menu")]])
+
+def scr_renovar(u):
+    i = info_usuario(u)
+    return ("🔄 <b>RENOVAR · %s</b>\n" % esc(u)
+            + ("📅 Vence %s (%s)\n" % (i["iso"], dias_txt(i["dias"])) if i["iso"] else "")
+            + "Elegí los <b>días a agregar</b>:",
+            [[("7", "rn|7|" + u), ("15", "rn|15|" + u), ("30", "rn|30|" + u)],
+             [("60", "rn|60|" + u), ("90", "rn|90|" + u), ("✍️ Otro", "rn|c|" + u)],
+             [("⬅ Ficha", "u|" + u)]])
+
+def scr_clave(u):
+    return ("🔑 <b>CLAVE · %s</b>\nElegí cómo definir la nueva contraseña:" % esc(u),
+            [[("🎲 Generar", "clg|" + u), ("✍️ Escribir", "clm|" + u)],
+             [("⬅ Ficha", "u|" + u)]])
+
+def scr_limites(u, pre=""):
+    i = info_usuario(u)
+    pct = ("%d%%" % min(100, i["used"] * 100 // (i["gb"] * GB))) if i["gb"] > 0 else "—"
+    txt = (pre + "🚦 <b>LÍMITES · %s</b>\n" % esc(u) + LINEA + "\n"
+           "🔌 Conexiones máx: <b>%s</b> (ahora %d)\n"
+           "📦 Cuota: <b>%s</b> · usado %s (%s)"
+           % (i["lc"] if i["lc"] > 0 else "∞", i["on"],
+              ("%d GB" % i["gb"]) if i["gb"] > 0 else "sin límite", esc(fmt_bytes(i["used"])), pct))
+    if i["cuota"]:
+        txt += "\n🚫 <b>Cuota agotada</b>: tocá «Desbloquear por cuota»."
+
+    def lab(v, cur, pref=""):
+        return ("✔" if v == cur else pref) + ("♾" if v == 0 else str(v))
+    rows = [
+        [(lab(v, i["lc"], "🔌" if v == 1 else ""), "lmc|%d|%s" % (v, u)) for v in (1, 2, 3, 5, 0)],
+        [(lab(v, i["gb"], "📦" if v == 10 else ""), "lmg|%d|%s" % (v, u)) for v in (10, 30, 50, 100, 0)],
+        [("✍️ Otro GB", "lmx|" + u), ("🔄 Resetear contador", "lmr|" + u)],
+    ]
+    if i["cuota"] or (i["locked"] and i["gb"] > 0 and i["used"] >= i["gb"] * GB):
+        rows.append([("🔓 Desbloquear por cuota", "lmu|" + u)])
+    rows.append([("⬅ Ficha", "u|" + u)])
+    return txt, rows
+
+def scr_enviar(u, pre=""):
+    clave = clave_obtener(u)
+    iso = account_expiry_iso(u)
     if clave:
-        exp = account_expiry_iso(u)
-        extra = (f"Vence: {esc(exp)}\n") if exp else ""
-        txt += ("\n\n📋 <b>TOCÁ EL BLOQUE PARA COPIAR:</b>\n"
-                f"<pre>Usuario: {esc(u)}\n"
-                f"Contraseña: {esc(clave)}\n"
-                f"IP: {esc(ip_publica())}\n"
-                f"Puerto: {esc(ssh_puerto())}\n"
-                f"{extra}</pre>")
-    return txt
+        txt = (pre + "📤 <b>DATOS PARA ENVIAR · %s</b>\n" % esc(u) + LINEA + "\n"
+               "<i>Tocá el bloque para copiarlo y reenviarlo al cliente:</i>\n"
+               + bloque_datos(u, clave, iso))
+        rows = [[("🔑 Nueva clave", "clv|" + u)], [("⬅ Ficha", "u|" + u)]]
+    else:
+        txt = (pre + "📤 <b>DATOS PARA ENVIAR · %s</b>\n" % esc(u) + LINEA + "\n"
+               "No tengo guardada la clave de este usuario (Linux solo guarda su hash; "
+               "el bot guarda las que él mismo crea o cambia).\n"
+               "Generá una <b>nueva clave</b> para armar la ficha. La anterior dejará de funcionar.")
+        rows = [[("🎲 Nueva clave y enviar", "sng|" + u)], [("⬅ Ficha", "u|" + u)]]
+    return txt, rows
 
-def error_accion(detalle, retry_data):
-    return {
-        "text": ("❌ <b>ERROR</b>\n"
-                 "━━━━━━━━━━━━━━━━━━\n"
-                 f"<code>{esc(detalle)[:300]}</code>"),
-        "rows": [[("🔄 Reintentar", retry_data)], [("🔙 Menú", "menu")]],
-    }
+def scr_eliminar(u):
+    i = info_usuario(u)
+    return ("⚠️ <b>CONFIRMAR ELIMINACIÓN</b>\n" + LINEA + "\n"
+            "👤 <code>%s</code> · %s %s\n"
+            "📅 %s\n\n"
+            "Se borran: cuenta SSH, cliente Xray, límites, tráfico y banner. <b>No se puede deshacer.</b>"
+            % (esc(u), i["emoji"], i["estado"], esc(i["iso"] or "sin vencimiento")),
+            [[("✅ Sí, eliminar", "dly|" + u)], [("❌ Cancelar", "u|" + u)]])
+
+# ------------------------- SERVIDOR -------------------------
+def svc_activo(nombre):
+    return sh("systemctl", "is-active", "--quiet", nombre).returncode == 0
+
+def estado_servicios():
+    partes = []
+    if os.path.isfile(XRAY_BIN):
+        partes.append("Xray %s" % ("🟢" if (svc_activo("xray") or sh("pgrep", "-x", "xray").returncode == 0) else "🔴"))
+    partes.append("SSH %s" % ("🟢" if (svc_activo("ssh") or svc_activo("sshd")) else "🔴"))
+    if os.path.isfile("/etc/systemd/system/vps-limiter.service"):
+        partes.append("Limiter %s" % ("🟢" if svc_activo("vps-limiter") else "🔴"))
+    partes.append("Bot 🟢")
+    return " · ".join(partes)
+
+def scr_servidor(pre=""):
+    ru, rt, rp = mem_info()
+    txt = (pre + "🛠 <b>SERVIDOR</b>\n" + LINEA + "\n"
+           "🌍 IP <code>%s</code> · 🔌 SSH <code>%s</code>\n"
+           "%s\n"
+           "💾 RAM %d/%d MB\n\n"
+           % (esc(ip_publica()), esc(ssh_puerto()), estado_servicios(), ru, rt)
+           + bloque_salud())
+    rows = [
+        [("🔄 Xray", "srv|xray"), ("🔄 SSH", "srv|ssh"), ("🔄 Limiter", "srv|lim")],
+        [("🔌 Puertos", "srv|ports"), ("📜 Logs", "srv|logs")],
+        [("💾 Backup", "srv|bk"), ("📊 Detalle", "srv|st")],
+        [("♻️ Reiniciar VPS", "rb1")],
+        [("🔄 Actualizar", "srv"), ("🔙 Menú", "menu")],
+    ]
+    return txt, rows
+
+def scr_detalle():
+    ru, rt, rp = mem_info()
+    du, dt, dp = disk_info()
+    cp = cpu_pct()
+    try:
+        carga = os.getloadavg()
+        carga_txt = "%.2f %.2f %.2f" % carga
+    except OSError:
+        carga_txt = "?"
+    s = resumen_negocio()
+    txt = ("📊 <b>ESTADO DEL VPS</b>\n" + LINEA + "\n"
+           "🌍 IP: <code>%s</code>\n"
+           "🔌 Puerto SSH: <code>%s</code>\n"
+           "⏱ Uptime: %s\n"
+           "⚙️ Carga: %s\n"
+           "💾 RAM: %d M / %d M  %s %d%%\n"
+           "🧠 CPU: %s %d%%\n"
+           "🗄 Disco: %s / %s  %s %d%%\n"
+           "👥 Usuarios: %d  |  🟢 Online: %d\n"
+           "⏳ Por vencer: %d  |  🚫 Bloqueados: %d"
+           % (esc(ip_publica()), esc(ssh_puerto()), esc(uptime_txt()), esc(carga_txt),
+              ru, rt, barra10(rp), rp, barra10(cp), cp,
+              esc(fmt_bytes(du)), esc(fmt_bytes(dt)), barra10(dp), dp,
+              s["n"], s["on"], s["ven"], s["bloq"]))
+    return txt, [[("🔄 Actualizar", "srv|st")], [("⬅ Servidor", "srv"), ("🔙 Menú", "menu")]]
+
+def svc_restart(clave):
+    """Reinicia un servicio. Devuelve (ok, mensaje)."""
+    if clave == "xray":
+        if not os.path.isfile(XRAY_BIN):
+            return False, "Xray no está instalado."
+        xray_reiniciar()
+        time.sleep(1.5)
+        ok = svc_activo("xray") or sh("pgrep", "-x", "xray").returncode == 0
+        return ok, "Xray reiniciado" if ok else "Xray no levantó (revisá Logs → Xray)"
+    if clave == "ssh":
+        t = sh("sshd", "-t")
+        if t.returncode != 0:
+            return False, "sshd -t falló, NO se reinició: " + (t.stderr.strip()[:150] or "?")
+        r = sh("systemctl", "restart", "ssh")
+        if r.returncode != 0:
+            r = sh("systemctl", "restart", "sshd")
+        time.sleep(1)
+        ok = svc_activo("ssh") or svc_activo("sshd")
+        return ok, "SSH reiniciado (las sesiones abiertas siguen)" if ok else "SSH no levantó"
+    if clave == "lim":
+        if not os.path.isfile("/etc/systemd/system/vps-limiter.service"):
+            return False, "El limiter no está instalado."
+        sh("systemctl", "restart", "vps-limiter")
+        time.sleep(1)
+        ok = svc_activo("vps-limiter")
+        return ok, "Limiter reiniciado" if ok else "El limiter no levantó"
+    return False, "Servicio desconocido."
+
+def scr_puertos():
+    r = sh("ss", "-H", "-tuln", "-p")
+    vistos, filas = set(), []
+    for line in r.stdout.splitlines():
+        p = line.split()
+        if len(p) < 5:
+            continue
+        proto, local = p[0], p[4]
+        mo = re.search(r'\(\("([^"]+)"', line)
+        proc = mo.group(1) if mo else "-"
+        clave = (proto, local.rsplit(":", 1)[-1], proc)
+        if clave in vistos:
+            continue
+        vistos.add(clave)
+        filas.append((proto, local, proc))
+    filas.sort(key=lambda x: (x[0], int(x[1].rsplit(":", 1)[-1]) if x[1].rsplit(":", 1)[-1].isdigit() else 0))
+    cuerpo = "\n".join("%-4s %-22s %s" % f for f in filas[:40]) or "(sin datos)"
+    return ("🔌 <b>PUERTOS EN ESCUCHA</b>\n<pre>%s</pre>" % esc(cuerpo),
+            [[("🔄 Actualizar", "srv|ports")], [("⬅ Servidor", "srv"), ("🔙 Menú", "menu")]])
+
+def scr_logs_menu():
+    btns = [(n, "log|" + k) for k, (n, _) in LOGS.items()]
+    rows = [btns[i:i + 3] for i in range(0, len(btns), 3)]
+    rows.append([("⬅ Servidor", "srv")])
+    return "📜 <b>LOGS</b>\nElegí cuál ver (últimas líneas):", rows
+
+def scr_log(clave):
+    if clave not in LOGS:
+        return scr_logs_menu()
+    nombre, src = LOGS[clave]
+    if src.startswith("journal:"):
+        unidad = src[8:]
+        r = sh("journalctl", "-u", unidad, "-n", "25", "--no-pager", "-o", "short")
+        out = r.stdout
+        if not out.strip() and unidad == "ssh":
+            out = sh("journalctl", "-u", "sshd", "-n", "25", "--no-pager", "-o", "short").stdout
+    else:
+        out = sh("tail", "-n", "25", src).stdout
+    out = out.strip() or "(vacío)"
+    if len(out) > 3300:
+        out = "…" + out[-3300:]
+    return ("📜 <b>LOG · %s</b>\n<pre>%s</pre>" % (nombre, esc(out)),
+            [[("🔄 Actualizar", "log|" + clave)], [("⬅ Logs", "srv|logs"), ("🔙 Menú", "menu")]])
+
+def hacer_backup():
+    """Crea el .tar.gz (igual que el panel). Devuelve (ok, ruta|msg, tamaño_bytes)."""
+    try:
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        os.chmod(BACKUP_DIR, 0o700)
+    except OSError as e:
+        return False, "No se pudo crear %s: %s" % (BACKUP_DIR, e), 0
+    fn = os.path.join(BACKUP_DIR, "backup-bot-%s.tar.gz" % datetime.datetime.now().strftime("%Y-%m-%d_%H%M"))
+    sh("bash", "-c", "dpkg --get-selections > /root/paquetes.txt 2>/dev/null")
+    r = sh("tar", "czf", fn, "--exclude=etc/ssl/private", "/etc", "/root/paquetes.txt", timeout=300)
+    if r.returncode > 1 or not os.path.isfile(fn) or os.path.getsize(fn) == 0:
+        try:
+            os.remove(fn)
+        except OSError:
+            pass
+        return False, "tar falló (código %d): %s" % (r.returncode, r.stderr.strip()[:150]), 0
+    try:
+        os.chmod(fn, 0o600)
+    except OSError:
+        pass
+    # conserva solo los 5 backups más nuevos creados por el bot
+    try:
+        viejos = sorted(f for f in os.listdir(BACKUP_DIR)
+                        if f.startswith("backup-bot-") and f.endswith(".tar.gz"))
+        for f in viejos[:-5]:
+            os.remove(os.path.join(BACKUP_DIR, f))
+    except OSError:
+        pass
+    return True, fn, os.path.getsize(fn)
+
+def scr_reiniciar1():
+    ses = sesiones_map()
+    return ("♻️ <b>REINICIAR LA VPS</b>\n" + LINEA + "\n"
+            "Se cortan <b>todas las conexiones</b> (%d sesiones ahora) y el servidor "
+            "queda fuera de línea ~1-2 minutos.\n"
+            "El bot te avisa cuando vuelva." % sum(ses.values()),
+            [[("⚠️ Continuar", "rb2")], [("❌ Cancelar", "srv")]])
+
+def scr_reiniciar2():
+    return ("🚨 <b>ÚLTIMA CONFIRMACIÓN</b>\n" + LINEA + "\n"
+            "¿Reiniciar la VPS <b>AHORA</b>?\n<i>Este botón vale 60 segundos.</i>",
+            [[("♻️ SÍ, REINICIAR AHORA", "rb3|%d" % int(time.time()))],
+             [("❌ Cancelar", "srv")]])
+
+# ------------------------- ALERTAS -------------------------
+def tz_panel():
+    v = panel_conf_get("TZ_VISTA")
+    if v and v != "VPS" and ZoneInfo is not None:
+        try:
+            return ZoneInfo(v)
+        except Exception:
+            return None
+    return None
+
+def ahora():
+    tz = tz_panel()
+    return datetime.datetime.now(tz) if tz else datetime.datetime.now()
+
+def tz_label():
+    v = panel_conf_get("TZ_VISTA")
+    if v and v != "VPS" and tz_panel() is not None:
+        return v
+    return "hora del VPS (%s)" % time.strftime("%Z")
+
+def onoff(v):
+    return "ON ✅" if v else "OFF ⛔"
+
+def scr_alertas(pre=""):
+    a = alerts_get()
+    txt = (pre + "🔔 <b>ALERTAS</b>\n" + LINEA + "\n"
+           "📅 Resumen diario: <b>%s</b> · %02d:00\n"
+           "⏳ Por vencer: <b>%s</b> · avisa a %d días\n"
+           "🖥 Recursos: <b>%s</b> · sobre %d%% (RAM/CPU/disco)\n"
+           "🕒 Zona: %s\n"
+           "<i>Se revisa cada 5 min dentro del bot (sin procesos extra).</i>"
+           % (onoff(a["daily"]), a["hour"], onoff(a["venc"]), a["dias_aviso"],
+              onoff(a["res"]), a["umbral"], esc(tz_label())))
+    rows = [
+        [("📅 Resumen: " + onoff(a["daily"]), "alr|d"), ("🕒 Hora", "alr|h")],
+        [("⏳ Por vencer: " + onoff(a["venc"]), "alr|e")],
+        [("🖥 Recursos: " + onoff(a["res"]), "alr|r"), ("🎚 %d%%" % a["umbral"], "alr|u")],
+        [("📨 Ver resumen ahora", "alr|t")],
+        [("🔙 Menú", "menu")],
+    ]
+    return txt, rows
+
+def scr_alertas_hora():
+    a = alerts_get()
+    btns = [(("✔%02d" if h == a["hour"] else "%02d") % h, "alr|hs|%d" % h) for h in range(24)]
+    rows = [btns[i:i + 6] for i in range(0, 24, 6)]
+    rows.append([("⬅ Alertas", "alr")])
+    return "🕒 <b>HORA DEL RESUMEN DIARIO</b>\nElegí la hora (%s):" % esc(tz_label()), rows
+
+def scr_alertas_umbral():
+    a = alerts_get()
+    btns = [(("✔%d%%" if v == a["umbral"] else "%d%%") % v, "alr|um|%d" % v) for v in (70, 80, 85, 90, 95)]
+    return ("🎚 <b>UMBRAL DE RECURSOS</b>\nAvisar cuando RAM, CPU o disco pasen de:",
+            [btns, [("⬅ Alertas", "alr")]])
+
+def texto_resumen_diario():
+    s = resumen_negocio()
+    shd = shadow_map()
+    por_vencer = []
+    for u in panel_users():
+        d = dias_desde_exp(shd.get(u, (False, None))[1])
+        if d is not None and 0 <= d <= 3:
+            por_vencer.append("%s %dd" % (u, d))
+    top = sorted(((u, b) for u, b in s["mapa"].items() if u in shd and u not in PROTEGIDOS),
+                 key=lambda x: x[1], reverse=True)[:3]
+    txt = ("📅 <b>RESUMEN DIARIO</b> · %s\n" % ahora().strftime("%d/%m/%Y") + LINEA + "\n"
+           "👥 %d usuarios · 🟢 %d online\n"
+           "⏳ Por vencer: %d%s\n"
+           "🚫 Bloqueados: %d\n"
+           "📈 Tráfico total: %s\n"
+           % (s["n"], s["on"], s["ven"],
+              (" (" + esc(", ".join(por_vencer)) + ")") if por_vencer else "",
+              s["bloq"], esc(s["traf"])))
+    if top:
+        txt += "🏆 Top: " + esc(" · ".join("%s %s" % (u, fmt_bytes(b)) for u, b in top)) + "\n"
+    return txt + "\n" + bloque_salud()
+
+# --- chequeos del bucle (se ejecutan en un hilo) ---
+RES = {"strikes": {}, "last": {}, "alerted": {}}
+
+def check_recursos(a):
+    """Devuelve el texto de alerta (o '') y actualiza el estado anti-spam."""
+    th = a["umbral"]
+    vals = {"RAM": mem_info()[2], "CPU": cpu_pct(1.0), "Disco": disk_info()[2]}
+    ahora_t = time.time()
+    msgs = []
+    for k, v in vals.items():
+        if v >= th:
+            RES["strikes"][k] = RES["strikes"].get(k, 0) + 1
+            necesarios = 2 if k == "CPU" else 1     # CPU: sostenida 2 chequeos (~10 min)
+            if RES["strikes"][k] >= necesarios and ahora_t - RES["last"].get(k, 0) >= 6 * 3600:
+                RES["last"][k] = ahora_t
+                RES["alerted"][k] = True
+                m = "🚨 <b>%s al %d%%</b> (umbral %d%%)\n%s %d%%" % (k, v, th, barra10(v), v)
+                if k == "RAM":
+                    ru, rt, _ = mem_info()
+                    m += "\n💾 %d/%d MB · top: %s" % (ru, rt, esc(", ".join(top_procesos("rss"))))
+                elif k == "CPU":
+                    m += "\n🔥 top: " + esc(", ".join(top_procesos("cpu")))
+                else:
+                    du, dt, _ = disk_info()
+                    m += "\n🗄 %s / %s" % (esc(fmt_bytes(du)), esc(fmt_bytes(dt)))
+                    r = sh("du", "-sh", "/var/log", "/root/backups", timeout=10)
+                    if r.stdout.strip():
+                        m += "\n<pre>%s</pre>" % esc(r.stdout.strip())
+                msgs.append(m)
+        else:
+            RES["strikes"][k] = 0
+            if RES["alerted"].get(k) and v < th - 5:
+                RES["alerted"][k] = False
+                RES["last"][k] = 0
+                msgs.append("✅ <b>%s normalizado</b> · %d%%" % (k, v))
+    return "\n\n".join(msgs)
+
+def check_venc(a):
+    """Devuelve (texto, filas, nuevo_dict_avisados) o ('', None, None) si no hay nada nuevo."""
+    ventana = int(a.get("dias_aviso", 3))
+    av = a.get("venc_avisado", {})
+    shd = shadow_map()
+    nuevo_av, nuevos = {}, []
+    for u in panel_users():
+        d = dias_desde_exp(shd.get(u, (False, None))[1])
+        iso = exp_iso(shd.get(u, (False, None))[1])
+        if d is None or not (0 <= d <= ventana):
+            continue
+        if av.get(u) == iso:
+            nuevo_av[u] = iso            # ya avisado para este vencimiento
+        else:
+            nuevo_av[u] = iso
+            nuevos.append((u, d, iso))
+    if not nuevos:
+        if nuevo_av != av:
+            return "", None, nuevo_av    # limpia entradas viejas sin enviar nada
+        return "", None, None
+    lineas = []
+    for u, d, iso in nuevos:
+        cuando = "hoy" if d == 0 else ("mañana" if d == 1 else "en %d días" % d)
+        lineas.append("🔸 <code>%s</code> vence %s (%s)" % (esc(u), cuando, iso))
+    txt = ("⏳ <b>POR VENCER</b> (faltan %d días o menos)\n" % ventana + LINEA + "\n"
+           + "\n".join(lineas))
+    btns = [("👤 " + u, "u|" + u) for u, _, _ in nuevos[:6]]
+    rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
+    return txt, rows, nuevo_av
+
+async def notify(app, text, rows=None):
+    try:
+        await app.bot.send_message(int(ADMIN_ID), text, parse_mode=ParseMode.HTML,
+                                   reply_markup=kb(rows) if rows else None,
+                                   disable_web_page_preview=True)
+        return True
+    except Exception as e:
+        log.warning("notify falló: %s", e)
+        return False
+
+async def alert_loop(app):
+    await asyncio.sleep(45)
+    while True:
+        try:
+            a = alerts_get()
+            if a["res"]:
+                txt = await asyncio.to_thread(check_recursos, a)
+                if txt:
+                    await notify(app, txt, [[("🛠 Servidor", "srv")]])
+            if a["venc"]:
+                txt, rows, nuevo = await asyncio.to_thread(check_venc, a)
+                if nuevo is not None:
+                    if not txt or await notify(app, txt, rows):
+                        alerts_set(venc_avisado=nuevo)
+            if a["daily"]:
+                n = ahora()
+                hoy = n.strftime("%Y-%m-%d")
+                if n.hour == int(a["hour"]) and a.get("last_daily") != hoy:
+                    txt = await asyncio.to_thread(texto_resumen_diario)
+                    if await notify(app, txt, [[("🏠 Menú", "menu")]]):
+                        alerts_set(last_daily=hoy)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("alert_loop")
+        await asyncio.sleep(ALERT_EVERY)
 
 # ------------------------- PANTALLA PERSISTENTE -------------------------
 async def pantalla(update, context, text, rows=None, borra_texto=False):
@@ -4483,6 +5268,15 @@ async def pantalla(update, context, text, rows=None, borra_texto=False):
         context.user_data["wid"] = m.message_id
     except BadRequest as e:
         log.error("pantalla send: %s", e)
+
+async def show(update, context, fn, *args, pre=None, borra=False):
+    """Ejecuta fn(*args) en un hilo (devuelve (texto, filas)) y lo muestra."""
+    text, rows = await asyncio.to_thread(fn, *args)
+    await pantalla(update, context, (pre or "") + text, rows, borra_texto=borra)
+
+async def show_err(update, context, detalle, rows=None, borra=False):
+    text, r = scr_error(detalle, rows)
+    await pantalla(update, context, text, r, borra_texto=borra)
 
 # ------------------------- CONTROL DE ACCESO -------------------------
 def admin_only(func):
@@ -4524,7 +5318,8 @@ def flow_touch(context):
 def flow_clear(context):
     context.user_data["flow"] = None
 
-# --- pasos del flujo CREAR ---
+KB_NOMBRE = [[("🎲 Nombre aleatorio", "cn|rnd")], [("❌ Cancelar", "cancel")]]
+
 def paso_dias_rows():
     return [[("7", "dias|7"), ("15", "dias|15"), ("30", "dias|30")],
             [("60", "dias|60"), ("90", "dias|90"), ("✍️ Otro", "dias|custom")],
@@ -4541,7 +5336,7 @@ def paso_gb_rows():
             [("❌ Cancelar", "cancel")]]
 
 def paso_clave_rows():
-    return [[("🎲 Generar", "clv|gen"), ("✍️ Manual", "clv|manual")],
+    return [[("🎲 Generar", "cc|gen"), ("✍️ Manual", "cc|manual")],
             [("❌ Cancelar", "cancel")]]
 
 def resumen_rows():
@@ -4554,23 +5349,18 @@ def paso_edit_rows():
             [("🔑 Clave", "ced|clave"), ("✅ Listo", "crear_ok")],
             [("❌ Cancelar", "cancel")]]
 
-def paso_renovar_dias_rows():
-    return [[("7", "rd|7"), ("15", "rd|15"), ("30", "rd|30")],
-            [("60", "rd|60"), ("90", "rd|90"), ("✍️ Otro", "rd|custom")],
-            [("❌ Cancelar", "cancel")]]
-
 def resumen_crear(d):
     gb_txt = ("%d GB" % d.get("gb", 0)) if d.get("gb", 0) > 0 else "Sin límite"
     cx_txt = str(d.get("maxc", 1)) if d.get("maxc", 1) > 0 else "sin límite"
-    return ("📝 <b>CONFIRMAR CREACIÓN</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            f"👤 Usuario: <code>{esc(d.get('usuario', '?'))}</code>\n"
-            f"⏳ Días: {d.get('dias', '?')}\n"
-            f"📶 Conexiones: {esc(cx_txt)}\n"
-            f"📦 Tráfico: {esc(gb_txt)}\n"
-            f"🔑 Clave: <code>{esc(d.get('clave', '?'))}</code>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            "¿Confirmás la creación?")
+    return ("📝 <b>CONFIRMAR CREACIÓN</b>\n" + LINEA + "\n"
+            "👤 Usuario: <code>%s</code>\n"
+            "⏳ Días: %s\n"
+            "📶 Conexiones: %s\n"
+            "📦 Tráfico: %s\n"
+            "🔑 Clave: <code>%s</code>\n" % (
+                esc(d.get("usuario", "?")), d.get("dias", "?"), esc(cx_txt), esc(gb_txt),
+                esc(d.get("clave", "?")))
+            + LINEA + "\n¿Confirmás la creación?")
 
 # ------------------------- ROUTER DE BOTONES -------------------------
 @admin_only
@@ -4581,167 +5371,355 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
     data = q.data or ""
+    # el mensaje tocado pasa a ser la "pantalla viva" (sirve tras reiniciar el bot y en alertas)
+    if q.message is not None:
+        context.user_data["wid"] = q.message.message_id
 
-    # timeout de inactividad: cancela cualquier flujo abierto
     f = flow_get(context)
     if f and time.time() - f.get("ts", 0) > TIMEOUT_FLOW:
         flow_clear(context)
         f = None
-        await pantalla(update, context,
-                       "⏱ <i>Conversación cancelada por inactividad (5 min).</i>\n\n"
-                       + menu_text(), MENU_ROWS)
+        await show(update, context, scr_menu,
+                   pre="⏱ <i>Conversación cancelada por inactividad (5 min).</i>\n\n")
         return
 
     if data in ("menu", "cancel"):
         flow_clear(context)
-        await pantalla(update, context, menu_text(), MENU_ROWS)
+        await show(update, context, scr_menu)
         return
 
-    if f and not await flow_button(update, context, q, data, f):
-        flow_clear(context)   # boton de navegacion fuera del flujo: se cancela y se ejecuta
-        f = None
-    if not f:
-        await accion_boton(update, context, q, data)
+    try:
+        if f and await flow_button(update, context, data, f):
+            return
+        flow_clear(context)     # botón de navegación fuera del flujo: se cancela y se ejecuta
+        await route(update, context, data)
+    except Exception as e:
+        log.exception("on_button %s", data)
+        await show_err(update, context, "%s: %s" % (type(e).__name__, e))
 
-async def accion_boton(update, context, q, data):
-    """Acciones de primer nivel del menú (sin flujo abierto)."""
-    context.user_data["last"] = data
-    if data == "listar":
-        await pantalla(update, context, accion_listar(),
-                       [[("🔄 Actualizar", "listar")], [("🔙 Menú", "menu")]])
-    elif data == "trafico":
-        await pantalla(update, context, accion_trafico(),
-                       [[("🔄 Actualizar", "trafico")], [("🔙 Menú", "menu")]])
-    elif data == "estado":
-        await pantalla(update, context, accion_estado(),
-                       [[("🔄 Actualizar", "estado")], [("🔙 Menú", "menu")]])
-    elif data == "crear":
-        flow_set(context, "crear", "nombre")
+async def route(update, context, data):
+    """Acciones de primer nivel (sin flujo abierto)."""
+    p = data.split("|")
+    k = p[0]
+
+    def arg(i, d=""):
+        return p[i] if len(p) > i else d
+
+    async def usuario_ok(u):
+        err = usuario_valido_existente(u)
+        if err:
+            await show_err(update, context, err, [[("📋 Usuarios", "ul|0"), ("🔙 Menú", "menu")]])
+            return False
+        return True
+
+    if k == "noop":
+        return
+    if k == "ul":
+        await show(update, context, scr_lista, int(arg(1, "0")) if arg(1, "0").isdigit() else 0, arg(2))
+    elif k == "sr":
+        flow_set(context, "buscar", "texto")
         await pantalla(update, context,
-                       "👤 <b>CREAR USUARIO · paso 1/6</b>\n"
-                       "Escribe el <b>nombre de usuario</b>\n"
-                       "<i>(minúsculas, números, - y _; máx 32)</i>",
-                       KB_CANCELAR)
-    elif data == "renovar":
-        flow_set(context, "renovar", "usuario")
+                       "🔎 <b>BUSCAR USUARIO</b>\nEscribí <b>parte del nombre</b>:", KB_CANCELAR)
+    elif k == "u":
+        if await usuario_ok(arg(1)):
+            await show(update, context, scr_ficha, arg(1))
+    elif k == "on":
+        await show(update, context, scr_conectados)
+    elif k == "kick":
+        u = arg(1)
+        if await usuario_ok(u):
+            n = await asyncio.to_thread(accion_kick, u)
+            pre = "⛔ <b>%s desconectado</b> (%d sesión%s)\n\n" % (esc(u), n, "" if n == 1 else "es")
+            if arg(2) == "on":
+                await show(update, context, scr_conectados, pre)
+            else:
+                await show(update, context, scr_ficha, u, pre)
+    elif k == "tr":
+        await show(update, context, scr_trafico)
+    # ---- crear ----
+    elif k == "cr":
+        sub = arg(1)
+        if sub == "test":
+            u = nombre_libre("test")
+            clave = gen_clave(10)
+            ok, res = await asyncio.to_thread(accion_crear, u, TEST_DIAS, TEST_CONX, TEST_GB, clave)
+            if ok:
+                txt = await asyncio.to_thread(ficha_creada, u, clave, TEST_DIAS, TEST_CONX, TEST_GB, res, True)
+                await pantalla(update, context, txt,
+                               [[("👤 Ficha", "u|" + u)],
+                                [("🧪 Otro test", "cr|test"), ("🔙 Menú", "menu")]])
+            else:
+                await show_err(update, context, res, [[("🔄 Reintentar", "cr|test")], [("🔙 Menú", "menu")]])
+        elif sub == "full":
+            flow_set(context, "crear", "nombre")
+            await pantalla(update, context,
+                           "👤 <b>CREAR USUARIO · paso 1/6</b>\n"
+                           "Escribí el <b>nombre de usuario</b> o tocá 🎲\n"
+                           "<i>(minúsculas, números, - y _; máx 32)</i>", KB_NOMBRE)
+        else:
+            await show(update, context, scr_crear)
+    # ---- renovar ----
+    elif k == "rnm":
+        if await usuario_ok(arg(1)):
+            await show(update, context, scr_renovar, arg(1))
+    elif k == "rn":
+        u, v = arg(2), arg(1)
+        if not await usuario_ok(u):
+            return
+        if v == "c":
+            flow_set(context, "rnc", "dias", {"usuario": u})
+            await pantalla(update, context,
+                           "⏳ <b>RENOVAR · %s</b>\nEscribí los <b>días a agregar</b>:" % esc(u), KB_CANCELAR)
+        elif v.isdigit():
+            await renovar_ejecutar(update, context, u, int(v))
+    # ---- bloquear ----
+    elif k == "blk":
+        u = arg(1)
+        if await usuario_ok(u):
+            bloqueado, _ = await asyncio.to_thread(accion_bloquear, u)
+            pre = ("🔒 <b>%s bloqueado</b> (sesiones cerradas)\n\n" if bloqueado
+                   else "🔓 <b>%s desbloqueado</b>\n\n") % esc(u)
+            await show(update, context, scr_ficha, u, pre)
+    # ---- clave ----
+    elif k == "clv":
+        if await usuario_ok(arg(1)):
+            await show(update, context, scr_clave, arg(1))
+    elif k == "clg":
+        u = arg(1)
+        if await usuario_ok(u):
+            clave = gen_clave()
+            ok, msg = await asyncio.to_thread(accion_clave, u, clave)
+            if ok:
+                txt = await asyncio.to_thread(ficha_clave, u, clave)
+                await pantalla(update, context, txt, [[("⬅ Ficha", "u|" + u), ("🔙 Menú", "menu")]])
+            else:
+                await show_err(update, context, msg, [[("⬅ Ficha", "u|" + u)]])
+    elif k == "clm":
+        u = arg(1)
+        if await usuario_ok(u):
+            flow_set(context, "clavem", "clave", {"usuario": u})
+            await pantalla(update, context,
+                           "🔑 <b>CLAVE · %s</b>\nEscribí la <b>nueva contraseña</b>:" % esc(u),
+                           KB_CANCELAR)
+    # ---- enviar datos ----
+    elif k == "snd":
+        if await usuario_ok(arg(1)):
+            await show(update, context, scr_enviar, arg(1))
+    elif k == "sng":
+        u = arg(1)
+        if await usuario_ok(u):
+            ok, msg = await asyncio.to_thread(accion_clave, u, gen_clave())
+            if ok:
+                await show(update, context, scr_enviar, u, "🔑 <b>Clave nueva generada.</b>\n\n")
+            else:
+                await show_err(update, context, msg, [[("⬅ Ficha", "u|" + u)]])
+    # ---- límites ----
+    elif k == "lim":
+        if await usuario_ok(arg(1)):
+            await show(update, context, scr_limites, arg(1))
+    elif k in ("lmc", "lmg"):
+        n, u = arg(1), arg(2)
+        if not (n.isdigit() and await usuario_ok(u)):
+            return
+        if k == "lmc":
+            await asyncio.to_thread(accion_limite_conex, u, int(n))
+            pre = "✅ Conexiones máximas: <b>%s</b>\n\n" % (n if int(n) > 0 else "sin límite")
+        else:
+            await asyncio.to_thread(accion_limite_gb, u, int(n))
+            pre = "✅ Cuota: <b>%s</b>\n\n" % (("%s GB" % n) if int(n) > 0 else "sin límite")
+            if cuota_agotada(u):
+                pre += "ℹ️ Seguía marcado por cuota: tocá «Desbloquear por cuota».\n\n"
+        await show(update, context, scr_limites, u, pre)
+    elif k == "lmx":
+        u = arg(1)
+        if await usuario_ok(u):
+            flow_set(context, "gbc", "gb", {"usuario": u})
+            await pantalla(update, context,
+                           "📦 <b>CUOTA · %s</b>\nEscribí los <b>GB</b> (0 = sin límite):" % esc(u),
+                           KB_CANCELAR)
+    elif k == "lmr":
+        u = arg(1)
+        if await usuario_ok(u):
+            await asyncio.to_thread(accion_reset_contador, u)
+            await show(update, context, scr_limites, u, "🔄 <b>Contador en cero.</b>\n\n")
+    elif k == "lmu":
+        u = arg(1)
+        if await usuario_ok(u):
+            await asyncio.to_thread(accion_desbloquear_cuota, u)
+            await show(update, context, scr_ficha, u,
+                       "🔓 <b>%s desbloqueado por cuota</b> (contador en cero)\n\n" % esc(u))
+    # ---- eliminar ----
+    elif k == "dl":
+        if await usuario_ok(arg(1)):
+            await show(update, context, scr_eliminar, arg(1))
+    elif k == "dly":
+        u = arg(1)
+        if await usuario_ok(u):
+            ok, res = await asyncio.to_thread(accion_eliminar, u)
+            if ok:
+                await show(update, context, scr_lista, 0, "",
+                           pre="❌ <b>%s eliminado</b>\n\n" % esc(u))
+            else:
+                await show_err(update, context, res, [[("⬅ Ficha", "u|" + u)]])
+    # ---- servidor ----
+    elif k == "srv":
+        sub = arg(1)
+        if sub in ("xray", "ssh", "lim"):
+            ok, msg = await asyncio.to_thread(svc_restart, sub)
+            log.info("reinicio servicio via bot: %s -> %s", sub, msg)
+            await show(update, context, scr_servidor, ("✅ " if ok else "❌ ") + esc(msg) + "\n\n")
+        elif sub == "ports":
+            await show(update, context, scr_puertos)
+        elif sub == "logs":
+            await show(update, context, scr_logs_menu)
+        elif sub == "st":
+            await show(update, context, scr_detalle)
+        elif sub == "bk":
+            await backup_ejecutar(update, context)
+        else:
+            await show(update, context, scr_servidor)
+    elif k == "log":
+        await show(update, context, scr_log, arg(1))
+    elif k == "rb1":
+        await show(update, context, scr_reiniciar1)
+    elif k == "rb2":
+        await show(update, context, scr_reiniciar2)
+    elif k == "rb3":
+        ts = int(arg(1, "0")) if arg(1, "0").isdigit() else 0
+        if time.time() - ts > 60:
+            await show(update, context, scr_servidor, "⌛ La confirmación venció. Volvé a empezar.\n\n")
+            return
+        write_file(REBOOT_FLAG, "%d\n" % int(time.time()))
+        log.warning("REINICIO DE LA VPS pedido desde el bot")
         await pantalla(update, context,
-                       "🔄 <b>RENOVAR · paso 1/2</b>\nEscribe el <b>usuario</b> a renovar:",
-                       KB_CANCELAR)
-    elif data == "eliminar":
-        flow_set(context, "eliminar", "usuario")
-        await pantalla(update, context,
-                       "❌ <b>ELIMINAR · paso 1/2</b>\nEscribe el <b>usuario</b> a eliminar:",
-                       KB_CANCELAR)
-    elif data == "bloquear":
-        flow_set(context, "bloquear", "usuario")
-        await pantalla(update, context,
-                       "🔒 <b>BLOQUEAR / DESBLOQUEAR</b>\nEscribe el <b>usuario</b>:",
-                       KB_CANCELAR)
-    elif data == "clave":
-        flow_set(context, "clave", "usuario")
-        await pantalla(update, context,
-                       "🔑 <b>CAMBIO DE CLAVE · paso 1/2</b>\nEscribe el <b>usuario</b>:",
-                       KB_CANCELAR)
-    elif data == "retry":
-        prev = context.user_data.get("last")
-        await accion_boton(update, context, q, prev if isinstance(prev, str) and prev else "menu")
+                       "♻️ <b>Reiniciando la VPS…</b>\nEl bot te avisa cuando vuelva (1-2 min).", None)
+        try:
+            subprocess.Popen(["bash", "-c", "sleep 3; systemctl reboot"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+        except OSError as e:
+            await show_err(update, context, "No se pudo reiniciar: %s" % e)
+    # ---- alertas ----
+    elif k == "alr":
+        sub = arg(1)
+        a = alerts_get()
+        if sub == "d":
+            alerts_set(daily=not a["daily"])
+        elif sub == "e":
+            alerts_set(venc=not a["venc"])
+        elif sub == "r":
+            alerts_set(res=not a["res"])
+        elif sub == "h":
+            await show(update, context, scr_alertas_hora)
+            return
+        elif sub == "u":
+            await show(update, context, scr_alertas_umbral)
+            return
+        elif sub == "hs" and arg(2).isdigit() and 0 <= int(arg(2)) <= 23:
+            alerts_set(hour=int(arg(2)), last_daily="")
+        elif sub == "um" and arg(2).isdigit() and 50 <= int(arg(2)) <= 99:
+            alerts_set(umbral=int(arg(2)))
+            RES["strikes"].clear()
+        elif sub == "t":
+            txt = await asyncio.to_thread(texto_resumen_diario)
+            await pantalla(update, context, txt, [[("⬅ Alertas", "alr"), ("🔙 Menú", "menu")]])
+            return
+        await show(update, context, scr_alertas)
     else:
-        await pantalla(update, context, menu_text(), MENU_ROWS)
+        await show(update, context, scr_menu)
+
+def ficha_clave(u, clave):
+    iso = account_expiry_iso(u)
+    return ("🔑 <b>CLAVE ACTUALIZADA</b>\n" + LINEA + "\n"
+            "👤 Usuario: <code>%s</code>\n"
+            "✅ Contraseña cambiada\n\n"
+            "📋 <b>TOCÁ EL BLOQUE PARA COPIAR:</b>\n" % esc(u)
+            + bloque_datos(u, clave, iso))
 
 # --- botones DENTRO de un flujo; devuelve False si el dato no es del flujo ---
-async def flow_button(update, context, q, data, f):
+async def flow_button(update, context, data, f):
     nombre, step = f["name"], f["step"]
     d = f.setdefault("data", {})
     flow_touch(context)
 
-    if nombre == "crear":
-        if step == "dias" and data.startswith("dias|"):
-            v = data.split("|", 1)[1]
-            if v == "custom":
-                f["step"] = "dias_custom"
-                await pantalla(update, context,
-                               "⏳ <b>CREAR · días</b>\nEscribe la <b>cantidad de días</b> (ej. 30):",
-                               KB_CANCELAR)
-            else:
-                d["dias"] = int(v)
-                f["step"] = "conx"
-                await pantalla(update, context,
-                               "🔌 <b>CREAR · paso 3/6</b>\n<b>Conexiones máximas</b> simultáneas:",
-                               paso_conx_rows())
-            return True
-        if step == "conx" and data.startswith("conx|"):
-            d["maxc"] = int(data.split("|", 1)[1])
-            f["step"] = "gb"
-            await pantalla(update, context,
-                           "📦 <b>CREAR · paso 4/6</b>\n<b>Límite de tráfico</b> (GB):",
-                           paso_gb_rows())
-            return True
-        if step == "gb" and data.startswith("gb|"):
-            v = data.split("|", 1)[1]
-            if v == "custom":
-                f["step"] = "gb_custom"
-                await pantalla(update, context,
-                               "📦 <b>CREAR · GB</b>\nEscribe los <b>GB</b> (0 = sin límite):",
-                               KB_CANCELAR)
-            else:
-                d["gb"] = int(v)
-                f["step"] = "clave"
-                await pantalla(update, context,
-                               "🔑 <b>CREAR · paso 5/6</b>\n<b>Contraseña</b> del usuario:",
-                               paso_clave_rows())
-            return True
-        if step == "clave" and data in ("clv|gen", "clv|manual"):
-            if data == "clv|gen":
-                d["clave"] = gen_clave()
-                f["step"] = "resumen"
-                await pantalla(update, context, resumen_crear(d), resumen_rows())
-            else:
-                f["step"] = "clave_manual"
-                await pantalla(update, context,
-                               "🔑 <b>CREAR · clave</b>\nEscribe la <b>contraseña</b>:",
-                               KB_CANCELAR)
-            return True
-        if step == "resumen" and data == "crear_ok":
-            await crear_ejecutar(update, context, d)
-            return True
-        if step == "resumen" and data == "crear_edit":
-            f["step"] = "edit"
-            await pantalla(update, context, resumen_crear(d), paso_edit_rows())
-            return True
-        if step == "edit" and data.startswith("ced|"):
-            campo = data.split("|", 1)[1]
-            if campo == "nombre":
-                f["step"] = "nombre"
-                await pantalla(update, context,
-                               "👤 <b>CREAR · nombre</b>\nEscribe el <b>nuevo nombre</b>:", KB_CANCELAR)
-            elif campo == "dias":
-                f["step"] = "dias"
-                await pantalla(update, context, "⏳ <b>CREAR · días</b> de validez:", paso_dias_rows())
-            elif campo == "conx":
-                f["step"] = "conx"
-                await pantalla(update, context, "🔌 <b>CREAR · conexiones</b> máximas:", paso_conx_rows())
-            elif campo == "gb":
-                f["step"] = "gb"
-                await pantalla(update, context, "📦 <b>CREAR · límite de tráfico</b> (GB):", paso_gb_rows())
-            elif campo == "clave":
-                f["step"] = "clave"
-                await pantalla(update, context, "🔑 <b>CREAR · contraseña</b>:", paso_clave_rows())
-            return True
-        if step == "edit" and data == "crear_ok":
-            await crear_ejecutar(update, context, d)
-            return True
+    if nombre != "crear":
         return False
-    if nombre == "renovar" and step == "dias" and data.startswith("rd|"):
+    if step == "nombre" and data == "cn|rnd":
+        d["usuario"] = nombre_libre("user")
+        f["step"] = "dias"
+        await pantalla(update, context,
+                       "⏳ <b>CREAR · paso 2/6</b> · <code>%s</code>\n<b>Días de validez</b> de la cuenta:"
+                       % esc(d["usuario"]), paso_dias_rows())
+        return True
+    if step == "dias" and data.startswith("dias|"):
         v = data.split("|", 1)[1]
         if v == "custom":
             f["step"] = "dias_custom"
             await pantalla(update, context,
-                           "⏳ <b>RENOVAR · días</b>\nEscribe los <b>días a agregar</b>:", KB_CANCELAR)
+                           "⏳ <b>CREAR · días</b>\nEscribí la <b>cantidad de días</b> (ej. 30):", KB_CANCELAR)
         else:
-            await renovar_ejecutar(update, context, d.get("usuario", ""), int(v))
+            d["dias"] = int(v)
+            f["step"] = "conx"
+            await pantalla(update, context,
+                           "🔌 <b>CREAR · paso 3/6</b>\n<b>Conexiones máximas</b> simultáneas:",
+                           paso_conx_rows())
         return True
-    if nombre == "eliminar" and step == "confirmar" and data == "del_ok":
-        await eliminar_ejecutar(update, context, d.get("usuario", ""))
+    if step == "conx" and data.startswith("conx|"):
+        d["maxc"] = int(data.split("|", 1)[1])
+        f["step"] = "gb"
+        await pantalla(update, context,
+                       "📦 <b>CREAR · paso 4/6</b>\n<b>Límite de tráfico</b> (GB):", paso_gb_rows())
+        return True
+    if step == "gb" and data.startswith("gb|"):
+        v = data.split("|", 1)[1]
+        if v == "custom":
+            f["step"] = "gb_custom"
+            await pantalla(update, context,
+                           "📦 <b>CREAR · GB</b>\nEscribí los <b>GB</b> (0 = sin límite):", KB_CANCELAR)
+        else:
+            d["gb"] = int(v)
+            f["step"] = "clave"
+            await pantalla(update, context,
+                           "🔑 <b>CREAR · paso 5/6</b>\n<b>Contraseña</b> del usuario:", paso_clave_rows())
+        return True
+    if step == "clave" and data in ("cc|gen", "cc|manual"):
+        if data == "cc|gen":
+            d["clave"] = gen_clave()
+            f["step"] = "resumen"
+            await pantalla(update, context, resumen_crear(d), resumen_rows())
+        else:
+            f["step"] = "clave_manual"
+            await pantalla(update, context,
+                           "🔑 <b>CREAR · clave</b>\nEscribí la <b>contraseña</b>:", KB_CANCELAR)
+        return True
+    if step == "resumen" and data == "crear_ok":
+        await crear_ejecutar(update, context, d)
+        return True
+    if step == "resumen" and data == "crear_edit":
+        f["step"] = "edit"
+        await pantalla(update, context, resumen_crear(d), paso_edit_rows())
+        return True
+    if step == "edit" and data.startswith("ced|"):
+        campo = data.split("|", 1)[1]
+        if campo == "nombre":
+            f["step"] = "nombre"
+            await pantalla(update, context,
+                           "👤 <b>CREAR · nombre</b>\nEscribí el <b>nuevo nombre</b>:", KB_NOMBRE)
+        elif campo == "dias":
+            f["step"] = "dias"
+            await pantalla(update, context, "⏳ <b>CREAR · días</b> de validez:", paso_dias_rows())
+        elif campo == "conx":
+            f["step"] = "conx"
+            await pantalla(update, context, "🔌 <b>CREAR · conexiones</b> máximas:", paso_conx_rows())
+        elif campo == "gb":
+            f["step"] = "gb"
+            await pantalla(update, context, "📦 <b>CREAR · límite de tráfico</b> (GB):", paso_gb_rows())
+        elif campo == "clave":
+            f["step"] = "clave"
+            await pantalla(update, context, "🔑 <b>CREAR · contraseña</b>:", paso_clave_rows())
+        return True
+    if step == "edit" and data == "crear_ok":
+        await crear_ejecutar(update, context, d)
         return True
     return False
 
@@ -4755,7 +5733,7 @@ async def flow_text(update, context, texto, f):
         if step == "nombre":
             err = validar_usuario_flow(texto)
             if err:
-                await pantalla(update, context, "⚠️ " + esc(err), KB_CANCELAR, borra_texto=True)
+                await pantalla(update, context, "⚠️ " + esc(err), KB_NOMBRE, borra_texto=True)
                 return
             d["usuario"] = texto
             f["step"] = "dias"
@@ -4792,110 +5770,91 @@ async def flow_text(update, context, texto, f):
             await pantalla(update, context, resumen_crear(d), resumen_rows(), borra_texto=True)
         else:
             await pantalla(update, context, resumen_crear(d), resumen_rows(), borra_texto=True)
-    elif nombre == "renovar":
-        if step == "usuario":
-            err = usuario_valido_existente(texto)
-            if err:
-                await pantalla(update, context, "⚠️ " + esc(err), KB_CANCELAR, borra_texto=True)
-                return
-            d["usuario"] = texto
-            f["step"] = "dias"
-            await pantalla(update, context,
-                           "⏳ <b>RENOVAR · paso 2/2</b>\n<b>Días a agregar</b> a "
-                           f"<code>{esc(texto)}</code>:", paso_renovar_dias_rows(), borra_texto=True)
-        elif step == "dias_custom":
-            if not texto.isdigit() or int(texto) < 1:
-                await pantalla(update, context, "⚠️ Escribí un <b>entero &gt;= 1</b>.", KB_CANCELAR,
-                               borra_texto=True)
-                return
-            await renovar_ejecutar(update, context, d.get("usuario", ""), int(texto))
-    elif nombre == "eliminar":
-        if step == "usuario":
-            err = usuario_valido_existente(texto)
-            if err:
-                await pantalla(update, context, "⚠️ " + esc(err), KB_CANCELAR, borra_texto=True)
-                return
-            d["usuario"] = texto
-            f["step"] = "confirmar"
-            exp = account_expiry_iso(texto)
-            await pantalla(update, context,
-                           ("⚠️ <b>CONFIRMAR ELIMINACIÓN</b>\n"
-                            f"👤 <code>{esc(texto)}</code>\n"
-                            f"📅 Vence: {esc(exp or 'sin vencimiento')}\n\n"
-                            "Se borran: cuenta SSH, cliente Xray, límites, tráfico y banner."),
-                           [[("✅ Eliminar", "del_ok")], [("❌ Cancelar", "cancel")]],
+    elif nombre == "buscar":
+        flow_clear(context)
+        filtro = re.sub(r"[^A-Za-z0-9_-]", "", texto)[:30]
+        await show(update, context, scr_lista, 0, filtro, borra=True)
+    elif nombre == "rnc":
+        if not texto.isdigit() or int(texto) < 1:
+            await pantalla(update, context, "⚠️ Escribí un <b>entero &gt;= 1</b>.", KB_CANCELAR,
                            borra_texto=True)
-    elif nombre == "bloquear":
-        if step == "usuario":
-            err = usuario_valido_existente(texto)
-            if err:
-                await pantalla(update, context, "⚠️ " + esc(err), KB_CANCELAR, borra_texto=True)
-                return
-            bloqueado, ok = accion_bloquear(texto)
+            return
+        await renovar_ejecutar(update, context, d.get("usuario", ""), int(texto), borra=True)
+    elif nombre == "gbc":
+        if not texto.isdigit() or int(texto) > 999999:
+            await pantalla(update, context, "⚠️ Escribí un <b>entero</b> (0 = sin límite).",
+                           KB_CANCELAR, borra_texto=True)
+            return
+        u = d.get("usuario", "")
+        flow_clear(context)
+        await asyncio.to_thread(accion_limite_gb, u, int(texto))
+        pre = "✅ Cuota: <b>%s</b>\n\n" % (("%s GB" % texto) if int(texto) > 0 else "sin límite")
+        await show(update, context, scr_limites, u, pre, borra=True)
+    elif nombre == "clavem":
+        u = d.get("usuario", "")
+        ok, msg = await asyncio.to_thread(accion_clave, u, texto)
+        if ok:
             flow_clear(context)
-            if ok:
-                await pantalla(update, context, ficha_bloqueo(texto, bloqueado) + "\n\n"
-                               + menu_text(), MENU_ROWS, borra_texto=True)
-            else:
-                e = error_accion("No se pudo cambiar el estado.", "bloquear")
-                await pantalla(update, context, e["text"] + "\n\n" + menu_text(), MENU_ROWS,
-                               borra_texto=True)
-    elif nombre == "clave":
-        if step == "usuario":
-            err = usuario_valido_existente(texto)
-            if err:
-                await pantalla(update, context, "⚠️ " + esc(err), KB_CANCELAR, borra_texto=True)
-                return
-            d["usuario"] = texto
-            f["step"] = "clave"
-            await pantalla(update, context,
-                           "🔑 <b>CLAVE · paso 2/2</b>\nEscribe la <b>nueva contraseña</b> para "
-                           f"<code>{esc(texto)}</code>:", None, borra_texto=True)
-        elif step == "clave":
-            ok, msg = accion_clave(d.get("usuario", ""), texto)
-            flow_clear(context)
-            if ok:
-                await pantalla(update, context, ficha_clave(d.get("usuario", ""), texto) + "\n\n"
-                               + menu_text(), MENU_ROWS, borra_texto=True)
-            else:
-                e = error_accion(msg, "clave")
-                await pantalla(update, context, e["text"] + "\n\n" + menu_text(), MENU_ROWS,
-                               borra_texto=True)
+            txt = await asyncio.to_thread(ficha_clave, u, texto)
+            await pantalla(update, context, txt, [[("⬅ Ficha", "u|" + u), ("🔙 Menú", "menu")]],
+                           borra_texto=True)
+        else:
+            await pantalla(update, context, "⚠️ " + esc(msg), KB_CANCELAR, borra_texto=True)
 
 # --- ejecutores finales ---
 async def crear_ejecutar(update, context, d):
-    ok, res = accion_crear(d.get("usuario", ""), d.get("dias", 0), d.get("maxc", 1),
-                           d.get("gb", 0), d.get("clave", ""))
+    ok, res = await asyncio.to_thread(accion_crear, d.get("usuario", ""), d.get("dias", 0),
+                                      d.get("maxc", 1), d.get("gb", 0), d.get("clave", ""))
     flow_clear(context)
     if ok:
-        await pantalla(update, context,
-                       ficha_creada(d["usuario"], d["clave"], d["dias"], d["maxc"],
-                                    d["gb"], res) + "\n\n" + menu_text(), MENU_ROWS)
+        txt = await asyncio.to_thread(ficha_creada, d["usuario"], d["clave"], d["dias"],
+                                      d["maxc"], d["gb"], res)
+        await pantalla(update, context, txt,
+                       [[("👤 Ficha", "u|" + d["usuario"])],
+                        [("➕ Otro", "cr"), ("🔙 Menú", "menu")]])
     else:
-        e = error_accion(res, "crear")
-        await pantalla(update, context, e["text"] + "\n\n" + menu_text(), MENU_ROWS)
+        await show_err(update, context, res, [[("➕ Crear", "cr")], [("🔙 Menú", "menu")]])
 
-async def renovar_ejecutar(update, context, usuario, dias):
+async def renovar_ejecutar(update, context, usuario, dias, borra=False):
     flow_clear(context)
-    ok, res = accion_renovar(usuario, dias)
+    ok, res = await asyncio.to_thread(accion_renovar, usuario, dias)
     if ok:
-        await pantalla(update, context,
-                       ficha_renovada(usuario, dias, res) + "\n\n" + menu_text(), MENU_ROWS,
-                       borra_texto=True)
+        pre = ("🔄 <b>RENOVADO</b> +%d día%s → vence %s (%s)\n\n"
+               % (dias, "" if dias == 1 else "s", res, dias_txt(days_hasta(res))))
+        await show(update, context, scr_ficha, usuario, pre, borra=borra)
     else:
-        e = error_accion(res, "renovar")
-        await pantalla(update, context, e["text"] + "\n\n" + menu_text(), MENU_ROWS,
-                       borra_texto=True)
+        await show_err(update, context, res, [[("⬅ Ficha", "u|" + usuario)]], borra=borra)
 
-async def eliminar_ejecutar(update, context, usuario):
-    flow_clear(context)
-    ok, res = accion_eliminar(usuario)
-    if ok:
-        await pantalla(update, context,
-                       ficha_eliminada(usuario, "borrada") + "\n\n" + menu_text(), MENU_ROWS)
-    else:
-        e = error_accion(res, "eliminar")
-        await pantalla(update, context, e["text"] + "\n\n" + menu_text(), MENU_ROWS)
+async def backup_ejecutar(update, context):
+    if ADMIN_ID.startswith("-"):
+        await show(update, context, scr_servidor,
+                   "⛔ El ADMIN_CHAT_ID es un <b>grupo</b>: el backup lleva datos de usuarios y "
+                   "solo se envía a un chat privado.\n\n")
+        return
+    await pantalla(update, context, "💾 <b>Creando backup…</b>\n<i>Puede tardar unos segundos.</i>", None)
+    ok, res, size = await asyncio.to_thread(hacer_backup)
+    if not ok:
+        await show(update, context, scr_servidor, "❌ Backup falló: %s\n\n" % esc(res))
+        return
+    if size > TG_MAX_FILE:
+        await show(update, context, scr_servidor,
+                   "⚠️ Backup creado pero pesa %s (> 49 MB, límite de Telegram).\n"
+                   "Quedó en <code>%s</code>\n\n" % (esc(fmt_bytes(size)), esc(res)))
+        return
+    try:
+        with open(res, "rb") as fh:
+            await context.bot.send_document(
+                chat_id=int(ADMIN_ID), document=fh, filename=os.path.basename(res),
+                caption="💾 Backup de /etc + paquetes · %s\n⚠️ Contiene datos de usuarios: no lo reenvíes."
+                        % fmt_bytes(size))
+    except Exception as e:
+        log.error("backup send: %s", e)
+        await show(update, context, scr_servidor, "❌ No se pudo enviar el backup: %s\n\n" % esc(e))
+        return
+    log.info("backup enviado via bot: %s (%d bytes)", res, size)
+    await pantalla(update, context, "💾 <b>BACKUP ENVIADO</b> ↓\n<code>%s</code>" % esc(res), None)
+    context.user_data["wid"] = None          # la nueva pantalla queda debajo del archivo
+    await show(update, context, scr_servidor)
 
 # ------------------------- ROUTER DE TEXTO -------------------------
 @admin_only
@@ -4906,31 +5865,53 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     f = flow_get(context)
     if f and time.time() - f.get("ts", 0) > TIMEOUT_FLOW:
         flow_clear(context)
-        f = None
-        await pantalla(update, context,
-                       "⏱ <i>Conversación cancelada por inactividad (5 min).</i>\n\n"
-                       + menu_text(), MENU_ROWS, borra_texto=True)
+        await show(update, context, scr_menu, borra=True,
+                   pre="⏱ <i>Conversación cancelada por inactividad (5 min).</i>\n\n")
         return
     if f:
         flow_touch(context)
-        await flow_text(update, context, texto, f)
+        try:
+            await flow_text(update, context, texto, f)
+        except Exception as e:
+            log.exception("on_text")
+            flow_clear(context)
+            await show_err(update, context, "%s: %s" % (type(e).__name__, e), borra=True)
         return
     # sin flujo activo: recordatorio amable (el chat queda limpio)
-    await pantalla(update, context,
-                   "💡 Usá los <b>botones</b> del menú o <b>/start</b> para empezar.",
-                   MENU_ROWS, borra_texto=True)
+    await show(update, context, scr_menu, borra=True,
+               pre="💡 Usá los <b>botones</b> del menú o <b>/start</b>.\n\n")
 
 # ------------------------- COMANDOS -------------------------
 @admin_only
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     flow_clear(context)
     context.user_data["wid"] = None
-    await pantalla(update, context, menu_text(), MENU_ROWS)
+    await show(update, context, scr_menu)
 
-# ------------------------- ERRORES -------------------------
+# ------------------------- ERRORES / CICLO DE VIDA -------------------------
 async def on_error(update, context):
     log.error("error no capturado: %s (update=%s)", context.error,
               type(update).__name__ if update else "?")
+
+async def post_init(app):
+    app.bot_data["alert_task"] = asyncio.create_task(alert_loop(app))
+    if os.path.isfile(REBOOT_FLAG):          # venimos de un reinicio pedido desde el bot
+        try:
+            ts = float(read_file(REBOOT_FLAG, "0") or 0)
+        except ValueError:
+            ts = 0
+        try:
+            os.remove(REBOOT_FLAG)
+        except OSError:
+            pass
+        dur = ("~%d min" % max(1, int((time.time() - ts) // 60))) if ts else ""
+        await notify(app, "✅ <b>VPS reiniciada y en línea</b> %s\n⏱ Uptime: %s"
+                     % (esc(dur), esc(uptime_txt())), [[("🏠 Menú", "menu")]])
+
+async def post_shutdown(app):
+    t = app.bot_data.get("alert_task")
+    if t:
+        t.cancel()
 
 # ------------------------- MAIN -------------------------
 def main():
@@ -4940,8 +5921,9 @@ def main():
     if not ADMIN_ID:
         log.error("ADMIN_CHAT_ID vacio en %s. Reinstalá el bot desde el panel.", CONF_FILE)
         sys.exit(1)
-    log.info("Ghost Bot iniciado (admin=%s, dir=%s)", ADMIN_ID, BOT_DIR)
-    app = Application.builder().token(BOT_TOKEN).build()
+    log.info("Ghost Bot 3.12.0 iniciado (admin=%s, dir=%s)", ADMIN_ID, BOT_DIR)
+    app = (Application.builder().token(BOT_TOKEN)
+           .post_init(post_init).post_shutdown(post_shutdown).build())
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("menu", cmd_start))
     app.add_handler(CallbackQueryHandler(on_button))
@@ -7991,6 +8973,7 @@ ghost_bootstrap
 auto_menu_migrar                      # snippet viejo del .bashrc -> con guardas (sin terminal / anidado)
 [[ -f /etc/systemd/system/vps-limiter.service ]] && ! grep -q 'GHOST-LIMITER-V2' /usr/local/bin/vps-limiter.sh 2>/dev/null && limiter_migrar
 [[ -f "$BOT_DIR/config.env" ]] && bot_refresh_helper 2>/dev/null   # helper del bot a la par de esta version
+bot_autoactualizar 2>/dev/null || true          # y el propio bot.py (si cambio de revision)
 ghost_tz_primera_vez
 [[ -f /etc/cron.d/ghost-panel-trafico ]] && trafico_cron_instalar   # mantiene el cron a la par de esta version
 [[ -f "$SSL_DIR/domain.conf" ]] && ssl_hook_instalar             # idem para los hooks de renovacion SSL
