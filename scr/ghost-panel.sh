@@ -3,7 +3,14 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 3.11.1
+#  Version: 3.11.2
+#  Cambios 3.11.2:
+#    - FIX "BTK: unbound variable" al instalar el bot (al escribir tu ID y dar
+#      ENTER): el flag OKF arrancaba en 0 y el chequeo [[ -z "$OKF" ]] lo
+#      tomaba como completado, asi que NUNCA se pedia el BOT_TOKEN y la
+#      variable quedaba vacia (set -u abortaba al guardar config.env).
+#      Ahora OKF arranca vacio: pide el token, lo valida y recien despues
+#      pide el ADMIN_CHAT_ID. Todas las locales del instalador inicializadas.
 #  Cambios 3.11.1:
 #    - FIX menu: la fila [9] Bot Telegram / [0] Salir queda pegada al resto
 #      (antes habia una linea en blanco que las separaba en celulares).
@@ -142,7 +149,7 @@ tema_guardar(){
     echo "THEME=$1" >> /etc/ghost-panel.conf
 }
 tema_cargar
-GHOST_VER='3.11.1'
+GHOST_VER='3.11.2'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -3580,7 +3587,7 @@ bot_telegram_escribir_py(){
 """
 👻 GHOST PANEL · Bot de Telegram para administrar usuarios SSH
 ==============================================================
-Generado por Ghost Panel v3.11.1 (función bot_telegram_escribir_py).
+Generado por Ghost Panel v3.11.2 (función bot_telegram_escribir_py).
 NO editar a mano: se regenera al reinstalar el bot desde el panel
 (Bot Telegram -> Instalar / Configurar).
 
@@ -4861,7 +4868,10 @@ bot_venv_crear(){
 bot_telegram_instalar(){
     # Instalador del bot: python3 + venv + dependencias + datos + servicio systemd.
     echo -e "${CIAN}--- BOT DE TELEGRAM: INSTALAR / CONFIGURAR ---${NC}"
-    local BTK BCH R OKF=0 RESP EST BOTNAME REINST=0 BOT_PYBIN
+    # Todas las locales INICIALIZADAS: el panel corre con set -u y una local
+    # vacia (OKF="") es la senal correcta del bucle del token (OKF=0 rompia el
+    # [[ -z "$OKF" ]], saltaba el pedido del token y $BTK quedaba sin asignar).
+    local BTK="" BCH="" R="" OKF="" RESP="" EST="" BOTNAME="" REINST=0 BOT_PYBIN=""
     # 1) python3 + entorno virtual con pip (bot_venv_crear instala lo que falte)
     if ! command -v python3 >/dev/null 2>&1; then
         INFO "Instalando python3..."
