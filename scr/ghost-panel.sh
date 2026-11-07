@@ -3,7 +3,21 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 3.11.4
+#  Version: 3.11.5
+#  Cambios 3.11.5:
+#    - FIX activacion de SSL por dominio en Oracle Cloud (OCI): el firewall
+#      interno de las imagenes de Oracle (iptables con REJECT final) bloquea
+#      80/443 aunque UFW este inactivo y por eso Let's Encrypt nunca validaba.
+#      Ahora el panel detecta y abre automaticamente 80/443 en iptables y
+#      guarda las reglas (netfilter-persistent/rules.v4).
+#    - Aviso claro si la VPS es Oracle Cloud: recuerda abrir TCP 80 y 443 en
+#      la LISTA DE SEGURIDAD del VCN (consola OCI), unico paso que no se puede
+#      hacer desde la VPS. Tambien se muestra en el aviso de dominio.
+#    - Diagnostico automatico si certbot falla: distingue timeout (puerto 80
+#      inalcanzable desde internet), connection refused y problemas de DNS,
+#      y apunta a la causa exacta en lugar de un fallo generico.
+#    - El texto de configuracion de dominio ya no asume Cloudflare (sirve para
+#      DigitalPlat/dpdns.org y cualquier panel de DNS).
 #  Cambios 3.11.4:
 #    - Bot Telegram: al CREAR usuario ahora entrega ademas un bloque unico
 #      "TOCA EL BLOQUE PARA COPIAR TODO JUNTO" (pre monospace): usuario,
@@ -163,7 +177,7 @@ tema_guardar(){
     echo "THEME=$1" >> /etc/ghost-panel.conf
 }
 tema_cargar
-GHOST_VER='3.11.4'
+GHOST_VER='3.11.5'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -3618,7 +3632,7 @@ bot_telegram_escribir_py(){
 """
 👻 GHOST PANEL · Bot de Telegram para administrar usuarios SSH
 ==============================================================
-Generado por Ghost Panel v3.11.4 (función bot_telegram_escribir_py).
+Generado por Ghost Panel v3.11.5 (función bot_telegram_escribir_py).
 NO editar a mano: se regenera al reinstalar el bot desde el panel
 (Bot Telegram -> Instalar / Configurar).
 
@@ -6706,6 +6720,84 @@ ssl_ufw_80(){
     return 0
 }
 
+ssl_oci_detectar(){
+    # -> 0 si hay senales de que la VPS es Oracle Cloud (OCI).
+    [[ -f /etc/oci-hostname.conf ]] && return 0
+    grep -qi oracle /sys/class/dmi/id/product_name /sys/class/dmi/id/board_name /sys/class/dmi/id/sys_vendor 2>/dev/null && return 0
+    grep -qi DataSourceOracle /var/lib/cloud/instance/datasource 2>/dev/null && return 0
+    return 1
+}
+
+ssl_oci_aviso(){
+    # El bloqueo de red de Oracle Cloud (Security List del VCN) solo se corrige
+    # desde la consola OCI: la VPS no puede abrirlo por si sola.
+    ssl_oci_detectar || return 0
+    echo
+    WARN "Este VPS parece ORACLE CLOUD (OCI): ademas del firewall interno, OCI filtra los puertos desde la nube."
+    echo "  Consola OCI -> Redes -> Redes virtuales en la nube -> tu VCN -> Listas de seguridad"
+    echo "  -> 'Agregar reglas de entrada' con:  Origen 0.0.0.0/0 · Protocolo TCP · Puerto destino 80"
+    echo "  (y otra regla igual con puerto 443). Sin eso Let's Encrypt NUNCA puede validar."
+    echo
+    return 0
+}
+
+ssl_iptables_puerto_ok(){
+    # ssl_iptables_puerto_ok PUERTO -> 0 si el puerto TCP quedaria alcanzable
+    # segun las reglas INPUT de iptables (los imagenes de Oracle traen un
+    # REJECT final que bloquea TODO salvo SSH, aunque UFW este inactivo).
+    local p="$1" pol
+    command -v iptables >/dev/null 2>&1 || return 0
+    pol=$(iptables -S INPUT 2>/dev/null | awk '$1=="-P"{print $3}')
+    iptables -S INPUT 2>/dev/null | awk -v pol="$pol" -v p="$p" '
+        BEGIN { r = 2 }
+        !d {
+            if ($0 ~ /(-j|--jump) (REJECT|DROP)/)        { d = 1; r = 1 }
+            else if ($0 ~ ("--dport " p "([ :]|$)"))     { r = 0; exit 0 }
+        }
+        END {
+            if (r == 0) exit 0
+            if (d)      exit 1
+            if (pol == "ACCEPT") exit 0
+            exit 1
+        }'
+}
+
+ssl_firewall_verificar(){
+    # Asegura 80/443 alcanzables a nivel local: UFW (ssl_ufw_80) + iptables.
+    # Si faltan reglas las agrega y las persiste (imagenes Oracle: rules.v4).
+    local p abrir="" persist=0
+    ssl_ufw_80
+    for p in 80 443; do
+        ssl_iptables_puerto_ok "$p" && continue
+        if iptables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null; then continue; fi
+        iptables -I INPUT 1 -p tcp --dport "$p" -j ACCEPT 2>/dev/null || { ERR "No pude abrir $p/tcp en iptables."; continue; }
+        abrir+="$p "
+    done
+    [[ -n "$abrir" ]] || return 0
+    if command -v netfilter-persistent >/dev/null 2>&1; then
+        netfilter-persistent save >/dev/null 2>&1 && persist=1
+    elif [[ -d /etc/iptables ]] && command -v iptables-save >/dev/null 2>&1; then
+        iptables-save > /etc/iptables/rules.v4 2>/dev/null && persist=1
+    fi
+    INFO "Puerto(s) ${abrir%/ }/tcp abierto(s) en iptables${persist:+ (regla guardada)}: es el bloqueo tipico de las imagenes de Oracle."
+    return 0
+}
+
+ssl_diagnostico_certbot(){
+    # Interpreta el log de certbot y senala la causa probable del fallo.
+    local L="$1"
+    if grep -qiE 'timeout during connect|connection timed out|timeout during' "$L"; then
+        WARN "Diagnostico: el puerto 80 NO responde desde Internet (timeout)."
+        ssl_oci_detectar && WARN "Tu VPS es Oracle Cloud: casi seguro falta la regla TCP 80/443 en la LISTA DE SEGURIDAD del VCN (se corrige solo desde la consola OCI, mira el aviso de arriba)."
+        INFO "Revisa tambien: firewall del proveedor, iptables local y que nada este en 80."
+    elif grep -qi 'connection refused' "$L"; then
+        WARN "Diagnostico: el puerto 80 rechaza conexiones (REJECT local o servicio caido al validar)."
+    elif grep -qiE 'no valid IP addresses found|nxdomain|name or service not known|dns problem' "$L"; then
+        WARN "Diagnostico: el dominio no resuelve o no apunta a esta VPS (opcion 1 del menu SSL)."
+    fi
+    return 0
+}
+
 ssl_resuelve(){ getent ahostsv4 "$1" 2>/dev/null | awk 'NR==1{print $1}'; }
 
 ssl_dns_verificar(){
@@ -6740,8 +6832,12 @@ ssl_dominio_poner(){
     re_e='^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'
     cur=$(ssl_conf_get DOMINIO)
     echo -e "${CIAN}--- DOMINIO ---${NC}"
-    echo "  En Cloudflare crea 2 registros A hacia $(ip_publica), en 'DNS only' (nube gris):"
+    echo "  En el panel de DNS de tu dominio (Cloudflare, DigitalPlat/dpdns.org, etc.)"
+    echo "  crea 2 registros A hacia $(ip_publica), sin proxy (solo DNS):"
     echo "    @  (dominio principal)     y     *  (todos los subdominios)"
+    if ssl_oci_detectar; then
+        WARN "VPS de Oracle Cloud: recuerda abrir TCP 80 y 443 en la LISTA DE SEGURIDAD del VCN (consola OCI), o el certificado nunca validara."
+    fi
     echo
     read -r -p "  Dominio${cur:+ [$cur]} (ej: midominio.com): " DOM; DOM=${DOM:-$cur}
     DOM=$(echo "$DOM" | tr 'A-Z' 'a-z')
@@ -6818,6 +6914,7 @@ ssl_certbot_run(){
     if certbot "${a[@]}" >"$LOGC" 2>&1; then rm -f "$LOGC"; return 0; fi
     ERR "certbot fallo. Ultimas lineas:"
     tail -n 12 "$LOGC" | sed 's/^/    /'
+    ssl_diagnostico_certbot "$LOGC"
     ssl_puerto80_restaurar            # por si el pre-hook alcanzo a detener algo
     return 1
 }
@@ -6828,7 +6925,8 @@ ssl_emitir_flujo(){
     while read -r n; do ssl_dns_verificar "$n" || bad=1; done < <(ssl_nombres)
     (( bad )) && { ERR "Corrige el DNS y vuelve a intentar."; return 1; }
     ssl_certbot_instalar || return 1
-    ssl_ufw_80
+    ssl_firewall_verificar
+    ssl_oci_aviso
     ssl_hook_instalar
     WARN "Se detendra unos segundos lo que use el puerto 80 (p. ej. WS-epro); los clientes reconectan solos."
     INFO "1/2 Simulacion (no gasta limites de Let's Encrypt)..."
