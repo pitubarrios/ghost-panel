@@ -3,7 +3,19 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 3.11.5
+#  Version: 3.11.6
+#  Cambios 3.11.6 (rendimiento en VPS de 1 vCPU / 1 GB):
+#    - FIX load alto: PROMPT/PAUSA ahora SALEN si la terminal ya no existe (EOF) o tras
+#      IDLE_TIMEOUT s sin tocar nada (por defecto 1200; 0 = nunca). Antes un panel huerfano
+#      repetia el bucle del menu (redibujar cabecera + sleep 1) sin fin y se acumulaban.
+#    - Instancia unica: un solo panel a la vez (pidfile + flock + starttime). Huerfanos (sin
+#      terminal) se cierran solos; si hay otro con terminal viva se ofrece cerrarlo.
+#    - Auto-menu mas seguro: no abre el panel sin terminal ni dentro de shells hijos.
+#    - Cabecera mas barata: online_total/sesiones_por_usuario con UNA pasada de ps (antes ps+ss
+#      por usuario); linea de servicios y SO en cache.
+#    - Limiter v2: una lectura de procesos por ciclo, flock, Restart=on-failure, Nice=10 y
+#      intervalo configurable (LIMITER_INTERVALO, por defecto 30 s, minimo 5).
+#    - Cron de trafico con nice/ionice; frecuencia por defecto 5 min (1/5/10 a eleccion).
 #  Cambios 3.11.5:
 #    - FIX activacion de SSL por dominio en Oracle Cloud (OCI): el firewall
 #      interno de las imagenes de Oracle (iptables con REJECT final) bloquea
@@ -177,7 +189,7 @@ tema_guardar(){
     echo "THEME=$1" >> /etc/ghost-panel.conf
 }
 tema_cargar
-GHOST_VER='3.11.5'
+GHOST_VER='3.11.6'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -515,7 +527,19 @@ seleccionar_idioma(){
     echo "$IDIOMA" > /etc/vps-manager.lang 2>/dev/null
 }
 
-PAUSA(){ echo -e "\n  ${GRIS}↵ ENTER para continuar...${NC}"; read -r; }
+# Si la terminal desaparece (EOF / error de tty) o pasa el tiempo de inactividad, el panel SALE.
+# Antes seguia en bucle (redibujar cabecera + sleep 1) para siempre: los huerfanos se acumulaban y
+# subian el load. GHOST_IDLE: segundos sin tocar nada (0 = nunca); /etc/ghost-panel.conf IDLE_TIMEOUT.
+GHOST_IDLE=1200
+ghost_salir_sin_terminal(){
+    (( ${1:-1} > 128 )) && echo -e "\n  ${GRIS}⏱ Sesión cerrada por inactividad.${NC}"
+    exit 0
+}
+PAUSA(){
+    echo -e "\n  ${GRIS}↵ ENTER para continuar...${NC}"
+    if (( GHOST_IDLE > 0 )); then read -r -t "$GHOST_IDLE" || ghost_salir_sin_terminal $?
+    else read -r || ghost_salir_sin_terminal $?; fi
+}
 
 # ---------- HELPERS DE PRODUCCION ----------
 LOG_PANEL='/var/log/ghost-panel.log'
@@ -627,23 +651,13 @@ usuario_online(){
 }
 
 online_total(){
-    local n=0
-    # Contar usuarios humanos con al menos una sesion ssh/dropbear activa
-    while read -r u; do
-        [[ -z "$u" || "$u" == "root" ]] && continue
-        c=$(usuario_online "$u")
-        (( c > 0 )) && n=$((n + c))
-    done < <(ps -eo user:32=,comm= 2>/dev/null | awk '($2=="sshd"||$2=="dropbear") && $1!="root"{print $1}' | sort -u)
-    echo "${n:-0}"
+    # Sesiones ssh/dropbear de usuarios no-root: UNA sola pasada de ps (antes: ps + ss + ps por cada usuario)
+    ps -eo user:32=,comm= 2>/dev/null | awk '($2=="sshd"||$2=="dropbear") && $1!="root"{n++} END{print n+0}'
 }
 
 sesiones_por_usuario(){
-    local u c
-    while read -r u; do
-        [[ -z "$u" || "$u" == "root" ]] && continue
-        c=$(usuario_online "$u")
-        (( c > 0 )) && printf "  %-20s %d sesion(es)\n" "$u" "$c"
-    done < <(ps -eo user:32=,comm= 2>/dev/null | awk '($2=="sshd"||$2=="dropbear") && $1!="root"{print $1}' | sort -u)
+    ps -eo user:32=,comm= 2>/dev/null \
+        | awk '($2=="sshd"||$2=="dropbear") && $1!="root"{c[$1]++} END{for(u in c) printf "  %-20s %d sesion(es)\n", u, c[u]}' | sort
 }
 
 SSHD_CFG=/etc/ssh/sshd_config
@@ -1312,12 +1326,17 @@ FILA(){
 }
 
 SUBTOP(){ ui_box_top "Inicio › $1"; }   # una sola linea: ruta + seccion dentro del marco
-PROMPT(){ echo; read -r -p "  $(echo -e "${ACENTO}👻 ❯${NC}") " OP; }
+PROMPT(){
+    local _p; _p="  $(echo -e "${ACENTO}👻 ❯${NC}") "
+    echo
+    if (( GHOST_IDLE > 0 )); then read -r -t "$GHOST_IDLE" -p "$_p" OP || ghost_salir_sin_terminal $?
+    else read -r -p "$_p" OP || ghost_salir_sin_terminal $?; fi
+}
 seccion(){
     # seccion N FUNCION -> abre el submenu con el color de su seccion (TH_ITEMS del tema)
     UI_ACC="\033[1;38;5;${TH_ITEMS[$1-1]}m"
     "${@:2}"
-    UI_ACC=""
+    UI_ACC=""; GS_TS=0; GS_SVC_TS=0
 }
 ghost_fecha(){
     # Fecha/hora del pie del menu en la zona horaria elegida (Banner -> Zona horaria); si no, la del VPS
@@ -1359,6 +1378,7 @@ ghost_intro(){
 }
 
 # --- Datos del negocio para la cabecera (cache de 30 s: una pasada por passwd/shadow + contadores) ---
+GS_SVC_TS=0; GS_SVC_W=0; GS_SVC_LINE=""; GS_OS=""
 GS_TS=0; GS_USERS=0; GS_VENC=0; GS_HOY=0; GS_PRONTO=0; GS_BLOQ=0; GS_TRAF="0 MB"; GS_ALTO=0
 ghost_stats_refrescar(){
     local now out t=0 v
@@ -1442,7 +1462,7 @@ cabecera_mini(){
     if (( UI_W >= 52 )); then FR_TXT " 👻 ${BLANCO}GHOST PANEL${NC} ${GRIS}v${GHOST_VER}${NC} 🔑 $(cab_licencia_txt)"
     else FR_TXT " 👻 ${BLANCO}GHOST PANEL${NC} 🔑 $(cab_licencia_txt)"; fi
     cab_negocio "$ONLINE"
-    FR_TXT "  $(estado_servicios_min)"
+    estado_servicios_cache; FR_TXT "  $GS_SVC_LINE"
     (( GS_ALTO > 0 )) && FR_TXT "  🔶 ${AMARILLO}${GS_ALTO} $(T t_ui_alto)${NC}"
     FR_BOT
 }
@@ -1451,7 +1471,8 @@ cabecera_completa(){
     limpiar_pantalla
     ui_init
     local os up ram_t=0 ram_u=0 ram_p=0 cpu dsk_p=0 dsk_u="" dsk_t="" ONLINE lic_txt bw n
-    os=$( (. /etc/os-release 2>/dev/null; echo "${NAME:-Linux} ${VERSION_ID:-}") )
+    [[ -n "$GS_OS" ]] || GS_OS=$( (. /etc/os-release 2>/dev/null; echo "${NAME:-Linux} ${VERSION_ID:-}") )
+    os=$GS_OS
     up=$(awk '{s=int($1); d=int(s/86400); h=int((s%86400)/3600); m=int((s%3600)/60);
                if (d>0) printf "%dd %dh", d, h; else if (h>0) printf "%dh %dm", h, m; else printf "%dm", m}' /proc/uptime 2>/dev/null)
     [[ -z "$up" ]] && up="n/a"
@@ -1489,7 +1510,7 @@ cabecera_completa(){
         ui_gauge "$(T t_disco)" "$dsk_p" "${dsk_u:-?} / ${dsk_t:-?}"
     fi
     cab_negocio "$ONLINE"
-    FR_TXT "  $(estado_servicios_min)"
+    estado_servicios_cache; FR_TXT "  $GS_SVC_LINE"
     (( GS_ALTO > 0 )) && FR_TXT "  🔶 ${AMARILLO}${GS_ALTO} $(T t_ui_alto)${NC}"
     FR_BOT
     echo
@@ -1503,6 +1524,13 @@ svc_dot(){
     else printf '⚫'; fi
 }
 
+estado_servicios_cache(){
+    # La linea de servicios cuesta ~10 procesos (pgrep/systemctl): se recalcula cada 15 s (o si cambia el ancho)
+    local now; printf -v now '%(%s)T' -1
+    if (( now - GS_SVC_TS >= 15 )) || [[ "$GS_SVC_W" != "$UI_W" ]]; then
+        GS_SVC_LINE=$(estado_servicios_min); GS_SVC_TS=$now; GS_SVC_W=$UI_W
+    fi
+}
 estado_servicios_min(){
     # Una linea compacta para la cabecera (un solo espacio entre servicios si la terminal es angosta)
     local sp=" "; (( UI_W >= 52 )) && sp="  "
@@ -2514,66 +2542,105 @@ limiter_quitar_forcecommand(){
     fi
 }
 
-limiter_aplicar(){
+limiter_intervalo(){
+    local v; v=$(ghost_conf_get LIMITER_INTERVALO)
+    [[ "$v" =~ ^[0-9]+$ ]] && (( v >= 5 )) && echo "$v" || echo 30
+}
+
+limiter_escribir_archivos(){
     mkdir -p /etc/vps-limits
     cat > /usr/local/bin/vps-limiter.sh <<'LIMEOF'
 #!/bin/bash
+# GHOST-LIMITER-V2
 # GHOST PANEL - Limiter: mantiene como maximo N sesiones por usuario (/etc/vps-limits/USUARIO).
 # Corta las MAS NUEVAS. Cuenta procesos sshd/dropbear del usuario (tuneles sin tty incluidos).
+# Eficiencia (VPS de 1 vCPU): UNA sola lectura de procesos por ciclo, sin procesos por usuario.
+# Intervalo en segundos: /etc/ghost-panel.conf -> LIMITER_INTERVALO=30 (minimo 5; se relee cada ciclo).
 # Log: /var/log/ghost-panel.log cuando corta sesiones.
-INTERVALO=4
 LOG=/var/log/ghost-panel.log
-log_cut(){ echo "$(date '+%F %T') [LIMITER] $*" >> "$LOG" 2>/dev/null; }
+CONF=/etc/ghost-panel.conf
+exec 9>/run/vps-limiter.lock
+flock -n 9 || { echo "vps-limiter ya esta corriendo"; exit 0; }   # una sola instancia
+log_cut(){ printf '%s [LIMITER] %s\n' "$(date '+%F %T')" "$*" >> "$LOG" 2>/dev/null; }
+declare -A CORTADAS MAXU
 while true; do
+    INTERVALO=$(awk -F= '$1=="LIMITER_INTERVALO"{print $2; exit}' "$CONF" 2>/dev/null)
+    [[ "$INTERVALO" =~ ^[0-9]+$ ]] && (( INTERVALO >= 5 )) || INTERVALO=30
+    # 1) limites de cada usuario (sin procesos: read + expansion de parametros)
+    LIM=""
     for f in /etc/vps-limits/*; do
-        [ -f "$f" ] || continue
-        U=$(basename "$f")
-        MAX=$(tr -dc '0-9' < "$f")
-        [ -n "$MAX" ] && [ "$MAX" -gt 0 ] || continue
-        # etimes desc = mas viejo primero; se conservan los primeros MAX, se matan los nuevos
-        EXTRA=$(ps -u "$U" -o pid=,etimes=,comm= 2>/dev/null \
-            | awk '$3=="sshd"||$3=="dropbear"{print $2, $1}' | sort -rn | awk -v m="$MAX" 'NR>m{print $2}')
-        N=0
-        for P in $EXTRA; do
-            if kill -KILL "$P" 2>/dev/null; then N=$((N+1)); fi
-        done
-        [ "$N" -gt 0 ] && log_cut "usuario=$U max=$MAX cortadas=$N"
-        # Notificar al Bot de Telegram (si esta instalado)
-        if [ "$N" -gt 0 ] && [ -f /opt/ghost-bot/config.env ]; then
-            . /opt/ghost-bot/config.env
-            if [ -n "${BOT_TOKEN:-}" ] && [ -n "${ADMIN_CHAT_ID:-}" ]; then
-                curl -fsS --max-time 8 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-                    -d "chat_id=${ADMIN_CHAT_ID}" \
-                    --data-urlencode "text=🚦 <b>Conexiones cortadas</b>
+        [[ -f "$f" ]] || continue
+        read -r MAX < "$f" 2>/dev/null; MAX=${MAX//[!0-9]/}
+        [[ -n "$MAX" ]] && (( 10#$MAX > 0 )) && LIM+="${f##*/} $((10#$MAX))"$'\n'
+    done
+    if [[ -n "$LIM" ]]; then
+        CORTADAS=(); MAXU=()
+        # 2) UNA lectura de procesos, del mas viejo al mas nuevo: se conservan los primeros MAX y se cortan los demas
+        while read -r U P M; do
+            [[ -n "$P" ]] || continue
+            if kill -KILL "$P" 2>/dev/null; then CORTADAS[$U]=$(( ${CORTADAS[$U]:-0} + 1 )); MAXU[$U]=$M; fi
+        done < <(ps -eo user:32=,pid=,comm= --sort=-etimes 2>/dev/null | awk -v lim="$LIM" '
+            BEGIN { n = split(lim, L, "\n"); for (i = 1; i <= n; i++) { split(L[i], a, " "); if (a[1] != "") mx[a[1]] = a[2] } }
+            ($3 == "sshd" || $3 == "dropbear") && ($1 in mx) { if (++c[$1] > mx[$1]) print $1, $2, mx[$1] }')
+        for U in "${!CORTADAS[@]}"; do
+            N=${CORTADAS[$U]}; MAX=${MAXU[$U]}
+            log_cut "usuario=$U max=$MAX cortadas=$N"
+            # Notificar al Bot de Telegram (si esta instalado)
+            if [ -f /opt/ghost-bot/config.env ]; then
+                . /opt/ghost-bot/config.env
+                if [ -n "${BOT_TOKEN:-}" ] && [ -n "${ADMIN_CHAT_ID:-}" ]; then
+                    curl -fsS --max-time 8 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+                        -d "chat_id=${ADMIN_CHAT_ID}" \
+                        --data-urlencode "text=🚦 <b>Conexiones cortadas</b>
 👤 <code>$U</code>
 🔌 Máximo: $MAX
 ✂️ Cortadas: $N" \
-                    -d "parse_mode=HTML" >/dev/null 2>&1 || true
+                        -d "parse_mode=HTML" >/dev/null 2>&1 || true
+                fi
             fi
-        fi
-    done
+        done
+    fi
     sleep "$INTERVALO"
 done
 LIMEOF
-    chmod 755 /usr/local/bin/vps-limiter.sh 2>/dev/null || { ERR "Sin permiso para escribir /usr/local/bin"; PAUSA; return; }
-    limiter_quitar_forcecommand
+    chmod 755 /usr/local/bin/vps-limiter.sh 2>/dev/null || return 1
     cat > /etc/systemd/system/vps-limiter.service <<'LSVC'
 [Unit]
 Description=GHOST PANEL - limitador de sesiones SSH
 After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
+Type=simple
 ExecStart=/usr/local/bin/vps-limiter.sh
-Restart=always
-RestartSec=3
+Restart=on-failure
+RestartSec=10
+Nice=10
+IOSchedulingClass=idle
 
 [Install]
 WantedBy=multi-user.target
 LSVC
+}
+
+limiter_migrar(){
+    # Pasa un limiter viejo (bucle de 4 s con procesos por usuario) a la v2, sin preguntar
+    limiter_escribir_archivos || return 1
+    systemctl daemon-reload 2>/dev/null
+    systemctl restart vps-limiter 2>/dev/null
+    vps_log INFO "limiter actualizado a v2 (una lectura de procesos por ciclo)"
+}
+
+limiter_aplicar(){
+    limiter_escribir_archivos || { ERR "Sin permiso para escribir /usr/local/bin"; PAUSA; return; }
+    limiter_quitar_forcecommand
     systemctl daemon-reload
-    systemctl enable --now vps-limiter >/dev/null 2>&1
+    systemctl enable vps-limiter >/dev/null 2>&1
+    systemctl restart vps-limiter >/dev/null 2>&1
     if systemctl is-active --quiet vps-limiter 2>/dev/null; then
-        ficha_ok "🚦 LIMITER ACTIVO" "Estado" "ACTIVO" "Usuarios con límite" "$(ls /etc/vps-limits/ 2>/dev/null | wc -l)" "Revisa cada" "4 segundos" "Acción" "corta las sesiones MÁS NUEVAS"
+        ficha_ok "🚦 LIMITER ACTIVO" "Estado" "ACTIVO" "Usuarios con límite" "$(ls /etc/vps-limits/ 2>/dev/null | wc -l)" "Revisa cada" "$(limiter_intervalo) segundos" "Acción" "corta las sesiones MÁS NUEVAS"
+        INFO "Intervalo configurable: ghost_conf LIMITER_INTERVALO en /etc/ghost-panel.conf (mínimo 5 s)."
         INFO "Con Dropbear solo se cuentan sesiones con shell; con OpenSSH también los túneles."
     else
         ERR "El limiter no levanto. Revisa: journalctl -u vps-limiter"
@@ -2743,15 +2810,31 @@ mantenimiento(){
     PAUSA
 }
 
+auto_menu_snippet(){
+    cat <<'AMEOF'
+# VPS-JB-AUTOMENU-INICIO
+case "$-" in *i*) [ -t 0 ] && [ -z "$GHOST_PANEL_ACTIVO" ] && [ -x /usr/local/bin/ghostpanel ] && /usr/local/bin/ghostpanel ;; esac
+# VPS-JB-AUTOMENU-FIN
+AMEOF
+}
+
+auto_menu_migrar(){
+    # Snippet viejo (sin guardas: abria el panel en cualquier shell interactivo) -> snippet nuevo
+    local rc
+    for rc in /root/.bashrc "$HOME/.bashrc"; do
+        [[ -f "$rc" ]] || continue
+        grep -q "VPS-JB-AUTOMENU-INICIO" "$rc" 2>/dev/null || continue
+        grep -q "GHOST_PANEL_ACTIVO" "$rc" 2>/dev/null && continue
+        sed -i '/VPS-JB-AUTOMENU-INICIO/,/VPS-JB-AUTOMENU-FIN/d' "$rc"
+        auto_menu_snippet >> "$rc"
+    done
+}
+
 auto_menu(){
     if grep -q "VPS-JB-AUTOMENU-INICIO" "$HOME/.bashrc" 2>/dev/null; then
         ficha_ok "📌 AUTO-MENÚ" "Estado" "ya estaba activo"; PAUSA; return
     fi
-    cat >> "$HOME/.bashrc" <<'AMEOF'
-# VPS-JB-AUTOMENU-INICIO
-case "$-" in *i*) [ -x /usr/local/bin/ghostpanel ] && /usr/local/bin/ghostpanel ;; esac
-# VPS-JB-AUTOMENU-FIN
-AMEOF
+    auto_menu_snippet >> "$HOME/.bashrc"
     ficha_ok "📌 AUTO-MENÚ ACTIVADO" "Estado" "activo" "Efecto" "el menú abre al iniciar sesión root"
     PAUSA
 }
@@ -5345,7 +5428,7 @@ trafico_cron_instalar(){
     local FN MIN="${1:-}"
     # Frecuencia: la pasada por parametro, o la que ya tenia el cron, o 1 minuto
     [[ -n "$MIN" ]] || MIN=$(trafico_auto_min)
-    [[ "$MIN" =~ ^(1|5|10)$ ]] || MIN=1
+    [[ "$MIN" =~ ^(1|5|10)$ ]] || MIN=5
     {
         echo '#!/bin/bash'
         echo '# Generado por Ghost Panel (trafico_cron_instalar). No editar: se regenera solo.'
@@ -5366,17 +5449,17 @@ trafico_cron_instalar(){
         echo 'trafico_auto_ciclo'
     } > /usr/local/bin/vps-trafico-cron.sh
     chmod 755 /usr/local/bin/vps-trafico-cron.sh
-    printf 'SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin\n*/%s * * * * root /usr/local/bin/vps-trafico-cron.sh\n' "$MIN" > /etc/cron.d/ghost-panel-trafico
+    printf 'SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin\n*/%s * * * * root nice -n 15 ionice -c3 /usr/local/bin/vps-trafico-cron.sh\n' "$MIN" > /etc/cron.d/ghost-panel-trafico
     chmod 644 /etc/cron.d/ghost-panel-trafico
 }
 
 trafico_auto_min(){ awk '/^\*\/[0-9]+ /{sub(/^\*\//,"",$1); print $1; exit}' /etc/cron.d/ghost-panel-trafico 2>/dev/null; }
 
 trafico_auto_pedir_min(){
-    # trafico_auto_pedir_min VARIABLE -> pregunta 1/5/10 minutos (por defecto 1)
+    # trafico_auto_pedir_min VARIABLE -> pregunta 1/5/10 minutos (por defecto 5)
     local _m
-    read -r -p "  Cada cuantos minutos refrescar banners y revisar cuotas? (1/5/10) [1]: " _m
-    [[ "$_m" =~ ^(1|5|10)$ ]] || _m=1
+    read -r -p "  Cada cuantos minutos refrescar banners y revisar cuotas? (1/5/10) [5]: " _m
+    [[ "$_m" =~ ^(1|5|10)$ ]] || _m=5
     printf -v "$1" '%s' "$_m"
 }
 
@@ -7837,12 +7920,76 @@ desinstalar_ghost(){
 # ------------------------------------------------------------
 # MENU PRINCIPAL
 # ------------------------------------------------------------
+# ------------------------------------------------------------
+# INSTANCIA UNICA (3.11.6): un solo panel a la vez
+# pidfile + flock (solo durante el chequeo) + starttime del proceso (un PID reutilizado no cuenta).
+# El flock NO queda abierto en el panel, asi que no lo heredan xray/cloudflared/etc. lanzados desde aqui.
+# ------------------------------------------------------------
+GHOST_PIDFILE=/run/ghost-panel.pid
+GHOST_LOCKFILE=/run/ghost-panel.lock
+ghost_proc_inicio(){
+    # starttime (campo 22 de /proc/PID/stat)
+    local s f
+    read -r s 2>/dev/null < "/proc/$1/stat" || return 1
+    s=${s##*) }
+    read -ra f <<< "$s"
+    printf '%s' "${f[19]}"
+}
+ghost_instancia_viva(){
+    # ghost_instancia_viva PID INICIO -> 0 si ese PID sigue siendo la misma instancia
+    [[ "$1" =~ ^[0-9]+$ && -r "/proc/$1/stat" ]] || return 1
+    [[ "$(ghost_proc_inicio "$1")" == "$2" ]]
+}
+ghost_instancia_liberar(){
+    local pid _i
+    read -r pid _i 2>/dev/null < "$GHOST_PIDFILE" || return 0
+    [[ "$pid" == "$$" ]] && rm -f "$GHOST_PIDFILE"
+    return 0
+}
+ghost_instancia_unica(){
+    local pid ini tty up op n=0
+    while (( n++ < 5 )); do
+        # reclamar el lugar de forma atomica (el lock vive solo dentro de este subshell)
+        if (
+            flock -x 9
+            if read -r pid ini 2>/dev/null < "$GHOST_PIDFILE" && [[ "$pid" != "$$" ]] && ghost_instancia_viva "$pid" "$ini"; then exit 1; fi
+            printf '%s %s\n' "$$" "$(ghost_proc_inicio "$$")" > "$GHOST_PIDFILE"
+        ) 9>"$GHOST_LOCKFILE"; then
+            trap ghost_instancia_liberar EXIT
+            return 0
+        fi
+        read -r pid ini 2>/dev/null < "$GHOST_PIDFILE" || continue
+        tty=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')
+        up=$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')
+        if [[ -z "$tty" || "$tty" == "?" ]]; then
+            # sin terminal = huerfana: se cierra sola y esta instancia toma su lugar
+            vps_log WARN "instancia huerfana del panel (PID $pid) cerrada"
+            kill "$pid" 2>/dev/null; sleep 1; kill -KILL "$pid" 2>/dev/null
+            continue
+        fi
+        [[ -t 0 ]] || { echo "Ghost Panel ya esta abierto (PID $pid, $tty)."; exit 1; }
+        ficha_aviso "⚠ GHOST PANEL YA ESTÁ ABIERTO" "PID" "$pid" "Terminal" "$tty" "Abierto hace" "$up"
+        echo -e "  ${CIAN}[1]${NC} Cerrar la otra sesión y continuar aquí"
+        echo -e "  ${ROJO}[0]${NC} Salir"
+        read -r -p "  ❯ " op || exit 0
+        [[ "$op" == 1 ]] || exit 0
+        kill "$pid" 2>/dev/null; sleep 1; kill -KILL "$pid" 2>/dev/null
+    done
+    echo "No se pudo tomar el bloqueo de instancia unica." >&2
+    exit 1
+}
+
 [[ $EUID -ne 0 ]] && { echo -e "${ROJO}Ejecuta como root o con sudo.${NC}"; exit 1; }
+export GHOST_PANEL_ACTIVO=1          # shells hijos (auto-menu) no vuelven a abrir el panel
+ghost_instancia_unica
+GHOST_IDLE=$(ghost_conf_get IDLE_TIMEOUT); [[ "$GHOST_IDLE" =~ ^[0-9]+$ ]] || GHOST_IDLE=1200
 
 seleccionar_idioma
 gate_licencia
 ghost_intro
 ghost_bootstrap
+auto_menu_migrar                      # snippet viejo del .bashrc -> con guardas (sin terminal / anidado)
+[[ -f /etc/systemd/system/vps-limiter.service ]] && ! grep -q 'GHOST-LIMITER-V2' /usr/local/bin/vps-limiter.sh 2>/dev/null && limiter_migrar
 [[ -f "$BOT_DIR/config.env" ]] && bot_refresh_helper 2>/dev/null   # helper del bot a la par de esta version
 ghost_tz_primera_vez
 [[ -f /etc/cron.d/ghost-panel-trafico ]] && trafico_cron_instalar   # mantiene el cron a la par de esta version
