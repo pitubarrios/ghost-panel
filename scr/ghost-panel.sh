@@ -3,15 +3,22 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 3.12.4
-#  Cambios 3.12.4 (totales y pantallas):
-#    - Total de tráfico (bot y cabecera del panel): suma SOLO a los usuarios del panel. Antes incluía
-#      contadores de cuentas ajenas (p. ej. tu propio tráfico SSH como admin) y no coincidía con las filas.
-#    - Bot: tabla de tráfico con la cuota alineada (sin el hueco «/1   GB»).
-#    - Bot → Servidor: el botón de Xray solo aparece si Xray está instalado; se quitó la línea de RAM
-#      repetida; reiniciar servicios usa ♻️ y reiniciar la VPS ⚠️ (ya no se confunden con «Actualizar»).
-#    - Bot: la lista y el resumen diario muestran «hoy» / «mañana» en lugar de «0d» / «1d».
-#    - El historial de versiones anteriores pasó a CHANGELOG.md: el script solo lleva la última.
+#  Version: 4.0
+#  Versionado: desde 4.0 el numero es X.Y -> 4.0, 4.1 ... 4.9 y despues 5.0 (sin tercer numero).
+#  Cambios 4.0 (actualizador, backups y fichas del bot):
+#    - Actualizador: la linea "Nueva" ya no repite la version (salia "v3.12.43.12.4") y deja de preguntar
+#      siempre. Version nueva -> "Actualizar a vX?". Misma version y mismo archivo -> avisa que ya tienes la
+#      ultima y NO pregunta. Version mas vieja, archivo distinto con la misma version o sin version ->
+#      confirmacion explicita con el motivo.
+#    - Backups cifrados del bot: la clave ya no se pierde al desinstalar el bot. Se guarda una copia en
+#      /root/backups/ghost-bot-backup.key (0600) y al reinstalar el bot se recupera, asi los backups viejos
+#      de Telegram siguen abriendose. El panel avisa que hay que guardarla FUERA del servidor.
+#    - Bot: fichas con "Etiqueta: valor" y cada valor tocable (copia ese dato solo); ya no dependen de que tu
+#      Telegram dibuje el bloque con letra monoespaciada. USUARIO CREADO y CLAVE ACTUALIZADA traen ademas un
+#      bloque compacto "Copiar todo para el cliente".
+#    - Bot: cambiar la clave de un cliente (Generar / Nueva clave y enviar) pide confirmacion.
+#    - CheckUser: nueva opcion [6] Rotar token (el token es el mismo para todos los enlaces de clientes).
+#    - El historial de versiones anteriores esta en CHANGELOG.md: el script solo lleva la ultima.
 # ============================================================
 
 set -u
@@ -50,7 +57,7 @@ tema_guardar(){
     echo "THEME=$1" >> /etc/ghost-panel.conf
 }
 tema_cargar
-GHOST_VER='3.12.4'
+GHOST_VER='4.0'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -294,6 +301,7 @@ TXT_ES[t_sub_cu]="CHECKUSER API"; TXT_EN[t_sub_cu]="CHECKUSER API"
 TXT_ES[t_cu_inst]="Instalar / reinstalar"; TXT_EN[t_cu_inst]="Install / reinstall"
 TXT_ES[t_cu_probar]="Probar consulta"; TXT_EN[t_cu_probar]="Test query"
 TXT_ES[t_cu_token]="Ver token y puerto"; TXT_EN[t_cu_token]="Show token & port"
+TXT_ES[t_cu_rotar]="Rotar token"; TXT_EN[t_cu_rotar]="Rotate token"
 TXT_ES[t_remover]="Remover"; TXT_EN[t_remover]="Remove"
 TXT_ES[t_sub_trafico]="TRÁFICO POR USUARIO"; TXT_EN[t_sub_trafico]="PER-USER TRAFFIC"
 TXT_ES[t_trafico]="Tráfico"; TXT_EN[t_trafico]="Traffic"
@@ -2772,21 +2780,33 @@ cambiar_hostname(){
 ghost_ver_de(){ grep -m1 "^GHOST_VER=" "$1" 2>/dev/null | cut -d"'" -f2; }
 
 ghost_instalar_script(){
-    # ghost_instalar_script ARCHIVO -> valida, compara versiones, respalda, instala y relanza
-    local F="$1" NV CV="$GHOST_VER" DEST="$VPSMGR_DEST" RUN SN BK
+    # ghost_instalar_script ARCHIVO -> valida, compara versiones, respalda, instala y relanza.
+    # Solo pregunta cuando hay algo que decidir (version nueva, mas vieja, sin version, o archivo distinto con la
+    # misma version). Si ya tienes exactamente esa version, avisa y NO pregunta.
+    local F="$1" NV CV="$GHOST_VER" DEST="$VPSMGR_DEST" RUN SN BK PREG
     bash -n "$F" 2>/dev/null || { ERR "El archivo no es un script bash valido."; return 1; }
     grep -q "GHOST PANEL" "$F" || { ERR "No parece ser GHOST PANEL."; return 1; }
     NV=$(ghost_ver_de "$F")
-    echo -e "  Instalada: ${AMARILLO}v${CV}${NC}    Nueva: ${VERDE}${NV:+v$NV}${NV:-sin version}${NC}"
+    echo -e "  Instalada: ${AMARILLO}v${CV}${NC}    Nueva: ${VERDE}$([[ -n "$NV" ]] && echo "v$NV" || echo "sin version")${NC}"
     if [[ -z "$NV" ]]; then
         WARN "El archivo no declara version: es ANTERIOR al rediseno. Instalarlo pierde la interfaz y los arreglos."
+        PREG="  Instalarlo de todos modos? (s/n): "
     elif [[ "$NV" == "$CV" ]]; then
-        INFO "Es la misma version que la instalada."
+        if [[ -f "$DEST" ]] && cmp -s "$F" "$DEST"; then
+            OK "Ya tienes la ultima version (v$CV): no hay nada que actualizar."
+            return 0
+        fi
+        WARN "Es la misma version (v$CV) pero el contenido es distinto al instalado."
+        PREG="  Reemplazar el instalado por este archivo? (s/n): "
     elif [[ "$(printf '%s\n%s\n' "$CV" "$NV" | sort -V | tail -1)" == "$CV" ]]; then
         WARN "La nueva (v$NV) es MAS VIEJA que la instalada (v$CV)."
+        PREG="  Volver a la version anterior v$NV? (s/n): "
+    else
+        INFO "Hay una version nueva: v$CV -> v$NV"
+        PREG="  Actualizar a v$NV? (s/n): "
     fi
-    read -r -p "  Instalar igual? (s/n): " SN
-    [[ "$SN" == "s" ]] || { INFO "Cancelado."; return 1; }
+    read -r -p "$PREG" SN
+    [[ "$SN" =~ ^[sSyY]$ ]] || { INFO "Cancelado."; return 1; }
     RUN="${GHOST_SELF:-$(readlink -f "$0" 2>/dev/null)}"
     mkdir -p /root/backups; chmod 700 /root/backups
     BK="/root/backups/ghost-panel-v${CV}-$(date +%F_%H%M%S).sh"
@@ -2804,7 +2824,7 @@ ghost_instalar_script(){
     ficha_cerrar
     vps_log INFO "script actualizado v$CV -> v${NV:-?}"
     read -r -p "  Reiniciar el panel ahora con la version nueva? (s/n): " SN
-    [[ "$SN" == "s" ]] && exec "$DEST"
+    [[ "$SN" =~ ^[sSyY]$ ]] && exec "$DEST"
     return 0
 }
 
@@ -3024,13 +3044,32 @@ checkuser_quitar(){
     PAUSA
 }
 
+checkuser_rotar_token(){
+    # Token nuevo. Es el mismo para los enlaces de TODOS los clientes: los enlaces anteriores dejan de servir.
+    [[ -f /etc/vps-checkuser.conf ]] || { ERR "CheckUser no esta instalado."; PAUSA; return; }
+    local P NT SN
+    P=$(awk -F= '/^PORT=/{print $2}' /etc/vps-checkuser.conf 2>/dev/null)
+    echo -e "  ${AMARILLO}Rotar el token invalida TODOS los enlaces CheckUser que ya tienen tus clientes.${NC}"
+    echo "  Tendras que reenviarles el enlace nuevo (el bot lo trae en cada ficha)."
+    read -r -p "  ¿Generar un token nuevo? (s/n): " SN
+    [[ "$SN" =~ ^[sSyY]$ ]] || { INFO "Cancelado."; PAUSA; return; }
+    NT=$(tr -dc 'a-zA-Z0-9' </dev/urandom 2>/dev/null | head -c 24)
+    [[ ${#NT} -ge 16 ]] || { ERR "No se pudo generar el token."; PAUSA; return; }
+    printf 'PORT=%s\nTOKEN=%s\n' "${P:-8080}" "$NT" > /etc/vps-checkuser.conf
+    chmod 600 /etc/vps-checkuser.conf
+    systemctl restart vps-checkuser 2>/dev/null
+    vps_log INFO "token de CheckUser rotado"
+    ficha_ok "🔑 TOKEN ROTADO" "Token nuevo" "$NT" "Puerto" "${P:-8080}" "Enlaces anteriores" "ya no funcionan"
+    PAUSA
+}
+
 menu_checkuser(){
     while true; do
         cabecera
         SUBTOP "$(T t_sub_cu)"
         FR_OPT 1 "$(T t_cu_inst)" 4 "$(T t_cu_token)"
         FR_OPT 2 "$(T t_estado_svc)" 5 "$(T t_remover)"
-        FR_OPT 3 "$(T t_cu_probar)" "" ""
+        FR_OPT 3 "$(T t_cu_probar)" 6 "🔑 $(T t_cu_rotar)"
         FR_OPT 0 "🔙 $(T t_volver)" "" ""
         FR_BOT
         PROMPT
@@ -3040,6 +3079,7 @@ menu_checkuser(){
             3) checkuser_probar ;;
             4) if [[ -f /etc/vps-checkuser.conf ]]; then ficha_abrir "📡 CONFIG CHECKUSER"; cat /etc/vps-checkuser.conf; ficha_cerrar; else ERR "No instalado."; fi; PAUSA ;;
             5) checkuser_quitar ;;
+            6) checkuser_rotar_token ;;
             0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
         esac
     done
@@ -3511,6 +3551,7 @@ notif_enviar(){
 # con bot_notificar(). El chat del bot siempre se EDITA (nunca mensajes nuevos).
 # ============================================================
 BOT_DIR='/opt/ghost-bot'
+BOT_KEY_COPIA='/root/backups/ghost-bot-backup.key'   # copia de la clave de backup: sobrevive a desinstalar el bot
 
 bot_conf_get(){
     # bot_conf_get CLAVE -> valor de /opt/ghost-bot/config.env (sin romper por '=')
@@ -3627,7 +3668,7 @@ bot_refresh_helper(){
     return 0
 }
 
-BOT_REV='3.12.4'   # revision del bot.py embebido (debe coincidir con BOT_REV dentro de bot.py)
+BOT_REV='4.0'   # revision del bot.py embebido (debe coincidir con BOT_REV dentro de bot.py)
 
 bot_autoactualizar(){
     # Si el bot ya esta instalado con un bot.py de otra revision, lo regenera solo (sin pedir token ni
@@ -3657,7 +3698,7 @@ bot_telegram_escribir_py(){
 """
 👻 GHOST PANEL · Bot de Telegram para administrar usuarios SSH
 ==============================================================
-Generado por Ghost Panel v3.12.0 (función bot_telegram_escribir_py).
+Generado por Ghost Panel (función bot_telegram_escribir_py). Revisión: ver BOT_REV.
 NO editar a mano: se regenera al reinstalar el bot desde el panel
 (Bot Telegram -> Instalar / Configurar).
 
@@ -3696,7 +3737,7 @@ try:
 except ImportError:  # Python < 3.9
     ZoneInfo = None
 
-BOT_REV = "3.12.4"   # el panel compara esto para actualizar el bot solo
+BOT_REV = "4.0"   # el panel compara esto para actualizar el bot solo
 
 if not hasattr(asyncio, "to_thread"):          # Python 3.8 (Ubuntu 20.04)
     async def _to_thread(fn, *a, **k):
@@ -4643,17 +4684,28 @@ def accion_desbloquear_cuota(u):
     log.info("desbloqueado por cuota via bot: %s", u)
 
 # ------------------------- DATOS / FICHAS DE TEXTO -------------------------
-def tabla(filas, ancho=11):
-    """Bloque <pre> «Etiqueta  valor» ALINEADO (monoespaciado). Un toque lo copia entero."""
-    return "<pre>%s</pre>" % esc("\n".join("%-*s %s" % (ancho, k, v) for k, v in filas))
+ICONOS = {"Usuario": "👤", "Contraseña": "🔑", "IP": "🌍", "Puerto SSH": "🔌", "Vence": "📅",
+          "Conexiones": "📶", "Tráfico": "📦", "Sesiones": "🔌", "Cuota": "📦", "Usado": "📈",
+          "Validez": "⏳", "Agregado": "➕"}
+
+def tabla(filas):
+    """Líneas «Etiqueta: valor» con cada VALOR en <code>: un toque copia ese dato solo.
+    No depende de que la letra sea monoespaciada (en algunos Telegram el bloque <pre> sale desalineado)."""
+    return "\n".join("%s%s: <code>%s</code>"
+                     % ((ICONOS[k] + " ") if k in ICONOS else "", esc(k), esc(v)) for k, v in filas)
+
+def copiar_bloque(filas):
+    """Bloque <pre> compacto «Etiqueta: valor» (sin relleno): un toque copia TODO para pegárselo al cliente."""
+    return ("📋 <b>Copiar todo para el cliente</b>\n<pre>%s</pre>"
+            % esc("\n".join("%s: %s" % (k, v) for k, v in filas)))
 
 def checkuser_bloque(u):
     """Enlace CheckUser en su propia línea (tocarlo lo copia completo)."""
     link = checkuser_enlace(u)
     return ("\n\n🔗 <b>CheckUser</b>\n<code>%s</code>" % esc(link)) if link else ""
 
-def bloque_datos(u, clave, iso, con_checkuser=False):
-    """Datos del cliente alineados. clave=None -> sin fila de contraseña (no se guarda en ningún lado)."""
+def datos_filas(u, clave, iso):
+    """Filas (etiqueta, valor) del cliente. clave=None -> sin fila de contraseña (no se guarda en ningún lado)."""
     d = days_hasta(iso) if iso else None
     cx = lim_conex(u)
     g = lim_gb(u)
@@ -4665,14 +4717,18 @@ def bloque_datos(u, clave, iso, con_checkuser=False):
         filas.append(("Vence", "%s · %s" % (iso, dias_txt(d))))
     filas.append(("Conexiones", str(cx) if cx > 0 else "sin límite"))
     filas.append(("Tráfico", ("%d GB" % g) if g > 0 else "sin límite"))
-    return tabla(filas)
+    return filas
+
+def bloque_datos(u, clave, iso, con_checkuser=False):
+    return tabla(datos_filas(u, clave, iso))
 
 def ficha_creada(u, clave, dias, maxc, gbk, expiso, test=False):
     titulo = "🧪 <b>TEST SSH CREADO</b>" if test else "👻 <b>USUARIO CREADO</b>"
     return (titulo + "\n" + LINEA + "\n"
             + bloque_datos(u, clave, expiso)
             + "\n🟢 <b>ACTIVO</b> · creado %s\n" % datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
-            + "<i>Tocá el bloque para copiarlo y pasárselo al cliente.</i>"
+            + "<i>Tocá un dato para copiarlo solo.</i>\n\n"
+            + copiar_bloque(datos_filas(u, clave, expiso))
             + checkuser_bloque(u))
 
 # ------------------------- PANTALLAS (devuelven (texto, filas)) -------------------------
@@ -4804,7 +4860,7 @@ def scr_renovar(u):
 
 def scr_clave(u):
     return ("🔑 <b>CLAVE · %s</b>\nElegí cómo definir la nueva contraseña:" % esc(u),
-            [[("🎲 Generar", "clg|" + u), ("✍️ Escribir", "clm|" + u)],
+            [[("🎲 Generar", "clc|" + u), ("✍️ Escribir", "clm|" + u)],
              [("⬅ Ficha", "u|" + u)]])
 
 def scr_limites(u, pre=""):
@@ -4829,6 +4885,13 @@ def scr_limites(u, pre=""):
     rows.append([("⬅ Ficha", "u|" + u)])
     return txt, rows
 
+def scr_confirmar_clave(u, accion):
+    """Cambiar la clave corta el acceso del cliente hasta que reciba la nueva: pide confirmación."""
+    return ("⚠️ <b>CAMBIAR CLAVE · %s</b>\n" % esc(u) + LINEA + "\n"
+            "Se genera una contraseña nueva y <b>la actual deja de funcionar</b>: el cliente no podrá "
+            "conectarse hasta que le envíes la nueva.",
+            [[("✅ Sí, cambiar clave", "%s|%s" % (accion, u))], [("❌ Cancelar", "u|" + u)]])
+
 def scr_enviar(u, pre=""):
     iso = account_expiry_iso(u)
     txt = (pre + "📤 <b>DATOS PARA ENVIAR · %s</b>\n" % esc(u) + LINEA + "\n"
@@ -4836,7 +4899,7 @@ def scr_enviar(u, pre=""):
            + "\n🔒 <i>La contraseña no se guarda en ningún lado (Linux solo guarda su hash). "
              "Para enviarla, generá una nueva: la anterior deja de funcionar.</i>"
            + checkuser_bloque(u))
-    rows = [[("🎲 Nueva clave y enviar", "sng|" + u)], [("⬅ Ficha", "u|" + u)]]
+    rows = [[("🎲 Nueva clave y enviar", "snc|" + u)], [("⬅ Ficha", "u|" + u)]]
     return txt, rows
 
 def scr_eliminar(u):
@@ -5457,6 +5520,9 @@ async def route(update, context, data):
     elif k == "clv":
         if await usuario_ok(arg(1)):
             await show(update, context, scr_clave, arg(1))
+    elif k in ("clc", "snc"):
+        if await usuario_ok(arg(1)):
+            await show(update, context, scr_confirmar_clave, arg(1), "clg" if k == "clc" else "sng")
     elif k == "clg":
         u = arg(1)
         if await usuario_ok(u):
@@ -5604,10 +5670,12 @@ async def route(update, context, data):
         await show(update, context, scr_menu)
 
 def ficha_clave(u, clave):
+    iso = account_expiry_iso(u)
     return ("🔑 <b>CLAVE ACTUALIZADA</b>\n" + LINEA + "\n"
-            + bloque_datos(u, clave, account_expiry_iso(u))
+            + bloque_datos(u, clave, iso)
             + "\n🟢 Contraseña cambiada · la anterior ya no funciona\n"
-              "<i>Tocá el bloque para copiarlo.</i>"
+              "<i>Tocá un dato para copiarlo solo.</i>\n\n"
+            + copiar_bloque(datos_filas(u, clave, iso))
             + checkuser_bloque(u))
 
 # --- botones DENTRO de un flujo; devuelve False si el dato no es del flujo ---
@@ -6124,6 +6192,7 @@ GBSVC
             "Directorio" "$BOT_DIR" \
             "Log" "/var/log/ghost-bot.log"
         INFO "Abrí el chat del bot en Telegram y mandale /start."
+        WARN "Guarda la clave de backup FUERA del servidor: opcion 6 de este menu (Ver token y admin)."
         [[ $REINST -eq 1 ]] && INFO "Reinstalación: config y código actualizados, servicio reiniciado."
     else
         ficha_aviso "🤖 BOT INSTALADO (no levantó)" \
@@ -6203,13 +6272,28 @@ bot_telegram_estado(){
     PAUSA
 }
 
+bot_backup_key_respaldar(){
+    # Copia (0600) de la clave de backup fuera de /opt/ghost-bot: desinstalar el bot ya no la borra.
+    [[ -s "$BOT_DIR/backup.key" ]] || return 0
+    mkdir -p /root/backups 2>/dev/null; chmod 700 /root/backups 2>/dev/null
+    cmp -s "$BOT_DIR/backup.key" "$BOT_KEY_COPIA" 2>/dev/null \
+        || install -m 600 "$BOT_DIR/backup.key" "$BOT_KEY_COPIA" 2>/dev/null
+    return 0
+}
+
 bot_backup_key_asegurar(){
     # Clave con la que el bot CIFRA los backups antes de mandarlos a Telegram (24 caracteres, 0600).
+    # Si el bot se desinstalo antes, se RECUPERA de la copia: los backups viejos siguen abriendose.
     mkdir -p "$BOT_DIR" 2>/dev/null
     if [[ ! -s "$BOT_DIR/backup.key" ]]; then
-        ( umask 077; head -c 512 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 24 > "$BOT_DIR/backup.key"; echo >> "$BOT_DIR/backup.key" )
+        if [[ -s "$BOT_KEY_COPIA" ]]; then
+            install -m 600 "$BOT_KEY_COPIA" "$BOT_DIR/backup.key" 2>/dev/null
+        else
+            ( umask 077; head -c 512 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 24 > "$BOT_DIR/backup.key"; echo >> "$BOT_DIR/backup.key" )
+        fi
     fi
     chmod 600 "$BOT_DIR/backup.key" 2>/dev/null
+    bot_backup_key_respaldar
 }
 
 bot_telegram_ver(){
@@ -6225,6 +6309,8 @@ bot_telegram_ver(){
     INFO "El token y la clave de backup son SECRETOS: no los compartas."
     INFO "El backup que el bot manda por Telegram va CIFRADO con esa clave (la clave nunca viaja por Telegram)."
     INFO "Para abrirlo: openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in ARCHIVO.enc -out backup.tar.gz"
+    WARN "GUARDA la clave de backup FUERA del servidor (gestor de contraseñas). Sin ella ningun backup se abre."
+    WARN "Si pierdes la VPS, la clave se pierde con ella: la copia de $BOT_KEY_COPIA tambien esta en este servidor."
     PAUSA
 }
 
@@ -6252,6 +6338,7 @@ bot_telegram_desinstalar_silencioso(){
     systemctl disable --now ghost-bot >/dev/null 2>&1
     rm -f /etc/systemd/system/ghost-bot.service
     systemctl daemon-reload 2>/dev/null
+    bot_backup_key_respaldar        # la clave NO se pierde: los backups ya enviados a Telegram siguen abriendose
     rm -rf "$BOT_DIR"
     rm -f /var/log/ghost-bot.log
     return 0
@@ -6261,10 +6348,11 @@ bot_telegram_desinstalar(){
     [[ -f "$BOT_DIR/bot.py" || -f /etc/systemd/system/ghost-bot.service ]] \
         || { ERR "El bot no está instalado."; PAUSA; return; }
     local R
-    read -r -p "¿Desinstalar el bot? Se borra $BOT_DIR y el servicio ghost-bot (s/N): " R
+    read -r -p "¿Desinstalar el bot? Se borra $BOT_DIR y el servicio ghost-bot; la clave de backup se conserva (s/N): " R
     [[ "$R" =~ ^[sSyY]$ ]] || { INFO "Cancelado."; PAUSA; return; }
     bot_telegram_desinstalar_silencioso
-    ficha_ok "🗑️ BOT DESINSTALADO" "Servicio" "eliminado" "Archivos" "$BOT_DIR borrado" "Log" "borrado"
+    ficha_ok "🗑️ BOT DESINSTALADO" "Servicio" "eliminado" "Archivos" "$BOT_DIR borrado" "Log" "borrado" "Clave de backup" "conservada en $BOT_KEY_COPIA"
+    INFO "Al reinstalar el bot se recupera esa clave. Guardala tambien FUERA del servidor."
     PAUSA
 }
 
@@ -8856,7 +8944,8 @@ desinstalar_ghost(){
         read -r -p "  ¿ELIMINAR tambien estos usuarios y sus carpetas /home? (s/N): " R
         [[ "$R" =~ ^[sSyY]$ ]] && DO_USERS=1
     fi
-    if compgen -G "/root/backups/ghost-panel-v*.sh" >/dev/null || compgen -G "/root/backups/backup-*.tar.gz" >/dev/null; then
+    if compgen -G "/root/backups/ghost-panel-v*.sh" >/dev/null || compgen -G "/root/backups/backup-*.tar.gz" >/dev/null || [[ -f "$BOT_KEY_COPIA" ]]; then
+        [[ -f "$BOT_KEY_COPIA" ]] && echo -e "  ${AMARILLO}Ojo:${NC} aqui tambien esta la clave de los backups cifrados del bot; sin ella no se abren los de Telegram."
         read -r -p "  ¿Borrar tambien los respaldos en /root/backups? (s/N): " R
         [[ "$R" =~ ^[sSyY]$ ]] && DO_BK=1
     fi
@@ -8921,7 +9010,7 @@ desinstalar_ghost(){
         [[ -f "$L" ]] && sed -i '/VPS-JB-AUTOMENU-INICIO/,/VPS-JB-AUTOMENU-FIN/d' "$L"
     done
     if (( DO_BK )); then
-        rm -f /root/backups/ghost-panel-v*.sh /root/backups/backup-*.tar.gz
+        rm -f /root/backups/ghost-panel-v*.sh /root/backups/backup-*.tar.gz "$BOT_KEY_COPIA"
         rmdir /root/backups 2>/dev/null
         OK "Respaldos borrados."
     fi
