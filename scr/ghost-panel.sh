@@ -3,188 +3,15 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 3.12.3
-#  Cambios 3.12.3 (cuentas del sistema fuera de la lista de usuarios):
-#    - El panel y el bot trataban como "usuarios" a cuentas ajenas (opc, snapd-range-524288-root...): salian en
-#      listas y conteos, y se podian bloquear o ELIMINAR por error (opc suele ser tu acceso SSH a la VPS).
-#      Ahora quedan protegidas: nombres de nube (opc, oracle, azureuser...), uid fuera de 1000-60000, cuentas
-#      de snapd/systemd y cualquier cuenta con sudo/wheel/admin. Vale para panel, bot, cron de tráfico,
-#      cron diario de vencidos y desinstalador.
-#    - Bot: la pantalla «Confirmar creación» usa el mismo bloque alineado que el resto de fichas.
-#  Cambios 3.12.2 (Bot de Telegram: seguridad y diseño):
-#    - El backup que manda el bot por Telegram va CIFRADO (AES-256 + PBKDF2) con una clave que NUNCA
-#      viaja por Telegram: se ve en el panel (Bot Telegram → Ver token y admin). Sin openssl no se envía.
-#    - El bot YA NO guarda contraseñas en texto plano. Si existía claves.json (versiones 3.12.0/3.12.1)
-#      se sobrescribe y se borra al arrancar. «Enviar datos» ofrece generar una clave nueva.
-#    - Fichas del bot rediseñadas: bloque alineado «Etiqueta  valor» (crear usuario, test SSH, clave,
-#      renovar, ficha de usuario, límites, enviar datos). Un solo bloque que se copia de un toque.
-#  Cambios 3.12.1 (notificaciones de Telegram unificadas con el Bot instalado):
-#    - Tráfico → Notificaciones → Telegram ya NO pide token/chat si tienes el Bot instalado (opción 9):
-#      detecta el bot, muestra su chat y lo usa solo. Sigue pudiendo enviar ADEMÁS a otro bot/chat.
-#    - FIX: el aviso de CUOTA AGOTADA al bot nunca salía cuando el corte lo hacía el cron (auto-corte):
-#      el script generado del cron no incluía bot_notificar. Ahora notif_enviar manda al Telegram manual
-#      y/o al Bot instalado (sin duplicar si son el mismo destino) y el cron lleva todo lo necesario.
-#    - Probar envío dice a qué canales salió; si no hay ninguno configurado, lo avisa.
-#    - Instalar el Bot reutiliza el token/chat de Telegram si ya los habías puesto en Notificaciones.
-#  Cambios 3.12.0 (Bot de Telegram: casi todo con botones):
-#    - Menu principal con barras de RAM, CPU y disco (+ uptime) y boton Actualizar.
-#    - Ficha por usuario (se abre al tocarlo en la lista): Renovar, Bloquear/Desbloquear, Clave,
-#      Limites, Enviar datos, Eliminar (con confirmacion) y Desconectar. Lista paginada + buscador.
-#    - Conectados ahora: quien esta online, sesiones usadas/permitidas y boton para desconectarlo.
-#    - Limites desde el bot: conexiones y GB, desbloquear por cuota y resetear el contador (SSH + Xray).
-#    - Test SSH de 1 dia con un toque y Enviar datos (usuario, clave, IP, puerto y CheckUser).
-#    - Alertas automaticas cada 5 min DENTRO del bot (sin procesos nuevos): resumen diario a la hora
-#      elegida, aviso a 3 dias de vencer y aviso si RAM/CPU/disco pasan del umbral (85% por defecto).
-#    - Servidor: reiniciar Xray/SSH/limiter, ver puertos, ver logs, backup enviado como archivo
-#      (solo a un chat privado) y reinicio de la VPS con doble confirmacion + aviso al volver.
-#    - El panel actualiza solo el bot ya instalado al abrir (bot_autoactualizar): no hace falta reinstalar.
-#  Cambios 3.11.6 (rendimiento en VPS de 1 vCPU / 1 GB):
-#    - FIX load alto: PROMPT/PAUSA ahora SALEN si la terminal ya no existe (EOF) o tras
-#      IDLE_TIMEOUT s sin tocar nada (por defecto 1200; 0 = nunca). Antes un panel huerfano
-#      repetia el bucle del menu (redibujar cabecera + sleep 1) sin fin y se acumulaban.
-#    - Instancia unica: un solo panel a la vez (pidfile + flock + starttime). Huerfanos (sin
-#      terminal) se cierran solos; si hay otro con terminal viva se ofrece cerrarlo.
-#    - Auto-menu mas seguro: no abre el panel sin terminal ni dentro de shells hijos.
-#    - Cabecera mas barata: online_total/sesiones_por_usuario con UNA pasada de ps (antes ps+ss
-#      por usuario); linea de servicios y SO en cache.
-#    - Limiter v2: una lectura de procesos por ciclo, flock, Restart=on-failure, Nice=10 y
-#      intervalo configurable (LIMITER_INTERVALO, por defecto 30 s, minimo 5).
-#    - Cron de trafico con nice/ionice; frecuencia por defecto 5 min (1/5/10 a eleccion).
-#  Cambios 3.11.5:
-#    - FIX activacion de SSL por dominio en Oracle Cloud (OCI): el firewall
-#      interno de las imagenes de Oracle (iptables con REJECT final) bloquea
-#      80/443 aunque UFW este inactivo y por eso Let's Encrypt nunca validaba.
-#      Ahora el panel detecta y abre automaticamente 80/443 en iptables y
-#      guarda las reglas (netfilter-persistent/rules.v4).
-#    - Aviso claro si la VPS es Oracle Cloud: recuerda abrir TCP 80 y 443 en
-#      la LISTA DE SEGURIDAD del VCN (consola OCI), unico paso que no se puede
-#      hacer desde la VPS. Tambien se muestra en el aviso de dominio.
-#    - Diagnostico automatico si certbot falla: distingue timeout (puerto 80
-#      inalcanzable desde internet), connection refused y problemas de DNS,
-#      y apunta a la causa exacta en lugar de un fallo generico.
-#    - El texto de configuracion de dominio ya no asume Cloudflare (sirve para
-#      DigitalPlat/dpdns.org y cualquier panel de DNS).
-#  Cambios 3.11.4:
-#    - Bot Telegram: al CREAR usuario ahora entrega ademas un bloque unico
-#      "TOCA EL BLOQUE PARA COPIAR TODO JUNTO" (pre monospace): usuario,
-#      contrasena, IP, puerto, vencimiento, conexiones y trafico. Un toque
-#      copia el bloque entero para pegarlo y enviarselo al cliente.
-#    - Bot Telegram: la opcion CLAVE tambien muestra el bloque copiable
-#      (usuario + contrasena nueva + IP + puerto + vencimiento).
-#  Cambios 3.11.3:
-#    - Diagnostico (Sistema/Recursos -> [2]): si la RAM pasa del 85% ahora
-#      muestra los 5 procesos que mas memoria usan (agrupados por nombre y en
-#      MB), el detalle de free -h y avisa si no hay swap (recomienda ZRAM).
-#      Sirve para descartar mineros: un nombre desconocido comiendo RAM delata.
-#      Auditoria SSL: la instalacion SSL (Stunnel y Dominio/Certbot) solo usa
-#      paquetes de los repos oficiales de Ubuntu + openssl local; sin virus.
-#  Cambios 3.11.2:
-#    - FIX "BTK: unbound variable" al instalar el bot (al escribir tu ID y dar
-#      ENTER): el flag OKF arrancaba en 0 y el chequeo [[ -z "$OKF" ]] lo
-#      tomaba como completado, asi que NUNCA se pedia el BOT_TOKEN y la
-#      variable quedaba vacia (set -u abortaba al guardar config.env).
-#      Ahora OKF arranca vacio: pide el token, lo valida y recien despues
-#      pide el ADMIN_CHAT_ID. Todas las locales del instalador inicializadas.
-#  Cambios 3.11.1:
-#    - FIX menu: la fila [9] Bot Telegram / [0] Salir queda pegada al resto
-#      (antes habia una linea en blanco que las separaba en celulares).
-#    - FIX instalador del bot en Ubuntu 24.04: el modulo venv se puede importar
-#      aunque falte ensurepip (vive en python3.12-venv) y por eso nunca se
-#      instalaban las librerias. Ahora se intenta crear el venv y, si falla,
-#      se instala python3.XX-venv + python3-venv + python3-pip con reintento
-#      (soporta lock de unattended-upgrades), plan B con get-pip.py y plan C
-#      con el Python del sistema (--break-system-packages).
-#  Cambios 3.11.0:
-#    - NUEVO: Bot de Telegram integrado (menu principal [9] -> BOT DE TELEGRAM):
-#      instalar/configurar, iniciar, detener, reiniciar, estado, ver token,
-#      mensaje de prueba y desinstalar. Servicio systemd 'ghost-bot' en /opt/ghost-bot.
-#      Chat limpio: el bot SIEMPRE edita el mismo mensaje; flujos paso a paso
-#      (crear usuario en 6 pasos, renovar, eliminar, bloquear, clave) con timeout de 5 min.
-#      Validacion de acceso por ADMIN_CHAT_ID, log en /var/log/ghost-bot.log.
-#    - bot_notificar(): notifica al bot al crear/eliminar/bloquear/renovar usuarios,
-#      al cortar por cuota, en el cron de vencidos y en el limiter de conexiones.
-#    - El desinstalador completo del panel tambien quita el bot.
-#  Cambios 3.10.1:
-#    - Resultados en "fichas": UNA linea (─) arriba con el titulo dentro y otra abajo, filas
-#      "Etiqueta   valor" alineadas, SIN bordes laterales ni relleno -> al copiar y pegar sale limpio
-#    - Crear usuario: ficha USUARIO CREADO (usuario, contraseña, IP, puerto, fechas, limites, estado)
-#      y CheckUser en su propia linea (antes todo iba en una sola linea y se partia)
-#    - Renovar / bloquear / eliminar / listar usuarios usan el mismo formato
-#  Cambios 3.10.0:
-#    - Corte completo al superar cuota: bloquea cuenta Linux + elimina cliente de Xray (VLESS/VMess/Trojan)
-#    - Nueva opcion Trafico [7] Desbloquear por cuota: desbloquea + sube GB + re-agrega a Xray + resetea contador del usuario
-#    - Notificaciones Telegram / Discord / WhatsApp (CallMeBot) al auto-cortar por cuota (config en Trafico -> [8])
-#    - Historial de consumo diario por usuario (Trafico -> [9]); se registra en cada ciclo de auto-corte
-#    - Reset de contador individual (Trafico -> [5] ahora pregunta global o por usuario)
-#    - Banner y logs indican claramente "CUOTA AGOTADA - contacta al administrador"
-#  Cambios 3.9.4:
-#    - Al eliminar usuario: se borra la regla iptables del UID (evita heredar consumo al recrear)
-#    - Al crear usuario: se re-crea la regla iptables con contador en cero (UID reutilizado)
-#    - Implementada trafico_reset (antes el menu la llamaba y no existia)
-#    - Reset: iptables -Z VPS-TRAFFIC + opcion de reiniciar Xray para limpiar stats por email
-#  Cambios 3.9.3:
-#    - Banner: la hora SOLO se muestra si se eligio zona horaria (antes mostraba UTC a los clientes);
-#      el panel la pregunta una vez al abrir y se cambia en Banner -> [6] Zona horaria
-#    - Banner: el titulo ya no se ve "GHOSTPANEL" (HTML colapsaba los espacios) -> "G H O S T · P A N E L"
-#  Cambios 3.9.2 (diseño):
-#  Cambios 3.9.2 (diseño):
-#    - Submenus con cabecera compacta (5 lineas); la completa solo en el menu principal
-#    - Titulo unico "Inicio › SECCION" y submenus pintados con el color de su seccion
-#    - Licencia sin vencimiento -> "∞ vitalicia"; tildes en menus; Desinstalar pasa a Herramientas [8]
-#    - Banner de clientes compacto (13 filas), barras en la misma fila, % con decimal, hora en la zona
-#      horaria elegida (Banner -> [6]) y acentos
-#  Cambios 3.9.1 (+ Tráfico enlazado en Usuarios SSH [12]):
-#  Cambios 3.9.1+ (parche):
-#    - Usuarios SSH -> [12] Trafico: enlaza el submenu TRAFICO POR USUARIO (antes existia pero no estaba en ningun menu)
-#  Cambios 3.9.1:
-#    - Banner de clientes rediseñado: lineas proporcionadas, barras en su propia fila, ESTADO de cuenta,
-#      PLAN (GB + dias), alerta automatica (vence / consumo alto / cuota agotada), SOPORTE y hora de actualizacion
-#    - Auto-corte con frecuencia elegible (1/5/10 min; por defecto 1) -> el banner nunca tiene mas de 1 min de retraso
-#    - Ver consumo: total SSH+Xray, % y barra, ordenado; Listar usuarios con columna de trafico; alerta en cabecera
-#    - Banner -> [5] Soporte (contacto que ven los clientes; por defecto @JorgeBarrios)
-#  Cambios 3.9.0:#  Cambios 3.9.0:
-#    - Seguridad -> [8] Dominio y SSL: dominio + subdominios (verifica DNS, sin API) y certificado
-#      Let's Encrypt (certbot HTTP-01) desplegado a Stunnel, Hysteria2, Trojan, Webmin y AdGuard Home
-#    - Renovacion automatica con hooks (libera/restaura el puerto 80) y desinstalador integrado
-#  Cambios 3.8.0:#  Cambios 3.8.0:
-#    - Cortar excedidos mide SSH + Xray (misma cifra que el banner) via trafico_excedido
-#    - Auto-corte cada 5 min (cron opcional, Trafico -> [6]): bloquea cuotas excedidas y refresca banners
-#    - Cabecera: trafico "--" si los contadores no estan activos (antes mostraba "0 MB")
-#  Cambios 3.7.9:#  Cambios 3.7.9:
-#    - Logo fantasma ASCII con degradado + intro de ~1 s (cualquier tecla la salta)
-#    - Cabecera compacta (~11 lineas) con datos del negocio: usuarios, online, por vencer, bloqueados, trafico
-#    - Colores por seccion, marcos redondeados, servicios 🟢/🔴/⚫, licencia con semaforo
-#    - Temas de color (Herramientas -> Tema) guardados en /etc/ghost-panel.conf (THEME=)
-#    - Banner de clientes con barras de dias y de trafico; prompt 👻 ❯
-#  Cambios 3.7.8:#  Cambios 3.7.8:
-#    - Iconos (emoji) en menus y mensajes; fantasma en cabecera, licencia, salida y banners
-#    - Marcos de la UI: ancho real de emojis (2 columnas) -> bordes alineados en cualquier terminal
-#    - Nueva opcion [9] Desinstalar Ghost Panel (servicios, archivos, config sshd y el propio script)
-#  Cambios 3.7.7:
-#    - crear_usuario: pide limite de trafico en GB (0/vacio = sin limite) -> /etc/vps-trafico/USUARIO
-#    - Banner por usuario: + limite de conexiones, trafico usado, limite GB y restante
-#    - AdGuard Home movido del menu principal a Protocolos [11] (+ opcion Reparar)
-#  Cambios 3.7.6:
-#    - AdGuard: ExecStart sin -s run/--pidfile (fixaba status=64 USAGE)
-#  Cambios 3.7.5:
-#    - AdBlock solo en menu principal [9] (quitado duplicado de Protocolos [14])
-#  Cambios 3.7.4:
-#    - AdGuard: ACTIVO solo si systemctl is-active (ignora proceso del install.sh)
-#    - AdGuard: unit oficial -s run, Restart=always, diagnostico completo si falla
-#  Cambios 3.7.3:
-#    - AdGuard: unit systemd propio + parar proceso del install.sh (ya no queda DETENIDO)
-#    - AdGuard: config minima estable; verifica systemctl is-active real
-#  Cambios 3.7.2:
-#    - REPO_RAW: fuente de auto-update apunta a pitubarrios/ghost-panel (URL 404 anterior)
-#  Cambios 3.7.1:
-#    - AdGuard: bind 10.66.0.1 solo si la IP esta asignada (evita crash al arrancar)
-#    - AdGuard: auto-reparacion en Estado (libera :53, reescribe yaml, re-registra unit)
-#    - AdGuard: al activar WireGuard, re-bind a 10.66.0.1 y reinicia el servicio
-#    - AdGuard: panel web solo en 127.0.0.1:3000; preserva users del wizard
-#  Cambios 3.7.0:
-#    - Puerto ocupado: avisa y permite elegir otro (todos los protocolos)
-#    - AdGuard Home: flags oficiales del install.sh + fallback manual
-#  (sshd_config seguro, ghost_bootstrap, usuarios protegidos)
+#  Version: 3.12.4
+#  Cambios 3.12.4 (totales y pantallas):
+#    - Total de tráfico (bot y cabecera del panel): suma SOLO a los usuarios del panel. Antes incluía
+#      contadores de cuentas ajenas (p. ej. tu propio tráfico SSH como admin) y no coincidía con las filas.
+#    - Bot: tabla de tráfico con la cuota alineada (sin el hueco «/1   GB»).
+#    - Bot → Servidor: el botón de Xray solo aparece si Xray está instalado; se quitó la línea de RAM
+#      repetida; reiniciar servicios usa ♻️ y reiniciar la VPS ⚠️ (ya no se confunden con «Actualizar»).
+#    - Bot: la lista y el resumen diario muestran «hoy» / «mañana» en lugar de «0d» / «1d».
+#    - El historial de versiones anteriores pasó a CHANGELOG.md: el script solo lleva la última.
 # ============================================================
 
 set -u
@@ -223,7 +50,7 @@ tema_guardar(){
     echo "THEME=$1" >> /etc/ghost-panel.conf
 }
 tema_cargar
-GHOST_VER='3.12.3'
+GHOST_VER='3.12.4'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -243,7 +70,7 @@ fi
 # Pone aca la URL de tu Worker de Cloudflare.
 # Vacio = el panel se niega a arrancar (modo produccion).
 # Para desarrollo local sin Worker: export GHOST_DEV=1 antes de ejecutar.
-LICENSE_URL='https://vps-licencias.jorgebarriosmpya.workers.dev'
+LICENSE_URL='https://vps-licencias.jorgebarriosmpya.workers.dev/'
 GRACE_SECS=259200                      # 72h de gracia si el servidor no responde
 LICENSE_CACHE='/etc/vps-license.cache'
 # REPO_RAW: cuando tengas tu GitHub, cambia la URL de abajo o usa
@@ -1444,7 +1271,8 @@ ghost_stats_refrescar(){
         END { print n+0, v+0, h+0, p+0, b+0 }' /etc/passwd /etc/shadow 2>/dev/null)
     read -r GS_USERS GS_VENC GS_HOY GS_PRONTO GS_BLOQ <<< "${out:-0 0 0 0 0}"
     trafico_cache_cargar
-    for v in "${TRAF_CACHE[@]:-}"; do t=$(( t + ${v:-0} )); done
+    local _pu
+    while read -r _pu; do t=$(( t + ${TRAF_CACHE[$_pu]:-0} )); done < <(usuarios_panel)   # solo usuarios del panel
     if (( ${#TRAF_CACHE[@]} == 0 )); then GS_TRAF="--"; else GS_TRAF=$(fmt_bytes "$t"); fi   # "--" = contadores sin activar
     # Usuarios al 80% o mas de su cuota (alerta de la cabecera)
     GS_ALTO=0
@@ -3799,7 +3627,7 @@ bot_refresh_helper(){
     return 0
 }
 
-BOT_REV='3.12.3'   # revision del bot.py embebido (debe coincidir con BOT_REV dentro de bot.py)
+BOT_REV='3.12.4'   # revision del bot.py embebido (debe coincidir con BOT_REV dentro de bot.py)
 
 bot_autoactualizar(){
     # Si el bot ya esta instalado con un bot.py de otra revision, lo regenera solo (sin pedir token ni
@@ -3868,7 +3696,7 @@ try:
 except ImportError:  # Python < 3.9
     ZoneInfo = None
 
-BOT_REV = "3.12.3"   # el panel compara esto para actualizar el bot solo
+BOT_REV = "3.12.4"   # el panel compara esto para actualizar el bot solo
 
 if not hasattr(asyncio, "to_thread"):          # Python 3.8 (Ubuntu 20.04)
     async def _to_thread(fn, *a, **k):
@@ -4194,6 +4022,10 @@ def dias_txt(d):
         return "vence hoy"
     return "%d día%s" % (d, "" if d == 1 else "s")
 
+def dias_corto(d):
+    """Texto corto para botones y avisos: hoy / mañana / 5d."""
+    return "hoy" if d == 0 else ("mañana" if d == 1 else "%dd" % d)
+
 def sesiones_map():
     """usuario -> nº de sesiones sshd/dropbear. UNA sola pasada de ps."""
     m = {}
@@ -4433,8 +4265,10 @@ def resumen_negocio(mapa=None):
             on += 1
     if mapa is None:
         mapa = trafico_mapa()
+    # el total suma SOLO a los usuarios del panel (no a cuentas ajenas con contador, p. ej. tu SSH de admin)
+    total = sum(mapa[u] for u in us if u in mapa) if mapa else 0
     return {"n": len(us), "on": on, "ven": ven, "bloq": bloq, "mapa": mapa,
-            "traf": "--" if not mapa else fmt_bytes(sum(mapa.values()))}
+            "traf": "--" if not mapa else fmt_bytes(total)}
 
 def info_usuario(u, shd=None, ses=None, mapa=None):
     shd = shadow_map() if shd is None else shd
@@ -4857,7 +4691,7 @@ def scr_lista(page=0, filtro=""):
     btns = []
     for u in us[page * PAGE:(page + 1) * PAGE]:
         i = info_usuario(u, shd, ses, mapa)
-        extra = (" · %dd" % i["dias"]) if (i["dias"] is not None and i["dias"] >= 0) else ""
+        extra = (" · " + dias_corto(i["dias"])) if (i["dias"] is not None and i["dias"] >= 0) else ""
         btns.append(("%s %s%s" % (i["emoji"], u, extra), "u|" + u))
     rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
     sufijo = ("|" + filtro[:30]) if filtro else ""
@@ -4937,11 +4771,12 @@ def scr_trafico():
         g = lim_gb(u)
         if g > 0:
             pct = min(100, used * 100 // (g * GB))
-            filas.append("%-14s %9s /%-4dGB %3d%% %s" % (u, fmt_bytes(used), g, pct, barra10(pct, 8)))
+            filas.append("%-14s %9s / %3d GB %3d%% %s" % (u, fmt_bytes(used), g, pct, barra10(pct, 8)))
         else:
-            filas.append("%-14s %9s   sin límite" % (u, fmt_bytes(used)))
+            filas.append("%-14s %9s / sin límite" % (u, fmt_bytes(used)))
+    total = sum(mapa[u] for u in us)     # solo usuarios del panel: coincide con la suma de las filas
     txt = ("📈 <b>TRÁFICO POR USUARIO (SSH + Xray)</b>\n<pre>%s</pre>\n"
-           "Total: <b>%s</b>" % (esc("\n".join(filas)), esc(fmt_bytes(sum(mapa.values())))))
+           "Total: <b>%s</b>" % (esc("\n".join(filas)), esc(fmt_bytes(total))))
     btns = [("👤 " + u, "u|" + u) for u in us[:6]]
     rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
     rows.append([("🔄 Actualizar", "tr"), ("🔙 Menú", "menu")])
@@ -5028,18 +4863,20 @@ def estado_servicios():
     return " · ".join(partes)
 
 def scr_servidor(pre=""):
-    ru, rt, rp = mem_info()
     txt = (pre + "🛠 <b>SERVIDOR</b>\n" + LINEA + "\n"
            "🌍 IP <code>%s</code> · 🔌 SSH <code>%s</code>\n"
-           "%s\n"
-           "💾 RAM %d/%d MB\n\n"
-           % (esc(ip_publica()), esc(ssh_puerto()), estado_servicios(), ru, rt)
+           "%s\n\n"
+           % (esc(ip_publica()), esc(ssh_puerto()), estado_servicios())
            + bloque_salud())
+    reinicios = []
+    if os.path.isfile(XRAY_BIN):                         # sin Xray instalado, el botón no tiene sentido
+        reinicios.append(("♻️ Xray", "srv|xray"))
+    reinicios += [("♻️ SSH", "srv|ssh"), ("♻️ Limiter", "srv|lim")]
     rows = [
-        [("🔄 Xray", "srv|xray"), ("🔄 SSH", "srv|ssh"), ("🔄 Limiter", "srv|lim")],
+        reinicios,
         [("🔌 Puertos", "srv|ports"), ("📜 Logs", "srv|logs")],
         [("💾 Backup", "srv|bk"), ("📊 Detalle", "srv|st")],
-        [("♻️ Reiniciar VPS", "rb1")],
+        [("⚠️ Reiniciar VPS", "rb1")],
         [("🔄 Actualizar", "srv"), ("🔙 Menú", "menu")],
     ]
     return txt, rows
@@ -5248,7 +5085,7 @@ def texto_resumen_diario():
     for u in panel_users():
         d = dias_desde_exp(shd.get(u, (False, None))[1])
         if d is not None and 0 <= d <= 3:
-            por_vencer.append("%s %dd" % (u, d))
+            por_vencer.append("%s %s" % (u, dias_corto(d)))
     pu = set(panel_users())
     top = sorted(((u, b) for u, b in s["mapa"].items() if u in pu),
                  key=lambda x: x[1], reverse=True)[:3]
