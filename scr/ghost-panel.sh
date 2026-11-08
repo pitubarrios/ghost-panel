@@ -3,7 +3,14 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 3.12.2
+#  Version: 3.12.3
+#  Cambios 3.12.3 (cuentas del sistema fuera de la lista de usuarios):
+#    - El panel y el bot trataban como "usuarios" a cuentas ajenas (opc, snapd-range-524288-root...): salian en
+#      listas y conteos, y se podian bloquear o ELIMINAR por error (opc suele ser tu acceso SSH a la VPS).
+#      Ahora quedan protegidas: nombres de nube (opc, oracle, azureuser...), uid fuera de 1000-60000, cuentas
+#      de snapd/systemd y cualquier cuenta con sudo/wheel/admin. Vale para panel, bot, cron de tráfico,
+#      cron diario de vencidos y desinstalador.
+#    - Bot: la pantalla «Confirmar creación» usa el mismo bloque alineado que el resto de fichas.
 #  Cambios 3.12.2 (Bot de Telegram: seguridad y diseño):
 #    - El backup que manda el bot por Telegram va CIFRADO (AES-256 + PBKDF2) con una clave que NUNCA
 #      viaja por Telegram: se ve en el panel (Bot Telegram → Ver token y admin). Sin openssl no se envía.
@@ -216,7 +223,7 @@ tema_guardar(){
     echo "THEME=$1" >> /etc/ghost-panel.conf
 }
 tema_cargar
-GHOST_VER='3.12.2'
+GHOST_VER='3.12.3'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -573,7 +580,7 @@ LOG_PANEL='/var/log/ghost-panel.log'
 LINKS_FILE='/root/vps-links.txt'
 IP_CACHE_FILE='/run/vps-ip.cache'   # /run es de root (en /tmp un usuario SSH podia plantar un symlink)
 USUARIOS_DIR='/etc/vps-users'
-PROTEGIDOS_NOMBRES='root daemon bin sys sync games man lp mail news uucp proxy www-data backup list irc gnats nobody systemd-network systemd-resolve systemd-timesync syslog messagebus _apt uuidd tcpdump sshd landscape pollinate ubuntu debian admin ec2-user cloud-user vpsmgr ghostpanel dnstt'
+PROTEGIDOS_NOMBRES='root daemon bin sys sync games man lp mail news uucp proxy www-data backup list irc gnats nobody systemd-network systemd-resolve systemd-timesync syslog messagebus _apt uuidd tcpdump sshd landscape pollinate ubuntu debian admin ec2-user cloud-user vpsmgr ghostpanel dnstt opc oracle azureuser fedora centos rocky almalinux vagrant pi'
 
 vps_arch(){
     case "$(uname -m)" in
@@ -617,12 +624,25 @@ guardar_enlace(){
 }
 
 usuario_protegido(){
+    # Protegido = NO es un usuario del panel: nombres del sistema/nube, uid fuera de 1000-60000 (snapd-range-*...),
+    # cuentas de snapd/systemd y cualquier cuenta de administracion (sudo/wheel/admin: p. ej. opc, tu acceso SSH).
     local U="${1:-}" UIDN
     [[ -z "$U" ]] && return 0
     echo " $PROTEGIDOS_NOMBRES " | grep -q " $U " && return 0
+    [[ "$U" == snapd-* || "$U" == systemd-* ]] && return 0
     UIDN=$(id -u "$U" 2>/dev/null || echo 0)
-    [[ "$UIDN" -lt 1000 ]] && return 0
+    [[ "$UIDN" -lt 1000 || "$UIDN" -gt 60000 ]] && return 0
+    id -nG "$U" 2>/dev/null | tr ' ' '\n' | grep -qxE 'sudo|wheel|admin' && return 0
     return 1
+}
+
+usuarios_panel(){
+    # Usuarios REALES del panel, uno por linea (mismo criterio que usuario_protegido, con un solo awk).
+    local ADM
+    ADM=$(getent group sudo wheel admin 2>/dev/null | awk -F: '{print $4}' | tr ',' ' ')
+    awk -F: -v prot=" ${PROTEGIDOS_NOMBRES:-} " -v adm=" $ADM " '
+        $3>=1000 && $3<=60000 && $1!="nobody" && $1 !~ /^(snapd|systemd)-/ \
+        && index(prot," "$1" ")==0 && index(adm," "$1" ")==0 { print $1 }' /etc/passwd
 }
 
 pedir_usuario_ok(){
@@ -853,12 +873,15 @@ purgar_usuario(){
 cron_vencidos_instalar(){
     cat > /usr/local/bin/vps-cron-diario.sh <<'CRONEOF'
 #!/usr/bin/env bash
+# GHOST-CRON-V2
 LOG=/var/log/ghost-panel.log
 HOY=$(date +%Y-%m-%d)
-PROTEGIDOS='root daemon bin sys sync games man lp mail news uucp proxy www-data backup list irc gnats nobody systemd-network systemd-resolve systemd-timesync syslog messagebus _apt uuidd tcpdump sshd landscape pollinate ubuntu debian admin ec2-user cloud-user vpsmgr ghostpanel dnstt'
+PROTEGIDOS='root daemon bin sys sync games man lp mail news uucp proxy www-data backup list irc gnats nobody systemd-network systemd-resolve systemd-timesync syslog messagebus _apt uuidd tcpdump sshd landscape pollinate ubuntu debian admin ec2-user cloud-user vpsmgr ghostpanel dnstt opc oracle azureuser fedora centos rocky almalinux vagrant pi'
 log(){ echo "$(date '+%F %T') [CRON] $*" >> "$LOG" 2>/dev/null; }
-awk -F: '$3>=1000 && $1!="nobody"{print $1}' /etc/passwd | while read -r U; do
+awk -F: '$3>=1000 && $3<=60000 && $1!="nobody"{print $1}' /etc/passwd | while read -r U; do
     echo " $PROTEGIDOS " | grep -q " $U " && continue
+    [[ "$U" == snapd-* || "$U" == systemd-* ]] && continue
+    id -nG "$U" 2>/dev/null | tr ' ' '\n' | grep -qxE 'sudo|wheel|admin' && continue      # cuentas de administracion
     EXP=$(LC_ALL=C LANG=C chage -l "$U" 2>/dev/null | awk -F': ' '/Account expires/{gsub(/^ +/,"",$2); print $2}')
     [[ -z "$EXP" || "$EXP" == "never" ]] && continue
     N=$(date -d "$EXP" +%Y-%m-%d 2>/dev/null) || continue
@@ -1092,7 +1115,7 @@ ghost_bootstrap(){
     chmod 700 "$USUARIOS_DIR" 2>/dev/null
     touch "$LOG_PANEL" 2>/dev/null
     chmod 640 "$LOG_PANEL" 2>/dev/null || true
-    [[ -f /etc/cron.d/ghost-panel-vencidos ]] || cron_vencidos_instalar
+    [[ -f /etc/cron.d/ghost-panel-vencidos ]] && grep -q 'GHOST-CRON-V2' /usr/local/bin/vps-cron-diario.sh 2>/dev/null || cron_vencidos_instalar
     xray_config_perms
     # Asegurar autenticacion por contraseña (muchas imagenes cloud la dejan en "no")
     sshd_asegurar_password_auth
@@ -1413,8 +1436,9 @@ ghost_stats_refrescar(){
     (( now - GS_TS < 30 )) && return 0
     GS_TS=$now
     # usuarios del panel: uid>=1000 y no protegidos. shadow: campo 2 "!..." = bloqueado; campo 8 = vencimiento (dias)
-    out=$(awk -F: -v today=$(( now / 86400 )) -v prot=" ${PROTEGIDOS_NOMBRES:-} " '
-        NR==FNR { if ($3>=1000 && $1!="nobody" && index(prot," "$1" ")==0) u[$1]=1; next }
+    local _adm; _adm=$(getent group sudo wheel admin 2>/dev/null | awk -F: '{print $4}' | tr ',' ' ')
+    out=$(awk -F: -v today=$(( now / 86400 )) -v prot=" ${PROTEGIDOS_NOMBRES:-} " -v adm=" $_adm " '
+        NR==FNR { if ($3>=1000 && $3<=60000 && $1!="nobody" && $1 !~ /^(snapd|systemd)-/ && index(prot," "$1" ")==0 && index(adm," "$1" ")==0) u[$1]=1; next }
         ($1 in u) { n++; if ($2 ~ /^!/) b++
                     if ($8 != "") { d=$8-today; if (d<0) v++; else if (d==0) h++; else if (d<=3) p++ } }
         END { print n+0, v+0, h+0, p+0, b+0 }' /etc/passwd /etc/shadow 2>/dev/null)
@@ -1754,7 +1778,7 @@ listar_usuarios(){
             if (( P >= 90 )); then COL=$ROJO; elif (( P >= 70 )); then COL=$AMARILLO; fi
         else TXT="$(fmt_corto "$USED")"; fi
         printf "%-14s %-11s %-4s %-4s %-3s %b%-9s%b %b\n" "$U" "$EXPISO" "$D" "$LIM" "$ON" "$COL" "$TXT" "$NC" "$EST"
-    done < <(awk -F: '$3>=1000 && $1!="nobody"{print $1}' /etc/passwd)
+    done < <(usuarios_panel)
     TRAF_BATCH=0
     ficha_cerrar
     PAUSA
@@ -2329,7 +2353,7 @@ banner_todos_actualizar(){
     while read -r U; do
         usuario_protegido "$U" && continue
         banner_usuario_actualizar "$U"
-    done < <(awk -F: '$3>=1000 && $1!="nobody"{print $1}' /etc/passwd)
+    done < <(usuarios_panel)
     TRAF_BATCH=0
     banner_rebuild_match
 }
@@ -2352,7 +2376,7 @@ banner_con_checkuser(){
     IP=$(ip_publica)
     ficha_ok "📡 CHECKUSER REINICIADO" "Estado" "corriendo" "Puerto" "${P:-8080}/tcp" "Campos" "expiration / days_left / warning / limit / online"
     printf '%bURL CheckUser:%b\n%s\n' "$GRIS" "$NC" "http://$IP:${P:-8080}/checkuser.php?user=USUARIO&token=$T"
-    U=$(awk -F: '$3>=1000 && $1!="nobody"{print $1; exit}' /etc/passwd)
+    U=$(usuarios_panel | head -n1)
     if [[ -n "$U" ]]; then
         printf '%bPrueba con %s:%b\n' "$GRIS" "$U" "$NC"
         curl -s --max-time 4 "http://127.0.0.1:${P:-8080}/checkuser.php?user=$U&token=$T"; echo
@@ -2818,7 +2842,7 @@ eliminar_vencidos(){
                 BORRADOS=$((BORRADOS+1))
             fi
         fi
-    done < <(awk -F: '$3>=1000 && $1!="nobody"{print $1}' /etc/passwd)
+    done < <(usuarios_panel)
     if [[ $BORRADOS -eq 0 ]]; then ficha_ok "🧹 USUARIOS VENCIDOS" "Eliminados" "0 (no hay vencidos)"
     else ficha_ok "🧹 USUARIOS VENCIDOS" "Eliminados" "$BORRADOS"; fi
     PAUSA
@@ -3532,7 +3556,7 @@ trafico_activar(){
     iptables -N VPS-TRAFFIC 2>/dev/null
     iptables -F VPS-TRAFFIC 2>/dev/null
     local N=0 U
-    for U in $(awk -F: '$3>=1000 && $1!="nobody"{print $1}' /etc/passwd); do
+    for U in $(usuarios_panel); do
         iptables -A VPS-TRAFFIC -m owner --uid-owner "$U" -j RETURN 2>/dev/null && N=$((N+1))
     done
     iptables -C OUTPUT -j VPS-TRAFFIC 2>/dev/null || iptables -A OUTPUT -j VPS-TRAFFIC 2>/dev/null
@@ -3569,7 +3593,7 @@ trafico_ver(){
         G=$(tr -dc '0-9' 2>/dev/null < "/etc/vps-trafico/$U"); G=${G:0:6}
         FILAS+=("$USED|$U|${G:-0}")
         TOT=$(( TOT + USED ))
-    done < <(awk -F: '$3>=1000 && $1!="nobody"{print $1}' /etc/passwd)
+    done < <(usuarios_panel)
     TRAF_BATCH=0
     printf "%-14s %-9s %-8s %s\n" "USUARIO" "USADO" "CUOTA" "USO"
     if (( ${#FILAS[@]} )); then
@@ -3775,7 +3799,7 @@ bot_refresh_helper(){
     return 0
 }
 
-BOT_REV='3.12.2'   # revision del bot.py embebido (debe coincidir con BOT_REV dentro de bot.py)
+BOT_REV='3.12.3'   # revision del bot.py embebido (debe coincidir con BOT_REV dentro de bot.py)
 
 bot_autoactualizar(){
     # Si el bot ya esta instalado con un bot.py de otra revision, lo regenera solo (sin pedir token ni
@@ -3844,7 +3868,7 @@ try:
 except ImportError:  # Python < 3.9
     ZoneInfo = None
 
-BOT_REV = "3.12.2"   # el panel compara esto para actualizar el bot solo
+BOT_REV = "3.12.3"   # el panel compara esto para actualizar el bot solo
 
 if not hasattr(asyncio, "to_thread"):          # Python 3.8 (Ubuntu 20.04)
     async def _to_thread(fn, *a, **k):
@@ -3886,7 +3910,9 @@ PROTEGIDOS = {
     "messagebus", "_apt", "uuidd", "tcpdump", "sshd", "landscape", "pollinate",
     "ubuntu", "debian", "admin", "ec2-user", "cloud-user", "vpsmgr",
     "ghostpanel", "dnstt",
+    "opc", "oracle", "azureuser", "fedora", "centos", "rocky", "almalinux", "vagrant", "pi",
 }
+ADMIN_GRUPOS = ("sudo", "wheel", "admin")     # quien pertenece a estos grupos es admin del sistema, no cliente
 NAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
 # Logs que se pueden ver desde Servidor -> Logs
@@ -4061,22 +4087,56 @@ def uid_of(name):
     except KeyError:
         return None
 
+def _uid_rango():
+    """(UID_MIN, UID_MAX) de /etc/login.defs; por defecto 1000-60000 (snapd-range-* usa uids enormes)."""
+    mn, mx = 1000, 60000
+    try:
+        with open("/etc/login.defs", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                p = line.split()
+                if len(p) == 2 and p[1].isdigit():
+                    if p[0] == "UID_MIN":
+                        mn = max(1000, int(p[1]))
+                    elif p[0] == "UID_MAX":
+                        mx = min(60000, int(p[1]))
+    except OSError:
+        pass
+    return mn, mx
+
+UID_MIN, UID_MAX = _uid_rango()
+
+def admins_sistema():
+    """Miembros de sudo/wheel/admin (p. ej. opc, tu acceso SSH): nunca se tratan como usuarios del panel."""
+    s = set()
+    try:
+        with open("/etc/group", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                p = line.rstrip("\n").split(":")
+                if len(p) >= 4 and p[0] in ADMIN_GRUPOS:
+                    s.update(x for x in p[3].split(",") if x)
+    except OSError:
+        pass
+    return s
+
 def user_exists(name):
     uid = uid_of(name)
-    return uid is not None and uid >= 1000
+    return uid is not None and UID_MIN <= uid <= UID_MAX
 
-def is_protegido(name):
-    return name in PROTEGIDOS
+def is_protegido(name, admins=None):
+    if name in PROTEGIDOS or name.startswith(("snapd-", "systemd-")):
+        return True
+    return name in (admins_sistema() if admins is None else admins)
 
 def panel_users():
-    """Usuarios del panel (uid>=1000, no nobody, no protegidos), ordenados. Sin subprocesos."""
+    """Usuarios REALES del panel (uid en rango, no nobody, no protegidos, no admins del sistema), ordenados."""
     out = []
+    adm = admins_sistema()
     try:
         with open("/etc/passwd", encoding="utf-8", errors="replace") as f:
             for line in f:
                 p = line.split(":")
-                if (len(p) >= 3 and p[2].isdigit() and int(p[2]) >= 1000
-                        and p[0] != "nobody" and p[0] not in PROTEGIDOS):
+                if (len(p) >= 3 and p[2].isdigit() and UID_MIN <= int(p[2]) <= UID_MAX
+                        and p[0] != "nobody" and not is_protegido(p[0], adm)):
                     out.append(p[0])
     except OSError:
         pass
@@ -5189,7 +5249,8 @@ def texto_resumen_diario():
         d = dias_desde_exp(shd.get(u, (False, None))[1])
         if d is not None and 0 <= d <= 3:
             por_vencer.append("%s %dd" % (u, d))
-    top = sorted(((u, b) for u, b in s["mapa"].items() if u in shd and u not in PROTEGIDOS),
+    pu = set(panel_users())
+    top = sorted(((u, b) for u, b in s["mapa"].items() if u in pu),
                  key=lambda x: x[1], reverse=True)[:3]
     txt = ("📅 <b>RESUMEN DIARIO</b> · %s\n" % ahora().strftime("%d/%m/%Y") + LINEA + "\n"
            "👥 %d usuarios · 🟢 %d online\n"
@@ -5425,17 +5486,17 @@ def paso_edit_rows():
             [("❌ Cancelar", "cancel")]]
 
 def resumen_crear(d):
-    gb_txt = ("%d GB" % d.get("gb", 0)) if d.get("gb", 0) > 0 else "Sin límite"
+    gb_txt = ("%d GB" % d.get("gb", 0)) if d.get("gb", 0) > 0 else "sin límite"
     cx_txt = str(d.get("maxc", 1)) if d.get("maxc", 1) > 0 else "sin límite"
+    dias = d.get("dias", "?")
+    validez = ("%s día%s" % (dias, "" if dias == 1 else "s")) if isinstance(dias, int) else str(dias)
     return ("📝 <b>CONFIRMAR CREACIÓN</b>\n" + LINEA + "\n"
-            "👤 Usuario: <code>%s</code>\n"
-            "⏳ Días: %s\n"
-            "📶 Conexiones: %s\n"
-            "📦 Tráfico: %s\n"
-            "🔑 Clave: <code>%s</code>\n" % (
-                esc(d.get("usuario", "?")), d.get("dias", "?"), esc(cx_txt), esc(gb_txt),
-                esc(d.get("clave", "?")))
-            + LINEA + "\n¿Confirmás la creación?")
+            + tabla([("Usuario", d.get("usuario", "?")),
+                     ("Contraseña", d.get("clave", "?")),
+                     ("Validez", validez),
+                     ("Conexiones", cx_txt),
+                     ("Tráfico", gb_txt)])
+            + "\n¿Confirmás la creación?")
 
 # ------------------------- ROUTER DE BOTONES -------------------------
 @admin_only
@@ -6510,7 +6571,7 @@ trafico_auto_ciclo(){
     while read -r U; do
         usuario_protegido "$U" && continue
         banner_usuario_actualizar "$U"
-    done < <(awk -F: '$3>=1000 && $1!="nobody"{print $1}' /etc/passwd)
+    done < <(usuarios_panel)
     TRAF_BATCH=0
 }
 
@@ -6529,7 +6590,7 @@ trafico_cron_instalar(){
         echo 'exec 9>/run/ghost-trafico.lock; flock -n 9 || exit 0      # sin ciclos solapados'
         declare -p BANNERS_DIR LOG_PANEL PROTEGIDOS_NOMBRES BOT_DIR
         echo 'declare -A TRAF_CACHE=(); TRAF_BATCH=0'
-        for FN in vps_log usuario_protegido ui_rep fmt_bytes xray_stats_todos trafico_cache_cargar \
+        for FN in vps_log usuario_protegido usuarios_panel ui_rep fmt_bytes xray_stats_todos trafico_cache_cargar \
                   trafico_usuario_bytes trafico_excedido trafico_bloquear_excedidos trafico_marcar_cuota \
                   trafico_esta_por_cuota trafico_notif_corte notif_enviar bot_conf_get tg_destinos trafico_hist_registrar \
                   xray_usuario xray_recargar xray_ensure_api xray_config_perms xray_grupo \
@@ -8949,7 +9010,7 @@ desinstalar_ghost(){
     while read -r U; do
         usuario_protegido "$U" && continue
         USERS+=("$U")
-    done < <(awk -F: '$3>=1000 && $1!="nobody"{print $1}' /etc/passwd)
+    done < <(usuarios_panel)
 
     read -r -p "  ¿Quitar tambien los protocolos instalados (Xray, WS, Hysteria, Stunnel, WireGuard, AdGuard, Webmin...)? (S/n): " R
     [[ "$R" =~ ^[nN]$ ]] && DO_PROTO=0
