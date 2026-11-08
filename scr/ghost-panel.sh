@@ -3,22 +3,17 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 4.0
+#  Version: 4.1
 #  Versionado: desde 4.0 el numero es X.Y -> 4.0, 4.1 ... 4.9 y despues 5.0 (sin tercer numero).
-#  Cambios 4.0 (actualizador, backups y fichas del bot):
-#    - Actualizador: la linea "Nueva" ya no repite la version (salia "v3.12.43.12.4") y deja de preguntar
-#      siempre. Version nueva -> "Actualizar a vX?". Misma version y mismo archivo -> avisa que ya tienes la
-#      ultima y NO pregunta. Version mas vieja, archivo distinto con la misma version o sin version ->
-#      confirmacion explicita con el motivo.
-#    - Backups cifrados del bot: la clave ya no se pierde al desinstalar el bot. Se guarda una copia en
-#      /root/backups/ghost-bot-backup.key (0600) y al reinstalar el bot se recupera, asi los backups viejos
-#      de Telegram siguen abriendose. El panel avisa que hay que guardarla FUERA del servidor.
-#    - Bot: fichas con "Etiqueta: valor" y cada valor tocable (copia ese dato solo); ya no dependen de que tu
-#      Telegram dibuje el bloque con letra monoespaciada. USUARIO CREADO y CLAVE ACTUALIZADA traen ademas un
-#      bloque compacto "Copiar todo para el cliente".
-#    - Bot: cambiar la clave de un cliente (Generar / Nueva clave y enviar) pide confirmacion.
-#    - CheckUser: nueva opcion [6] Rotar token (el token es el mismo para todos los enlaces de clientes).
-#    - El historial de versiones anteriores esta en CHANGELOG.md: el script solo lleva la ultima.
+#  Cambios 4.1 (claves en el chat, clave de backup y changelog):
+#    - Bot: los mensajes con una CONTRASEÑA (usuario creado, test SSH, clave nueva) llevan el boton
+#      «🗑 Borrar este mensaje» y se borran solos a los 5 min (AUTOBORRAR_MIN en /opt/ghost-bot/config.env;
+#      0 = nunca). El plazo se guarda en disco: si el bot se reinicia, igual se borran. Si el mensaje
+#      cambia de pantalla antes, ya no hay clave a la vista y no se borra.
+#    - La copia de la clave de backup salio de /root/backups (si copiabas esa carpeta, la clave viajaba
+#      con los backups) y ahora vive en /root/.ghost-panel/ (0700). Se migra sola al abrir el panel.
+#      Desinstalar el panel pregunta por separado si borrar tambien esa clave (por defecto se conserva).
+#    - CHANGELOG.md: historial completo (el script solo lleva la ultima version).
 # ============================================================
 
 set -u
@@ -57,7 +52,7 @@ tema_guardar(){
     echo "THEME=$1" >> /etc/ghost-panel.conf
 }
 tema_cargar
-GHOST_VER='4.0'
+GHOST_VER='4.1'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -77,7 +72,7 @@ fi
 # Pone aca la URL de tu Worker de Cloudflare.
 # Vacio = el panel se niega a arrancar (modo produccion).
 # Para desarrollo local sin Worker: export GHOST_DEV=1 antes de ejecutar.
-LICENSE_URL='https://vps-licencias.jorgebarriosmpya.workers.dev/'
+LICENSE_URL='https://vps-licencias.jorgebarriosmpya.workers.dev'
 GRACE_SECS=259200                      # 72h de gracia si el servidor no responde
 LICENSE_CACHE='/etc/vps-license.cache'
 # REPO_RAW: cuando tengas tu GitHub, cambia la URL de abajo o usa
@@ -951,6 +946,7 @@ ghost_bootstrap(){
     touch "$LOG_PANEL" 2>/dev/null
     chmod 640 "$LOG_PANEL" 2>/dev/null || true
     [[ -f /etc/cron.d/ghost-panel-vencidos ]] && grep -q 'GHOST-CRON-V2' /usr/local/bin/vps-cron-diario.sh 2>/dev/null || cron_vencidos_instalar
+    bot_backup_key_migrar                  # la copia de la clave de backup sale de /root/backups (4.1)
     xray_config_perms
     # Asegurar autenticacion por contraseña (muchas imagenes cloud la dejan en "no")
     sshd_asegurar_password_auth
@@ -3551,7 +3547,7 @@ notif_enviar(){
 # con bot_notificar(). El chat del bot siempre se EDITA (nunca mensajes nuevos).
 # ============================================================
 BOT_DIR='/opt/ghost-bot'
-BOT_KEY_COPIA='/root/backups/ghost-bot-backup.key'   # copia de la clave de backup: sobrevive a desinstalar el bot
+BOT_KEY_COPIA='/root/.ghost-panel/ghost-bot-backup.key'   # copia de la clave de backup: sobrevive a desinstalar el bot
 
 bot_conf_get(){
     # bot_conf_get CLAVE -> valor de /opt/ghost-bot/config.env (sin romper por '=')
@@ -3668,7 +3664,7 @@ bot_refresh_helper(){
     return 0
 }
 
-BOT_REV='4.0'   # revision del bot.py embebido (debe coincidir con BOT_REV dentro de bot.py)
+BOT_REV='4.1'   # revision del bot.py embebido (debe coincidir con BOT_REV dentro de bot.py)
 
 bot_autoactualizar(){
     # Si el bot ya esta instalado con un bot.py de otra revision, lo regenera solo (sin pedir token ni
@@ -3737,7 +3733,7 @@ try:
 except ImportError:  # Python < 3.9
     ZoneInfo = None
 
-BOT_REV = "4.0"   # el panel compara esto para actualizar el bot solo
+BOT_REV = "4.1"   # el panel compara esto para actualizar el bot solo
 
 if not hasattr(asyncio, "to_thread"):          # Python 3.8 (Ubuntu 20.04)
     async def _to_thread(fn, *a, **k):
@@ -5269,6 +5265,62 @@ async def alert_loop(app):
         await asyncio.sleep(ALERT_EVERY)
 
 # ------------------------- PANTALLA PERSISTENTE -------------------------
+# ------------------------- MENSAJES CON CONTRASEÑA: se borran -------------------------
+# El bot ya no guarda contraseñas, pero cada ficha con clave queda en el historial de Telegram (en la nube).
+# Por eso esos mensajes llevan «Borrar este mensaje» y se borran solos pasados AUTOBORRAR_MIN minutos.
+try:
+    AUTOBORRAR_MIN = max(0, min(1440, int(str(CONF.get("AUTOBORRAR_MIN", "5")).strip() or 5)))
+except ValueError:
+    AUTOBORRAR_MIN = 5
+SECRETOS_FILE = os.path.join(BOT_DIR, "secretos.json")      # "chat:mensaje" -> instante en que se borra
+SECRETOS = jload(SECRETOS_FILE, {})
+if not isinstance(SECRETOS, dict):
+    SECRETOS = {}
+
+def secretos_guardar():
+    try:
+        jsave(SECRETOS_FILE, SECRETOS)
+    except Exception as e:
+        log.warning("secretos: %s", e)
+
+def secreto_olvidar(chat_id, msg_id):
+    """Ese mensaje ya no muestra la clave (cambió de pantalla o se borró): nada que borrar luego."""
+    if SECRETOS.pop("%s:%s" % (chat_id, msg_id), None) is not None:
+        secretos_guardar()
+
+async def borrar_mensaje(bot, chat_id, msg_id):
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        return True
+    except Exception as e:
+        log.info("no se pudo borrar %s:%s (%s)", chat_id, msg_id, e)
+        return False
+
+async def borrado_loop(app):
+    """Borra los mensajes con clave cuyo plazo venció. El plazo está en disco: sobrevive a reinicios del bot."""
+    while True:
+        try:
+            ahora = time.time()
+            vencidos = [k for k, t in list(SECRETOS.items()) if t <= ahora]
+            for k in vencidos:
+                SECRETOS.pop(k, None)
+                chat_s, _, mid_s = k.partition(":")
+                try:
+                    chat_id, mid = int(chat_s), int(mid_s)
+                except ValueError:
+                    continue
+                await borrar_mensaje(app.bot, chat_id, mid)
+                ud = app.user_data.get(chat_id)
+                if ud is not None and ud.get("wid") == mid:
+                    ud["wid"] = None           # la próxima pantalla se manda como mensaje nuevo
+            if vencidos:
+                secretos_guardar()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("borrado_loop: %s", e)
+        await asyncio.sleep(20)
+
 async def pantalla(update, context, text, rows=None, borra_texto=False):
     """Mantiene UNA pantalla por chat: edita el mensaje persistente.
 
@@ -5283,6 +5335,7 @@ async def pantalla(update, context, text, rows=None, borra_texto=False):
             pass
     wid = context.user_data.get("wid")
     if wid:
+        secreto_olvidar(chat_id, wid)          # al editarlo deja de mostrar la clave anterior
         try:
             await context.bot.edit_message_text(
                 text, chat_id=chat_id, message_id=wid,
@@ -5304,6 +5357,17 @@ async def pantalla(update, context, text, rows=None, borra_texto=False):
         context.user_data["wid"] = m.message_id
     except BadRequest as e:
         log.error("pantalla send: %s", e)
+
+async def pantalla_secreta(update, context, text, rows=None, borra_texto=False):
+    """Pantalla que muestra una CONTRASEÑA: agrega «Borrar este mensaje» y programa su borrado automático."""
+    if AUTOBORRAR_MIN > 0:
+        text += "\n\n🗑 <i>Este mensaje se borra solo en %d min.</i>" % AUTOBORRAR_MIN
+    rows = [list(r) for r in (rows or [])] + [[("🗑 Borrar este mensaje", "delmsg")]]
+    await pantalla(update, context, text, rows, borra_texto=borra_texto)
+    wid = context.user_data.get("wid")
+    if AUTOBORRAR_MIN > 0 and wid:
+        SECRETOS["%s:%s" % (update.effective_chat.id, wid)] = time.time() + AUTOBORRAR_MIN * 60
+        secretos_guardar()
 
 async def show(update, context, fn, *args, pre=None, borra=False):
     """Ejecuta fn(*args) en un hilo (devuelve (texto, filas)) y lo muestra."""
@@ -5481,7 +5545,7 @@ async def route(update, context, data):
             ok, res = await asyncio.to_thread(accion_crear, u, TEST_DIAS, TEST_CONX, TEST_GB, clave)
             if ok:
                 txt = await asyncio.to_thread(ficha_creada, u, clave, TEST_DIAS, TEST_CONX, TEST_GB, res, True)
-                await pantalla(update, context, txt,
+                await pantalla_secreta(update, context, txt,
                                [[("👤 Ficha", "u|" + u)],
                                 [("🧪 Otro test", "cr|test"), ("🔙 Menú", "menu")]])
             else:
@@ -5517,6 +5581,13 @@ async def route(update, context, data):
                    else "🔓 <b>%s desbloqueado</b>\n\n") % esc(u)
             await show(update, context, scr_ficha, u, pre)
     # ---- clave ----
+    elif k == "delmsg":
+        wid = context.user_data.get("wid")                 # on_button deja aqui el mensaje tocado
+        if wid:
+            secreto_olvidar(update.effective_chat.id, wid)
+            await borrar_mensaje(context.bot, update.effective_chat.id, wid)
+            context.user_data["wid"] = None
+        await show(update, context, scr_menu)              # el menú sale como mensaje nuevo
     elif k == "clv":
         if await usuario_ok(arg(1)):
             await show(update, context, scr_clave, arg(1))
@@ -5530,7 +5601,7 @@ async def route(update, context, data):
             ok, msg = await asyncio.to_thread(accion_clave, u, clave)
             if ok:
                 txt = await asyncio.to_thread(ficha_clave, u, clave)
-                await pantalla(update, context, txt, [[("⬅ Ficha", "u|" + u), ("🔙 Menú", "menu")]])
+                await pantalla_secreta(update, context, txt, [[("⬅ Ficha", "u|" + u), ("🔙 Menú", "menu")]])
             else:
                 await show_err(update, context, msg, [[("⬅ Ficha", "u|" + u)]])
     elif k == "clm":
@@ -5551,7 +5622,7 @@ async def route(update, context, data):
             ok, msg = await asyncio.to_thread(accion_clave, u, clave)
             if ok:
                 txt = await asyncio.to_thread(ficha_clave, u, clave)
-                await pantalla(update, context, txt, [[("⬅ Ficha", "u|" + u), ("🔙 Menú", "menu")]])
+                await pantalla_secreta(update, context, txt, [[("⬅ Ficha", "u|" + u), ("🔙 Menú", "menu")]])
             else:
                 await show_err(update, context, msg, [[("⬅ Ficha", "u|" + u)]])
     # ---- límites ----
@@ -5838,8 +5909,8 @@ async def flow_text(update, context, texto, f):
         if ok:
             flow_clear(context)
             txt = await asyncio.to_thread(ficha_clave, u, texto)
-            await pantalla(update, context, txt, [[("⬅ Ficha", "u|" + u), ("🔙 Menú", "menu")]],
-                           borra_texto=True)
+            await pantalla_secreta(update, context, txt, [[("⬅ Ficha", "u|" + u), ("🔙 Menú", "menu")]],
+                                   borra_texto=True)
         else:
             await pantalla(update, context, "⚠️ " + esc(msg), KB_CANCELAR, borra_texto=True)
 
@@ -5851,7 +5922,7 @@ async def crear_ejecutar(update, context, d):
     if ok:
         txt = await asyncio.to_thread(ficha_creada, d["usuario"], d["clave"], d["dias"],
                                       d["maxc"], d["gb"], res)
-        await pantalla(update, context, txt,
+        await pantalla_secreta(update, context, txt,
                        [[("👤 Ficha", "u|" + d["usuario"])],
                         [("➕ Otro", "cr"), ("🔙 Menú", "menu")]])
     else:
@@ -5960,6 +6031,7 @@ async def post_init(app):
     await asyncio.to_thread(purgar_claves_antiguas)
     await asyncio.to_thread(backup_key)
     app.bot_data["alert_task"] = asyncio.create_task(alert_loop(app))
+    app.bot_data["borrado_task"] = asyncio.create_task(borrado_loop(app))
     if os.path.isfile(REBOOT_FLAG):          # venimos de un reinicio pedido desde el bot
         try:
             ts = float(read_file(REBOOT_FLAG, "0") or 0)
@@ -5974,9 +6046,10 @@ async def post_init(app):
                      % (esc(dur), esc(uptime_txt())), [[("🏠 Menú", "menu")]])
 
 async def post_shutdown(app):
-    t = app.bot_data.get("alert_task")
-    if t:
-        t.cancel()
+    for nombre in ("alert_task", "borrado_task"):
+        t = app.bot_data.get(nombre)
+        if t:
+            t.cancel()
 
 # ------------------------- MAIN -------------------------
 def main():
@@ -6151,7 +6224,9 @@ except Exception: print("")' 2>/dev/null)
     [[ "$BCH" =~ ^-?[0-9]{4,}$ ]] || { ERR "ADMIN_CHAT_ID invalido (ej: 123456789)."; PAUSA; return; }
     # 6) config.env (600)
     umask 077
+    local _AB; _AB=$(bot_conf_get AUTOBORRAR_MIN)          # se conserva si ya lo habias cambiado
     printf 'BOT_TOKEN=%s\nADMIN_CHAT_ID=%s\n' "$BTK" "$BCH" > "$BOT_DIR/config.env"
+    [[ "$_AB" =~ ^[0-9]+$ ]] && printf 'AUTOBORRAR_MIN=%s\n' "$_AB" >> "$BOT_DIR/config.env"
     chmod 600 "$BOT_DIR/config.env"
     umask 022
     # 7) bot.py + helper de banners + verificacion de sintaxis
@@ -6272,10 +6347,22 @@ bot_telegram_estado(){
     PAUSA
 }
 
+bot_backup_key_migrar(){
+    # La 4.0 guardaba la copia en /root/backups, junto a los backups: si copiabas esa carpeta a otro sitio, la
+    # clave viajaba con ellos. Ahora vive aparte (/root/.ghost-panel). Mueve la vieja si existe.
+    local VIEJA=/root/backups/ghost-bot-backup.key
+    [[ -f "$VIEJA" ]] || return 0
+    mkdir -p "$(dirname "$BOT_KEY_COPIA")" 2>/dev/null; chmod 700 "$(dirname "$BOT_KEY_COPIA")" 2>/dev/null
+    [[ -s "$BOT_KEY_COPIA" ]] || install -m 600 "$VIEJA" "$BOT_KEY_COPIA" 2>/dev/null
+    [[ -s "$BOT_KEY_COPIA" ]] && rm -f "$VIEJA"
+    rmdir /root/backups 2>/dev/null
+    return 0
+}
 bot_backup_key_respaldar(){
     # Copia (0600) de la clave de backup fuera de /opt/ghost-bot: desinstalar el bot ya no la borra.
+    bot_backup_key_migrar
     [[ -s "$BOT_DIR/backup.key" ]] || return 0
-    mkdir -p /root/backups 2>/dev/null; chmod 700 /root/backups 2>/dev/null
+    mkdir -p "$(dirname "$BOT_KEY_COPIA")" 2>/dev/null; chmod 700 "$(dirname "$BOT_KEY_COPIA")" 2>/dev/null
     cmp -s "$BOT_DIR/backup.key" "$BOT_KEY_COPIA" 2>/dev/null \
         || install -m 600 "$BOT_DIR/backup.key" "$BOT_KEY_COPIA" 2>/dev/null
     return 0
@@ -6284,6 +6371,7 @@ bot_backup_key_respaldar(){
 bot_backup_key_asegurar(){
     # Clave con la que el bot CIFRA los backups antes de mandarlos a Telegram (24 caracteres, 0600).
     # Si el bot se desinstalo antes, se RECUPERA de la copia: los backups viejos siguen abriendose.
+    bot_backup_key_migrar
     mkdir -p "$BOT_DIR" 2>/dev/null
     if [[ ! -s "$BOT_DIR/backup.key" ]]; then
         if [[ -s "$BOT_KEY_COPIA" ]]; then
@@ -6305,6 +6393,7 @@ bot_telegram_ver(){
         "BOT_TOKEN" "$(bot_conf_get BOT_TOKEN)" \
         "ADMIN_CHAT_ID" "$(bot_conf_get ADMIN_CHAT_ID)" \
         "Clave de backup" "$(head -n1 "$BOT_DIR/backup.key" 2>/dev/null)" \
+        "Auto-borrar claves" "$(_ab=$(bot_conf_get AUTOBORRAR_MIN); echo "${_ab:-5} min (AUTOBORRAR_MIN en config.env; 0 = nunca)")" \
         "Config" "$BOT_DIR/config.env"
     INFO "El token y la clave de backup son SECRETOS: no los compartas."
     INFO "El backup que el bot manda por Telegram va CIFRADO con esa clave (la clave nunca viaja por Telegram)."
@@ -8922,7 +9011,7 @@ desinst_protocolos(){
 }
 
 desinstalar_ghost(){
-    local RUN WORD R U L N=0 DO_USERS=0 DO_PROTO=1 DO_BK=0 USERS=()
+    local RUN WORD R U L N=0 DO_USERS=0 DO_PROTO=1 DO_BK=0 DO_KEY=0 USERS=()
     ficha_abrir "🔥 $(T t_du_titulo)" "$ROJO"
     echo "Se eliminará TODO lo que creó Ghost Panel:"
     echo "   · Servicios: limiter, CheckUser, cron de vencidos y de auto-corte, contadores iptables, Bot Telegram"
@@ -8944,10 +9033,16 @@ desinstalar_ghost(){
         read -r -p "  ¿ELIMINAR tambien estos usuarios y sus carpetas /home? (s/N): " R
         [[ "$R" =~ ^[sSyY]$ ]] && DO_USERS=1
     fi
-    if compgen -G "/root/backups/ghost-panel-v*.sh" >/dev/null || compgen -G "/root/backups/backup-*.tar.gz" >/dev/null || [[ -f "$BOT_KEY_COPIA" ]]; then
-        [[ -f "$BOT_KEY_COPIA" ]] && echo -e "  ${AMARILLO}Ojo:${NC} aqui tambien esta la clave de los backups cifrados del bot; sin ella no se abren los de Telegram."
+    if compgen -G "/root/backups/ghost-panel-v*.sh" >/dev/null || compgen -G "/root/backups/backup-*.tar.gz" >/dev/null; then
         read -r -p "  ¿Borrar tambien los respaldos en /root/backups? (s/N): " R
         [[ "$R" =~ ^[sSyY]$ ]] && DO_BK=1
+    fi
+    bot_backup_key_respaldar        # si el bot esta instalado, asegura la copia antes de preguntar
+    if [[ -f "$BOT_KEY_COPIA" ]]; then
+        echo -e "  ${AMARILLO}Clave de backup del bot:${NC} $BOT_KEY_COPIA"
+        echo "  Sin ella no se pueden abrir los backups cifrados que ya tienes en Telegram."
+        read -r -p "  ¿Borrar tambien esa clave? (s/N): " R
+        [[ "$R" =~ ^[sSyY]$ ]] && DO_KEY=1
     fi
     echo
     read -r -p "  $(T t_du_conf) " WORD
@@ -9010,9 +9105,13 @@ desinstalar_ghost(){
         [[ -f "$L" ]] && sed -i '/VPS-JB-AUTOMENU-INICIO/,/VPS-JB-AUTOMENU-FIN/d' "$L"
     done
     if (( DO_BK )); then
-        rm -f /root/backups/ghost-panel-v*.sh /root/backups/backup-*.tar.gz "$BOT_KEY_COPIA"
+        rm -f /root/backups/ghost-panel-v*.sh /root/backups/backup-*.tar.gz
         rmdir /root/backups 2>/dev/null
         OK "Respaldos borrados."
+    fi
+    if (( DO_KEY )); then
+        rm -f "$BOT_KEY_COPIA"; rmdir "$(dirname "$BOT_KEY_COPIA")" 2>/dev/null
+        OK "Clave de backup del bot borrada."
     fi
 
     # 8) Comando global + este script + log (lo ultimo: despues no se escribe nada al log)
