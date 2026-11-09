@@ -3,8 +3,11 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 4.4
+#  Version: 4.5
 #  Versionado: desde 4.0 el numero es X.Y -> 4.0, 4.1 ... 4.9 y despues 5.0 (sin tercer numero).
+#  Cambios 4.5 (temas Hielo/Carbon):
+#    - Emojis del menú Tema con ancho correcto (marco alineado).
+#    - Colores de opciones más vivos en Hielo y Carbon (ya no se ven apagados).
 #  Cambios 4.4 (Optimizar + Mantenimiento):
 #    - Optimizar: BBR/fq + buffers TCP, backlog, somaxconn, dirty ratios, file-max y nofile;
 #      ficha con valores reales activos tras aplicar.
@@ -43,8 +46,8 @@ tema_aplicar(){
         neon)    b=165; ti=51;  ac=46;  TH_LOGO=(201 165 129 51);  TH_ITEMS=(51 201 46 226 39 213 87 208 196) ;;
         matrix)  b=28;  ti=46;  ac=46;  TH_LOGO=(22 28 34 46);     TH_ITEMS=(46 82 40 118 34 120 46 82 196) ;;
         naranja) b=130; ti=214; ac=208; TH_LOGO=(196 202 208 220); TH_ITEMS=(220 208 214 202 226 215 209 180 196) ;;
-        hielo)   b=39;  ti=159; ac=51;  TH_LOGO=(39 45 51 87);     TH_ITEMS=(51 87 123 159 39 75 117 153 196) ;;
-        carbon)  b=240; ti=255; ac=250; TH_LOGO=(238 242 247 255); TH_ITEMS=(255 250 245 240 231 252 248 253 196) ;;
+        hielo)   b=45;  ti=159; ac=87;  TH_LOGO=(39 45 51 87);     TH_ITEMS=(51 87 123 159 81 117 153 195 196) ;;
+        carbon)  b=250; ti=255; ac=255; TH_LOGO=(245 250 252 255); TH_ITEMS=(255 231 252 250 15 255 253 254 196) ;;
         *)       t=fantasma; b=98; ti=141; ac=141; TH_LOGO=(141 105 75 45); TH_ITEMS=(51 201 46 208 226 75 213 120 196) ;;
     esac
     GHOST_THEME="$t"
@@ -61,7 +64,7 @@ tema_guardar(){
     echo "THEME=$1" >> /etc/ghost-panel.conf
 }
 tema_cargar
-GHOST_VER='4.4'
+GHOST_VER='4.5'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -8741,8 +8744,8 @@ menu_tema(){
         m=""; [[ "$GHOST_THEME" == neon ]]     && m=" ✅"; FR_OPT 2 "⚡ Neon · verde/magenta$m" "" ""
         m=""; [[ "$GHOST_THEME" == matrix ]]   && m=" ✅"; FR_OPT 3 "💚 Matrix · verde$m" "" ""
         m=""; [[ "$GHOST_THEME" == naranja ]]  && m=" ✅"; FR_OPT 4 "🧡 Naranja · fuego$m" "" ""
-        m=""; [[ "$GHOST_THEME" == hielo ]]    && m=" ✅"; FR_OPT 5 "❄️  Hielo · azul/cian$m" "" ""
-        m=""; [[ "$GHOST_THEME" == carbon ]]   && m=" ✅"; FR_OPT 6 "⬛ Carbon · monocromo$m" "" ""
+        m=""; [[ "$GHOST_THEME" == hielo ]]    && m=" ✅"; FR_OPT 5 "🧊 Hielo · azul/cian$m" "" ""
+        m=""; [[ "$GHOST_THEME" == carbon ]]   && m=" ✅"; FR_OPT 6 "⚫ Carbon · monocromo$m" "" ""
         FR_OPT 0 "🔙 $(T t_volver)" "" ""
         FR_BOT
         PROMPT
