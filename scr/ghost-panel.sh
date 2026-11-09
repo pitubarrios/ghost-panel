@@ -3,8 +3,16 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 4.2
+#  Version: 4.4
 #  Versionado: desde 4.0 el numero es X.Y -> 4.0, 4.1 ... 4.9 y despues 5.0 (sin tercer numero).
+#  Cambios 4.4 (Optimizar + Mantenimiento):
+#    - Optimizar: BBR/fq + buffers TCP, backlog, somaxconn, dirty ratios, file-max y nofile;
+#      ficha con valores reales activos tras aplicar.
+#    - Mantenimiento: espacio liberado, /var/tmp, journal por tiempo y tamaño, logrotate Ghost,
+#      sync de hora, snap/docker si existen; ficha con resumen.
+#  Cambios 4.3 (temas y menú Sistema):
+#    - Temas nuevos: Hielo (azul/cian) y Carbon (monocromo).
+#    - Diagnóstico solo en el menú principal [8]; se quitó la entrada duplicada de Sistema/Recursos.
 #  Cambios 4.2 (logs, soporte y autodiagnóstico):
 #    - Logs rotados: /etc/logrotate.d/ghost-panel (semanal o al pasar 5 MB, 4 copias comprimidas) para
 #      ghost-panel.log, ghost-bot.log y ghost-cf-tunnel.log. Antes crecían sin límite. Se instala solo.
@@ -26,7 +34,7 @@ NARANJA='\033[38;5;208m'; GRIS='\033[38;5;245m'; MORADO='\033[38;5;141m'
 # ---------- TEMAS DE COLOR ----------
 # tema_aplicar NOMBRE fija: borde del marco, titulo, acento del prompt, degradado del logo (4 tonos)
 # y el color de cada opcion del menu principal (9 tonos, 256 colores). Se guarda como THEME=
-# en /etc/ghost-panel.conf. Temas: fantasma (defecto), neon, matrix, naranja.
+# en /etc/ghost-panel.conf. Temas: fantasma (defecto), neon, matrix, naranja, hielo, carbon.
 GHOST_THEME=fantasma
 TH_LOGO=(); TH_ITEMS=()
 tema_aplicar(){
@@ -35,6 +43,8 @@ tema_aplicar(){
         neon)    b=165; ti=51;  ac=46;  TH_LOGO=(201 165 129 51);  TH_ITEMS=(51 201 46 226 39 213 87 208 196) ;;
         matrix)  b=28;  ti=46;  ac=46;  TH_LOGO=(22 28 34 46);     TH_ITEMS=(46 82 40 118 34 120 46 82 196) ;;
         naranja) b=130; ti=214; ac=208; TH_LOGO=(196 202 208 220); TH_ITEMS=(220 208 214 202 226 215 209 180 196) ;;
+        hielo)   b=39;  ti=159; ac=51;  TH_LOGO=(39 45 51 87);     TH_ITEMS=(51 87 123 159 39 75 117 153 196) ;;
+        carbon)  b=240; ti=255; ac=250; TH_LOGO=(238 242 247 255); TH_ITEMS=(255 250 245 240 231 252 248 253 196) ;;
         *)       t=fantasma; b=98; ti=141; ac=141; TH_LOGO=(141 105 75 45); TH_ITEMS=(51 201 46 208 226 75 213 120 196) ;;
     esac
     GHOST_THEME="$t"
@@ -51,7 +61,7 @@ tema_guardar(){
     echo "THEME=$1" >> /etc/ghost-panel.conf
 }
 tema_cargar
-GHOST_VER='4.2'
+GHOST_VER='4.4'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -1681,16 +1691,54 @@ monitoreo(){
 }
 
 optimizar(){
-    INFO "Aplicando ajustes basicos de rendimiento..."
-    cat > /etc/sysctl.d/99-vps-manager.conf <<EOF
+    # Ajustes persistentes de red/kernel (no limpia disco: eso es Mantenimiento).
+    INFO "Aplicando ajustes de rendimiento (BBR, buffers TCP, límites de sistema)..."
+    cat > /etc/sysctl.d/99-vps-manager.conf <<'EOF'
+# Ghost Panel — optimización de red y memoria
 vm.swappiness=10
 vm.vfs_cache_pressure=50
+vm.dirty_ratio=15
+vm.dirty_background_ratio=5
+fs.file-max=1048576
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
+net.core.rmem_max=16777216
+net.core.wmem_max=16777216
+net.core.netdev_max_backlog=5000
+net.core.somaxconn=1024
+net.ipv4.tcp_rmem=4096 87380 16777216
+net.ipv4.tcp_wmem=4096 65536 16777216
+net.ipv4.tcp_max_syn_backlog=8192
+net.ipv4.tcp_fastopen=3
+net.ipv4.tcp_slow_start_after_idle=0
+net.ipv4.tcp_mtu_probing=1
+net.ipv4.ip_local_port_range=1024 65535
 EOF
-    modprobe tcp_bbr 2>/dev/null; echo "tcp_bbr" > /etc/modules-load.d/bbr.conf 2>/dev/null
-    sysctl --system >/dev/null 2>&1
-    ficha_ok "⚡ OPTIMIZACIÓN APLICADA" "Congestión TCP" "BBR" "Swappiness" "10" "Cache pressure" "50"
+    modprobe tcp_bbr 2>/dev/null || true
+    echo "tcp_bbr" > /etc/modules-load.d/bbr.conf 2>/dev/null || true
+    # Más descriptores abiertos para Xray / SSH / bot (sesión y procesos)
+    mkdir -p /etc/security/limits.d
+    cat > /etc/security/limits.d/99-ghost-panel.conf <<'LEOF'
+* soft nofile 65535
+* hard nofile 65535
+root soft nofile 65535
+root hard nofile 65535
+LEOF
+    sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-vps-manager.conf >/dev/null 2>&1 || true
+    local cong qdisc swap
+    cong=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "?")
+    qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "?")
+    swap=$(sysctl -n vm.swappiness 2>/dev/null || echo "?")
+    ficha_abrir "⚡ OPTIMIZACIÓN APLICADA" "$VERDE"
+    ficha_fila "Congestión TCP" "$cong" "$([[ "$cong" == "bbr" ]] && echo "$VERDE" || echo "$AMARILLO")"
+    ficha_fila "Qdisc" "$qdisc"
+    ficha_fila "Swappiness" "$swap"
+    ficha_fila "Buffers TCP" "16 MB (rmem/wmem)"
+    ficha_fila "Somaxconn" "1024"
+    ficha_fila "file-max / nofile" "1048576 / 65535"
+    ficha_fila "Persistente" "sysctl.d + limits.d + bbr al boot" "$VERDE"
+    ficha_cerrar
+    [[ "$cong" != "bbr" ]] && WARN "BBR no activo (kernel sin módulo o restringido). Se dejó cubic/lo disponible."
     PAUSA
 }
 
@@ -2709,16 +2757,63 @@ eliminar_vencidos(){
 }
 
 mantenimiento(){
+    # Limpieza puntual (no cambia sysctl: eso es Optimizar).
+    local antes despues liberado acciones="" trim_st sync_st
     INFO "Limpiando sistema..."
-    apt autoremove -y >/dev/null 2>&1
-    apt clean >/dev/null 2>&1
-    journalctl --vacuum-time=7d >/dev/null 2>&1
-    find /tmp -type f -mtime +7 -delete 2>/dev/null
+    antes=$(df -PB1 / 2>/dev/null | awk 'NR==2{print $4}')
+    antes=${antes:-0}
+
+    apt autoremove -y >/dev/null 2>&1 && acciones+="apt autoremove, "
+    apt clean >/dev/null 2>&1 && acciones+="apt clean, "
+    journalctl --vacuum-time=7d >/dev/null 2>&1 || true
+    journalctl --vacuum-size=100M >/dev/null 2>&1 || true
+    acciones+="journal 7d/100M, "
+    find /tmp -type f -mtime +7 -delete 2>/dev/null || true
+    find /var/tmp -type f -mtime +7 -delete 2>/dev/null || true
+    acciones+="/tmp+/var/tmp, "
     ls -t /root/backups/*.tar.gz 2>/dev/null | tail -n +4 | xargs -r rm -f
-    find /var/log -name "*.gz" -mtime +7 -delete 2>/dev/null
-    systemctl enable --now fstrim.timer >/dev/null 2>&1
-    INFO "TRIM semanal: $(systemctl is-enabled fstrim.timer 2>/dev/null || echo "no aplica en este entorno")"
-    ficha_ok "🧹 MANTENIMIENTO LISTO" "Limpiado" "paquetes huérfanos, logs, /tmp" "Backups" "se conservan los últimos 3"
+    find /var/log -name "*.gz" -mtime +7 -delete 2>/dev/null || true
+    acciones+="logs.gz, backups×3, "
+    if [[ -f /etc/logrotate.d/ghost-panel ]]; then
+        logrotate -f /etc/logrotate.d/ghost-panel >/dev/null 2>&1 || true
+        acciones+="logrotate Ghost, "
+    fi
+    systemctl enable --now fstrim.timer >/dev/null 2>&1 || true
+    trim_st=$(systemctl is-enabled fstrim.timer 2>/dev/null || echo "n/a")
+    # Hora: intenta sync si hay systemd-timesyncd o chrony/ntp
+    sync_st="sin cambio"
+    if command -v timedatectl >/dev/null 2>&1; then
+        timedatectl set-ntp true >/dev/null 2>&1 && sync_st="NTP activo" || true
+        timedatectl status 2>/dev/null | grep -qi 'synchronized: yes' && sync_st="sincronizada" || true
+    fi
+    # Opcional: solo si el software está instalado
+    if command -v snap >/dev/null 2>&1; then
+        snap list --all 2>/dev/null | awk '/disabled/{print $1, $3}' | while read -r _name _rev; do
+            [[ -n "$_name" && -n "$_rev" ]] && snap remove "$_name" --revision="$_rev" >/dev/null 2>&1 || true
+        done
+        acciones+="snap viejos, "
+    fi
+    if command -v docker >/dev/null 2>&1; then
+        docker system prune -f >/dev/null 2>&1 || true
+        acciones+="docker prune, "
+    fi
+    acciones=${acciones%, }
+
+    despues=$(df -PB1 / 2>/dev/null | awk 'NR==2{print $4}')
+    despues=${despues:-0}
+    if (( despues >= antes )); then
+        liberado=$(fmt_bytes $(( despues - antes )) 2>/dev/null || echo "$(( (despues - antes) / 1048576 )) MB")
+    else
+        liberado="0 B"
+    fi
+
+    ficha_abrir "🧹 MANTENIMIENTO LISTO" "$VERDE"
+    ficha_fila "Espacio liberado" "$liberado" "$VERDE"
+    ficha_fila "Acciones" "${acciones:-limpieza básica}"
+    ficha_fila "Backups" "se conservan los últimos 3"
+    ficha_fila "TRIM semanal" "$trim_st"
+    ficha_fila "Hora del sistema" "$sync_st"
+    ficha_cerrar
     PAUSA
 }
 
@@ -8622,17 +8717,15 @@ menu_sistema(){
         cabecera
         SUBTOP "$(T t_sub_sistema)"
         FR_OPT 1 "$(T t_monitoreo)" 5 "$(T t_mantenimiento)"
-        FR_OPT 2 "$(T t_diagnostico)" 6 "$(T t_hostname)"
-        FR_OPT 3 "$(T t_optimizar)" 7 "$(T t_update)"
-        FR_OPT 4 "$(T t_swap)" 8 "$(T t_reiniciar)"
-        FR_OPT 9 "$(T t_zram)" "" ""
+        FR_OPT 2 "$(T t_optimizar)" 6 "$(T t_hostname)"
+        FR_OPT 3 "$(T t_swap)" 7 "$(T t_update)"
+        FR_OPT 4 "$(T t_zram)" 8 "$(T t_reiniciar)"
         FR_OPT 0 "🔙 $(T t_volver)" "" ""
         FR_BOT
         PROMPT
         case "$OP" in
-            1) monitoreo ;; 2) diagnostico ;; 3) optimizar ;; 4) agregar_swap ;;
+            1) monitoreo ;; 2) optimizar ;; 3) agregar_swap ;; 4) agregar_zram ;;
             5) mantenimiento ;; 6) cambiar_hostname ;; 7) update_sistema ;; 8) reiniciar_vps ;;
-            9) agregar_zram ;;
             0) break ;; *) ERR "$(T t_opinv)"; sleep 1 ;;
         esac
     done
@@ -8648,6 +8741,8 @@ menu_tema(){
         m=""; [[ "$GHOST_THEME" == neon ]]     && m=" ✅"; FR_OPT 2 "⚡ Neon · verde/magenta$m" "" ""
         m=""; [[ "$GHOST_THEME" == matrix ]]   && m=" ✅"; FR_OPT 3 "💚 Matrix · verde$m" "" ""
         m=""; [[ "$GHOST_THEME" == naranja ]]  && m=" ✅"; FR_OPT 4 "🧡 Naranja · fuego$m" "" ""
+        m=""; [[ "$GHOST_THEME" == hielo ]]    && m=" ✅"; FR_OPT 5 "❄️  Hielo · azul/cian$m" "" ""
+        m=""; [[ "$GHOST_THEME" == carbon ]]   && m=" ✅"; FR_OPT 6 "⬛ Carbon · monocromo$m" "" ""
         FR_OPT 0 "🔙 $(T t_volver)" "" ""
         FR_BOT
         PROMPT
@@ -8656,6 +8751,8 @@ menu_tema(){
             2) tema_aplicar neon;     tema_guardar neon ;;
             3) tema_aplicar matrix;   tema_guardar matrix ;;
             4) tema_aplicar naranja;  tema_guardar naranja ;;
+            5) tema_aplicar hielo;    tema_guardar hielo ;;
+            6) tema_aplicar carbon;   tema_guardar carbon ;;
             0) break ;;
             *) ERR "$(T t_opinv)"; sleep 1 ;;
         esac
@@ -9235,7 +9332,7 @@ desinstalar_ghost(){
     fi
 
     # 6) Ajustes del sistema hechos por el panel
-    rm -f /etc/sysctl.d/99-vps-manager.conf /etc/modules-load.d/bbr.conf /etc/fail2ban/jail.local
+    rm -f /etc/sysctl.d/99-vps-manager.conf /etc/modules-load.d/bbr.conf /etc/security/limits.d/99-ghost-panel.conf /etc/fail2ban/jail.local
     systemctl is-active --quiet fail2ban 2>/dev/null && systemctl restart fail2ban 2>/dev/null
     systemctl daemon-reload 2>/dev/null
 
