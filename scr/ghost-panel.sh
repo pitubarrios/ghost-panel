@@ -3,17 +3,16 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 4.1
+#  Version: 4.2
 #  Versionado: desde 4.0 el numero es X.Y -> 4.0, 4.1 ... 4.9 y despues 5.0 (sin tercer numero).
-#  Cambios 4.1 (claves en el chat, clave de backup y changelog):
-#    - Bot: los mensajes con una CONTRASEÑA (usuario creado, test SSH, clave nueva) llevan el boton
-#      «🗑 Borrar este mensaje» y se borran solos a los 5 min (AUTOBORRAR_MIN en /opt/ghost-bot/config.env;
-#      0 = nunca). El plazo se guarda en disco: si el bot se reinicia, igual se borran. Si el mensaje
-#      cambia de pantalla antes, ya no hay clave a la vista y no se borra.
-#    - La copia de la clave de backup salio de /root/backups (si copiabas esa carpeta, la clave viajaba
-#      con los backups) y ahora vive en /root/.ghost-panel/ (0700). Se migra sola al abrir el panel.
-#      Desinstalar el panel pregunta por separado si borrar tambien esa clave (por defecto se conserva).
-#    - CHANGELOG.md: historial completo (el script solo lleva la ultima version).
+#  Cambios 4.2 (logs, soporte y autodiagnóstico):
+#    - Logs rotados: /etc/logrotate.d/ghost-panel (semanal o al pasar 5 MB, 4 copias comprimidas) para
+#      ghost-panel.log, ghost-bot.log y ghost-cf-tunnel.log. Antes crecían sin límite. Se instala solo.
+#    - Bot: los datos del cliente (usuario creado, enviar datos, clave nueva) terminan con la línea
+#      «Soporte» (la misma de Herramientas → Soporte; si la dejas en «0» no aparece).
+#    - Diagnóstico (menú 8): nueva sección «Ghost Panel» que revisa instancia única, versiones del panel
+#      y del bot, Telegram, limiter, crones (incluido que el auto-corte avise al bot), CheckUser, backups,
+#      logrotate, cuentas protegidas y carga, con un resumen ✔ / ! / ✘.
 # ============================================================
 
 set -u
@@ -52,7 +51,7 @@ tema_guardar(){
     echo "THEME=$1" >> /etc/ghost-panel.conf
 }
 tema_cargar
-GHOST_VER='4.1'
+GHOST_VER='4.2'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
@@ -72,7 +71,7 @@ fi
 # Pone aca la URL de tu Worker de Cloudflare.
 # Vacio = el panel se niega a arrancar (modo produccion).
 # Para desarrollo local sin Worker: export GHOST_DEV=1 antes de ejecutar.
-LICENSE_URL='https://vps-licencias.jorgebarriosmpya.workers.dev'
+LICENSE_URL='https://vps-licencias.jorgebarriosmpya.workers.dev/'
 GRACE_SECS=259200                      # 72h de gracia si el servidor no responde
 LICENSE_CACHE='/etc/vps-license.cache'
 # REPO_RAW: cuando tengas tu GitHub, cambia la URL de abajo o usa
@@ -940,6 +939,34 @@ PY
     xray_recargar
 }
 
+LOGROTATE_CONF='/etc/logrotate.d/ghost-panel'
+logrotate_instalar(){
+    # Rota los logs del panel, del bot y del tunel: semanal o al pasar 5 MB, 4 copias comprimidas.
+    # copytruncate: el bot y los scripts siguen escribiendo en el mismo archivo sin perder el descriptor.
+    [[ -d /etc/logrotate.d ]] || return 0
+    local NUEVO
+    NUEVO=$(cat <<'LREOF'
+# GHOST-LOGROTATE-V1
+/var/log/ghost-panel.log /var/log/ghost-bot.log /var/log/ghost-cf-tunnel.log {
+    weekly
+    maxsize 5M
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+LREOF
+)
+    [[ -f "$LOGROTATE_CONF" && "$(cat "$LOGROTATE_CONF" 2>/dev/null)" == "$NUEVO" ]] && return 0
+    if printf '%s\n' "$NUEVO" > "$LOGROTATE_CONF" 2>/dev/null; then
+        chmod 644 "$LOGROTATE_CONF"
+        vps_log INFO "logrotate configurado ($LOGROTATE_CONF)"
+    fi
+    return 0
+}
+
 ghost_bootstrap(){
     mkdir -p "$USUARIOS_DIR" /etc/vps-limits /etc/vps-trafico
     chmod 700 "$USUARIOS_DIR" 2>/dev/null
@@ -947,6 +974,7 @@ ghost_bootstrap(){
     chmod 640 "$LOG_PANEL" 2>/dev/null || true
     [[ -f /etc/cron.d/ghost-panel-vencidos ]] && grep -q 'GHOST-CRON-V2' /usr/local/bin/vps-cron-diario.sh 2>/dev/null || cron_vencidos_instalar
     bot_backup_key_migrar                  # la copia de la clave de backup sale de /root/backups (4.1)
+    logrotate_instalar                     # los logs dejan de crecer sin limite (4.2)
     xray_config_perms
     # Asegurar autenticacion por contraseña (muchas imagenes cloud la dejan en "no")
     sshd_asegurar_password_auth
@@ -2760,7 +2788,114 @@ diagnostico(){
     lastb -i 2>/dev/null | head -5 | grep -q . && echo -e " ${AMARILLO}-${NC} Intentos de login fallidos recientes: conviene Fail2ban (Seguridad -> Fail2ban)."
     [[ $ADV -eq 0 ]] && echo -e " ${VERDE}OK${NC} Sin alertas graves."
     ficha_cerrar
+    diagnostico_panel
     PAUSA
+}
+
+DG_OK=0; DG_AV=0; DG_MAL=0
+dg_ok(){  echo -e " ${VERDE}✔${NC} $*";    DG_OK=$((DG_OK+1)); }
+dg_av(){  echo -e " ${AMARILLO}!${NC} $*"; DG_AV=$((DG_AV+1)); }
+dg_mal(){ echo -e " ${ROJO}✘${NC} $*";     DG_MAL=$((DG_MAL+1)); }
+
+diagnostico_panel(){
+    # Revisa que TODO lo de Ghost Panel este en su version y funcionando (lo que antes se comprobaba a mano).
+    DG_OK=0; DG_AV=0; DG_MAL=0
+    local HU N T U C P F MIN AGE RAW PAN CORES L5
+    ficha_abrir "🧩 GHOST PANEL"
+
+    # --- panel: version e instancia unica
+    dg_ok "Panel v${GHOST_VER}"
+    HU=$(ps -eo pid=,tty=,args= 2>/dev/null | awk -v me=$$ '$2=="?" && $1!=me && $0 ~ /\/usr\/local\/bin\/(ghostpanel|vps|vpsmgr)( |$)/ {n++} END{print n+0}')
+    if (( HU > 0 )); then dg_av "$HU panel(es) huérfano(s): se cierran al abrir otro"
+    else dg_ok "Una sola instancia del panel"; fi
+
+    # --- bot de Telegram
+    if [[ -f "$BOT_DIR/bot.py" ]]; then
+        if grep -q "^BOT_REV = \"${BOT_REV}\"" "$BOT_DIR/bot.py" 2>/dev/null; then dg_ok "Bot al día (rev $BOT_REV)"
+        else dg_av "Bot desactualizado: se actualiza al reabrir el panel"; fi
+        if systemctl is-active --quiet ghost-bot 2>/dev/null; then dg_ok "Servicio del bot activo"
+        else dg_mal "Servicio del bot detenido (Bot Telegram → Iniciar)"; fi
+        T=$(bot_conf_get BOT_TOKEN)
+        if [[ -n "$T" ]]; then
+            U=$(curl -fsS --max-time 4 "https://api.telegram.org/bot${T}/getMe" 2>/dev/null | grep -o '"username":"[^"]*"' | head -1 | cut -d'"' -f4)
+            if [[ -n "$U" ]]; then dg_ok "Telegram responde (@$U)"
+            else dg_av "Telegram no responde (token o conexión)"; fi
+        else dg_mal "El bot no tiene token configurado"; fi
+    else
+        dg_ok "Bot de Telegram: no instalado (opción 9)"
+    fi
+
+    # --- limiter
+    N=$(ls /etc/vps-limits 2>/dev/null | wc -l)
+    if [[ -f /usr/local/bin/vps-limiter.sh ]]; then
+        grep -q 'GHOST-LIMITER-V2' /usr/local/bin/vps-limiter.sh 2>/dev/null || dg_av "Limiter viejo (se actualiza al reabrir el panel)"
+        if systemctl is-active --quiet vps-limiter 2>/dev/null; then dg_ok "Limiter activo (cada $(limiter_intervalo) s, $N con límite)"
+        else dg_av "Limiter detenido (Seguridad → Limiter)"; fi
+    elif (( N > 0 )); then dg_av "$N usuario(s) con límite pero sin limiter (Seguridad)"
+    else dg_ok "Limiter: sin usuarios con límite"; fi
+
+    # --- crones
+    if [[ -f /etc/cron.d/ghost-panel-trafico ]]; then
+        F=/usr/local/bin/vps-trafico-cron.sh; MIN=$(trafico_auto_min)
+        if [[ ! -s "$F" ]]; then dg_mal "Auto-corte activo pero falta $F"
+        elif ! bash -n "$F" 2>/dev/null; then dg_mal "Auto-corte: el script tiene errores (reactívalo)"
+        elif ! grep -q 'tg_destinos' "$F" 2>/dev/null; then dg_av "Auto-corte sin avisos al bot (se corrige al reabrir)"
+        else dg_ok "Auto-corte cada ${MIN:-?} min, con avisos"; fi
+    else
+        dg_ok "Auto-corte de cuota: apagado"
+    fi
+    if [[ -f /etc/cron.d/ghost-panel-vencidos ]]; then
+        if grep -q 'GHOST-CRON-V2' /usr/local/bin/vps-cron-diario.sh 2>/dev/null; then dg_ok "Cron de vencidos al día"
+        else dg_av "Cron de vencidos viejo (se actualiza al reabrir)"; fi
+    else
+        dg_av "Falta el cron diario de vencidos"
+    fi
+
+    # --- checkuser y avisos
+    if [[ -f /etc/vps-checkuser.conf ]]; then
+        P=$(awk -F= '/^PORT=/{print $2}' /etc/vps-checkuser.conf 2>/dev/null)
+        if systemctl is-active --quiet vps-checkuser 2>/dev/null; then dg_ok "CheckUser activo (puerto ${P:-?})"
+        else dg_av "CheckUser detenido (Herramientas → CheckUser)"; fi
+    else
+        dg_ok "CheckUser: no instalado"
+    fi
+    C=$(notif_canales_txt)
+    if [[ -n "$C" ]]; then dg_ok "Avisos de cuota: $C"
+    else dg_av "Sin canal de avisos (Tráfico → Notificaciones)"; fi
+
+    # --- backups y logs
+    command -v openssl >/dev/null 2>&1 || dg_av "Falta openssl: el bot no puede cifrar backups"
+    F=$(ls -t /root/backups/backup-*.tar.gz 2>/dev/null | head -1)
+    if [[ -n "$F" ]]; then
+        AGE=$(( ( $(date +%s) - $(stat -c %Y "$F") ) / 86400 ))
+        if (( AGE <= 30 )); then dg_ok "Último backup: hace $AGE día(s)"
+        else dg_av "Último backup hace $AGE días: conviene uno nuevo"; fi
+    else
+        dg_av "Sin backups locales (Sistema → Backup)"
+    fi
+    if [[ -f "$BOT_DIR/bot.py" ]]; then
+        if [[ -s "$BOT_DIR/backup.key" && -s "$BOT_KEY_COPIA" ]]; then dg_ok "Clave de backup guardada y respaldada"
+        else dg_av "Clave de backup sin copia (abre Bot Telegram)"; fi
+    fi
+    if [[ -f "$LOGROTATE_CONF" ]]; then dg_ok "Logs con rotación automática"
+    elif [[ -d /etc/logrotate.d ]]; then dg_av "Logs sin rotación (se configura al reabrir)"
+    else dg_av "logrotate no instalado: los logs crecen sin límite"; fi
+
+    # --- cuentas, auto-menu, licencia y carga
+    RAW=$(awk -F: '$3>=1000 && $3<=60000 && $1!="nobody"{n++} END{print n+0}' /etc/passwd)
+    PAN=$(usuarios_panel | wc -l)
+    dg_ok "$PAN usuario(s) del panel · $(( RAW - PAN )) cuenta(s) protegida(s)"
+    if grep -q 'VPS-JB-AUTOMENU-INICIO' /root/.bashrc 2>/dev/null; then
+        if grep -q 'GHOST_PANEL_ACTIVO' /root/.bashrc 2>/dev/null; then dg_ok "Auto-menú con protección"
+        else dg_av "Auto-menú sin protección (se actualiza al reabrir)"; fi
+    fi
+    dg_ok "Licencia: ${LICENSE_OK:-?}"
+    CORES=$(nproc 2>/dev/null || echo 1); L5=$(awk '{print $2}' /proc/loadavg)
+    if awk -v l="$L5" -v c="$CORES" 'BEGIN{exit !(l > c*2)}'; then dg_av "Carga alta: $L5 (5 min, $CORES núcleo(s))"
+    else dg_ok "Carga: $L5 (5 min, $CORES núcleo(s))"; fi
+
+    echo -e " ${GRIS}Resumen:${NC} ${VERDE}✔ $DG_OK${NC}  ${AMARILLO}! $DG_AV${NC}  ${ROJO}✘ $DG_MAL${NC}"
+    ficha_cerrar
 }
 
 cambiar_hostname(){
@@ -3664,7 +3799,7 @@ bot_refresh_helper(){
     return 0
 }
 
-BOT_REV='4.1'   # revision del bot.py embebido (debe coincidir con BOT_REV dentro de bot.py)
+BOT_REV='4.2'   # revision del bot.py embebido (debe coincidir con BOT_REV dentro de bot.py)
 
 bot_autoactualizar(){
     # Si el bot ya esta instalado con un bot.py de otra revision, lo regenera solo (sin pedir token ni
@@ -3733,7 +3868,7 @@ try:
 except ImportError:  # Python < 3.9
     ZoneInfo = None
 
-BOT_REV = "4.1"   # el panel compara esto para actualizar el bot solo
+BOT_REV = "4.2"   # el panel compara esto para actualizar el bot solo
 
 if not hasattr(asyncio, "to_thread"):          # Python 3.8 (Ubuntu 20.04)
     async def _to_thread(fn, *a, **k):
@@ -3840,6 +3975,11 @@ def panel_conf_get(key):
     except OSError:
         pass
     return ""
+
+def soporte_txt():
+    """Contacto de soporte del panel (/etc/ghost-panel.conf SUPPORT; «NONE» = sin soporte)."""
+    s = (panel_conf_get("SUPPORT") or "@JorgeBarrios").strip()
+    return "" if s.upper() == "NONE" else s
 
 # ------------------------- JSON (alertas / claves) -------------------------
 def jload(path, default):
@@ -4680,7 +4820,7 @@ def accion_desbloquear_cuota(u):
     log.info("desbloqueado por cuota via bot: %s", u)
 
 # ------------------------- DATOS / FICHAS DE TEXTO -------------------------
-ICONOS = {"Usuario": "👤", "Contraseña": "🔑", "IP": "🌍", "Puerto SSH": "🔌", "Vence": "📅",
+ICONOS = {"Usuario": "👤", "Contraseña": "🔑", "IP": "🌍", "Puerto SSH": "🔌", "Vence": "📅", "Soporte": "🆘",
           "Conexiones": "📶", "Tráfico": "📦", "Sesiones": "🔌", "Cuota": "📦", "Usado": "📈",
           "Validez": "⏳", "Agregado": "➕"}
 
@@ -4713,6 +4853,9 @@ def datos_filas(u, clave, iso):
         filas.append(("Vence", "%s · %s" % (iso, dias_txt(d))))
     filas.append(("Conexiones", str(cx) if cx > 0 else "sin límite"))
     filas.append(("Tráfico", ("%d GB" % g) if g > 0 else "sin límite"))
+    sop = soporte_txt()
+    if sop:
+        filas.append(("Soporte", sop))          # termina los datos del cliente con tu contacto
     return filas
 
 def bloque_datos(u, clave, iso, con_checkuser=False):
@@ -9061,7 +9204,8 @@ desinstalar_ghost(){
     desinst_run checkuser_quitar
     desinst_run bot_telegram_desinstalar_silencioso   # detiene y borra /opt/ghost-bot
     rm -f /usr/local/bin/vps-limiter.sh /usr/local/bin/vps-checkuser.py /usr/local/bin/vps-cron-diario.sh \
-          /etc/cron.d/ghost-panel-vencidos /etc/cron.d/ghost-panel-trafico /usr/local/bin/vps-trafico-cron.sh /run/ghost-trafico.lock /etc/vps-checkuser.conf
+          /etc/cron.d/ghost-panel-vencidos /etc/cron.d/ghost-panel-trafico /usr/local/bin/vps-trafico-cron.sh /run/ghost-trafico.lock /etc/vps-checkuser.conf \
+          /etc/logrotate.d/ghost-panel
 
     # 3) sshd / Dropbear: banner global, bloques Match User, overrides neutralizados
     INFO "Limpiando sshd_config y banners..."
