@@ -3,8 +3,12 @@
 #  GHOST PANEL by Jorge Barrios  -  Administracion de VPS (Ubuntu)
 #  Menu SSH: usuarios, trafico, backup, banner + Webmin
 #  Uso:  sudo bash ghost-panel-pro.sh   |   comando: ghostpanel
-#  Version: 4.5
+#  Version: 4.6
 #  Versionado: desde 4.0 el numero es X.Y -> 4.0, 4.1 ... 4.9 y despues 5.0 (sin tercer numero).
+#  Cambios 4.6 (actualizaciones privadas):
+#    - Auto-actualizar ahora descarga desde el servidor propio, validando la key y el ID de la maquina.
+#    - Se elimina SECRET_KEY y la validacion offline legacy (validar_key).
+#    - Si /etc/ghost-panel.conf tenia UPDATE_URL apuntando al repo viejo, se ignora y se usa la fuente nueva.
 #  Cambios 4.5 (temas Hielo/Carbon):
 #    - Emojis del menú Tema con ancho correcto (marco alineado).
 #    - Colores de opciones más vivos en Hielo y Carbon (ya no se ven apagados).
@@ -64,20 +68,20 @@ tema_guardar(){
     echo "THEME=$1" >> /etc/ghost-panel.conf
 }
 tema_cargar
-GHOST_VER='4.5'
+GHOST_VER='4.6'
 
 # --- LICENCIA / KEY -------------------------------------------
 # Validacion ONLINE obligatoria (Worker de Cloudflare). El enforcement
-# real vive en el servidor de licencias, no aca: SECRET_KEY es legacy
-# (el modo offline esta deshabilitado; ya no se usa para validar).
-SECRET_KEY='Copiaesta**'
+# real vive en el servidor de licencias, no aca.
 KEY_FILE='/etc/vps-manager.key'
 PREFIJO_KEY='VPSJB1'   # prefijo de marca; tambien acepta keys viejas VPSMGR1
-# URL del script en TU repo (para la opcion de auto-update)
-REPO_RAW='https://raw.githubusercontent.com/pitubarrios/ghost-panel/refs/heads/main/scr/ghost-panel.sh'
+# Servidor de actualizaciones (Worker de Cloudflare): solo entrega el script con key + ID validos
+REPO_RAW='https://ghost-update.jorgebarriosmpya.workers.dev/update'
 VPSMGR_DEST=/usr/local/bin/ghostpanel
 if [[ -r /etc/ghost-panel.conf ]]; then
     _u=$(awk -F= '/^UPDATE_URL=/{print substr($0,12); exit}' /etc/ghost-panel.conf)
+    # migracion: un UPDATE_URL viejo apuntando a GitHub ya no sirve, se ignora
+    [[ "$_u" == *githubusercontent.com* || "$_u" == *github.com* ]] && _u=''
     [[ "$_u" =~ ^https?://[^[:space:]]+$ ]] && REPO_RAW="$_u"
 fi
 # --- VALIDACION ONLINE ---
@@ -87,8 +91,7 @@ fi
 LICENSE_URL='https://vps-licencias.jorgebarriosmpya.workers.dev/'
 GRACE_SECS=259200                      # 72h de gracia si el servidor no responde
 LICENSE_CACHE='/etc/vps-license.cache'
-# REPO_RAW: cuando tengas tu GitHub, cambia la URL de abajo o usa
-# /etc/ghost-panel.conf -> UPDATE_URL=https://raw.githubusercontent.com/pitubarrios/ghost-panel/refs/heads/main/scr/ghost-panel.sh
+# REPO_RAW: se puede sobrescribir con /etc/ghost-panel.conf -> UPDATE_URL=https://...
 
 machine_hash(){
     if [[ -f /etc/machine-id ]]; then
@@ -96,28 +99,6 @@ machine_hash(){
     else
         sha256sum /etc/hostname 2>/dev/null | cut -c1-12
     fi
-}
-
-validar_key(){
-    # Uso: validar_key "$KEY"  -> 0 valida / 1 invalida
-    local KEY BODY B64 SIG SIGC PAYLOAD NOMBRE EXP MACH
-    KEY=$(echo "$1" | tr -d '[:space:]')
-    case "$KEY" in ${PREFIJO_KEY}-*|VPSMGR1-*) ;; *) return 1 ;; esac
-    BODY=${KEY#*-}
-    SIG=${BODY##*-}
-    B64=${BODY%-*}
-    [[ -n "$B64" && -n "$SIG" && "$B64" != "$SIG" ]] || return 1
-    SIGC=$(printf '%s' "$B64" | openssl dgst -sha256 -hmac "$SECRET_KEY" 2>/dev/null | awk '{print $NF}' | cut -c1-16 | tr 'a-f' 'A-F')
-    [[ "$SIGC" == "$SIG" ]] || return 1
-    PAYLOAD=$(printf '%s' "$B64" | base64 -d 2>/dev/null) || return 1
-    NOMBRE=${PAYLOAD%%|*}; PAYLOAD=${PAYLOAD#*|}
-    EXP=${PAYLOAD%%|*};  MACH=${PAYLOAD#*|}
-    [[ -n "$NOMBRE" && -n "$EXP" ]] || return 1
-    [[ "$EXP" != "0" && "$(date +%s)" -gt "$EXP" ]] && return 1
-    if [[ -n "$MACH" && "$MACH" != "$(machine_hash)" ]]; then return 1; fi
-    KEY_NOMBRE="$NOMBRE"
-    KEY_EXP="$EXP"
-    return 0
 }
 
 lic_json_str(){
@@ -3058,18 +3039,22 @@ ghost_instalar_script(){
 }
 
 auto_update_descargar(){
-    local TMPF URL
+    local TMPF K CODE
     [[ -n "$REPO_RAW" ]] || { ERR "Fuente sin configurar (opcion 2)."; PAUSA; return; }
-    URL="${REPO_RAW}$([[ "$REPO_RAW" == *\?* ]] && echo '&' || echo '?')cb=$(date +%s)"   # evita cache del CDN
+    command -v curl >/dev/null 2>&1 || { ERR "Falta curl."; PAUSA; return; }
+    K=$(tr -d '[:space:]' < "$KEY_FILE" 2>/dev/null)
+    [[ -n "$K" ]] || { ERR "No hay key activada: activa tu licencia primero."; PAUSA; return; }
     TMPF=$(mktemp /tmp/vpsmgr.XXXXXX) || { ERR "Sin temporal."; PAUSA; return; }
-    INFO "Descargando desde: $REPO_RAW"
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL --max-time 30 -H 'Cache-Control: no-cache' "$URL" -o "$TMPF" 2>/dev/null
-    else
-        wget -q --no-cache -T 30 "$URL" -O "$TMPF" 2>/dev/null
-    fi
-    if [[ -s "$TMPF" ]]; then ghost_instalar_script "$TMPF"
-    else ERR "No se pudo descargar. Revisa la URL (repo publico, enlace raw) y la red."; fi
+    INFO "Buscando actualizacion..."
+    CODE=$(curl -sS -G --max-time 60 -o "$TMPF" -w '%{http_code}' "$REPO_RAW" \
+        --data-urlencode "key=$K" --data-urlencode "id=$(machine_hash)" 2>/dev/null)
+    case "$CODE" in
+        200) if [[ -s "$TMPF" ]]; then ghost_instalar_script "$TMPF"
+             else ERR "El servidor devolvio un archivo vacio."; fi ;;
+        403) ERR "Licencia no valida para actualizar (key invalida, vencida o de otra maquina)." ;;
+        404) ERR "El servidor no tiene el script publicado. Avisa al administrador." ;;
+        *)   ERR "No se pudo descargar (HTTP ${CODE:-sin respuesta}). Revisa la red." ;;
+    esac
     rm -f "$TMPF"
     PAUSA
 }
@@ -3083,14 +3068,14 @@ auto_update(){
         ui_kv "Fuente" "${REPO_RAW:-sin configurar}"
         FR_MID
         FR_OPT 1 "Actualizar desde la fuente" "" ""
-        FR_OPT 2 "Cambiar fuente (URL raw)" "" ""
+        FR_OPT 2 "Cambiar fuente (URL)" "" ""
         FR_OPT 3 "Instalar desde archivo local" "" ""
         FR_OPT 0 "🔙 $(T t_volver)" "" ""
         FR_BOT
         PROMPT
         case "$OP" in
             1) auto_update_descargar ;;
-            2) read -r -p "  URL raw de TU repo (https://...): " U
+            2) read -r -p "  URL del servidor de actualizaciones (https://...): " U
                if [[ "$U" =~ ^https?://[^[:space:]]+$ ]]; then
                    touch /etc/ghost-panel.conf; chmod 600 /etc/ghost-panel.conf
                    sed -i '/^UPDATE_URL=/d' /etc/ghost-panel.conf
